@@ -14,6 +14,7 @@ export interface AvatarTransform {
   isSpeaking?: boolean;
   vrmUrl?: string;
   isCompanion?: boolean; // If true, do not render duplicate avatar
+  controllerType?: 'quest2' | 'quest3';
 }
 
 export class PeerAvatar {
@@ -87,6 +88,7 @@ export class PeerAvatar {
       const ringGeo = new THREE.TorusGeometry(0.028, 0.006, 12, 24);
       const ringMat = new THREE.MeshStandardMaterial({ color: '#a855f7', roughness: 0.3, emissive: '#3b1d6e', emissiveIntensity: 0.4 });
       const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.name = 'ring';
       ring.rotation.x = Math.PI / 2;
       ring.position.set(0, 0.025, 0.02);
       group.add(ring);
@@ -150,11 +152,19 @@ export class PeerAvatar {
     if (this.leftHandMesh && transform.leftHandPosition) {
       this.leftHandMesh.position.set(...transform.leftHandPosition);
       this.leftHandMesh.rotation.set(...(transform.leftHandRotation || [0, 0, 0]));
+      const ring = this.leftHandMesh.getObjectByName('ring');
+      if (ring) {
+        ring.visible = transform.controllerType !== 'quest3';
+      }
     }
 
     if (this.rightHandMesh && transform.rightHandPosition) {
       this.rightHandMesh.position.set(...transform.rightHandPosition);
       this.rightHandMesh.rotation.set(...(transform.rightHandRotation || [0, 0, 0]));
+      const ring = this.rightHandMesh.getObjectByName('ring');
+      if (ring) {
+        ring.visible = transform.controllerType !== 'quest3';
+      }
     }
 
     if (this.vrm) {
@@ -297,6 +307,11 @@ export class AvatarManager {
     const wy = this.worldRoot.position.y;
     const wz = this.worldRoot.position.z;
     const wyaw = this.worldRoot.rotation.y;
+
+    const ua = navigator.userAgent.toLowerCase();
+    const isQuest3 = ua.includes('quest 3') || ua.includes('quest 3s');
+    const controllerType = (controller1 || controller2) ? (isQuest3 ? 'quest3' : 'quest2') : undefined;
+
     return {
       peerId: 'local',
       headPosition: [camera.position.x - wx, camera.position.y - wy, camera.position.z - wz],
@@ -307,7 +322,8 @@ export class AvatarManager {
       rightHandRotation: controller2 ? [controller2.rotation.x, controller2.rotation.y - wyaw, controller2.rotation.z] : undefined,
       isSpeaking,
       vrmUrl: this.localVrmUrl || undefined,
-      isCompanion
+      isCompanion,
+      controllerType
     };
   }
 }

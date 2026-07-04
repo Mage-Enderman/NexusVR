@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-export type AtmospherePreset = 'cyber-nebula' | 'sunset-horizon' | 'studio-neutral' | 'starfield-space' | 'custom-pano';
+export type AtmospherePreset = 'cyber-nebula' | 'sunset-horizon' | 'studio-neutral' | 'starfield-space' | 'custom-pano' | 'passthrough';
 export type GridSizePreset = 'studio-20' | 'standard-60' | 'arena-200';
 export type GridColorPreset = 'cyan' | 'purple' | 'monochrome';
 
@@ -43,11 +43,14 @@ export class EnvironmentManager {
     dirLightIntensity: 1.5,
   };
 
-  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D, ambientLight: THREE.AmbientLight, dirLight: THREE.DirectionalLight) {
+  private renderer: THREE.WebGLRenderer;
+
+  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D, ambientLight: THREE.AmbientLight, dirLight: THREE.DirectionalLight, renderer: THREE.WebGLRenderer) {
     this.scene = scene;
     this.worldRoot = worldRoot;
     this.ambientLight = ambientLight;
     this.dirLight = dirLight;
+    this.renderer = renderer;
 
     this.init();
   }
@@ -136,33 +139,51 @@ export class EnvironmentManager {
     // 2. Atmosphere & Fog
     if (this.starfieldMesh) this.starfieldMesh.visible = false;
     
-    if (atmosphere === 'cyber-nebula') {
-      this.scene.background = new THREE.Color('#0b1329');
+    if (atmosphere === 'passthrough') {
+      this.scene.background = null;
       this.scene.fog = null;
-      this.ambientLight.color.set('#ffffff');
-      this.dirLight.color.set('#00f0ff');
-      if (this.starfieldMesh) this.starfieldMesh.visible = true;
-    } else if (atmosphere === 'sunset-horizon') {
-      this.scene.background = new THREE.Color('#1a0f2e');
-      this.scene.fog = null;
-      this.ambientLight.color.set('#ffd166');
-      this.dirLight.color.set('#ef476f');
-      if (this.starfieldMesh) this.starfieldMesh.visible = true;
-    } else if (atmosphere === 'studio-neutral') {
-      this.scene.background = new THREE.Color('#263238');
-      this.scene.fog = null; // No fog in studio
-      this.ambientLight.color.set('#eceff1');
-      this.dirLight.color.set('#ffffff');
-    } else if (atmosphere === 'starfield-space') {
-      this.scene.background = new THREE.Color('#020408');
-      this.scene.fog = null;
-      this.ambientLight.color.set('#90caf9');
-      this.dirLight.color.set('#ffffff');
-      if (this.starfieldMesh) this.starfieldMesh.visible = true;
-    } else if (atmosphere === 'custom-pano' && this.customSkyboxTexture) {
-      this.scene.background = this.customSkyboxTexture;
-      this.scene.environment = this.customSkyboxTexture;
-      this.scene.fog = null;
+      if (this.renderer) {
+        this.renderer.setClearAlpha(0);
+        const session = this.renderer.xr.getSession();
+        if (session) {
+          (session as any).requestBlendMode?.('alpha-blend').catch((err: any) => {
+            console.warn('Failed to dynamically request alpha-blend mode:', err);
+          });
+        }
+      }
+    } else {
+      if (this.renderer) {
+        this.renderer.setClearAlpha(1);
+      }
+
+      if (atmosphere === 'cyber-nebula') {
+        this.scene.background = new THREE.Color('#0b1329');
+        this.scene.fog = null;
+        this.ambientLight.color.set('#ffffff');
+        this.dirLight.color.set('#00f0ff');
+        if (this.starfieldMesh) this.starfieldMesh.visible = true;
+      } else if (atmosphere === 'sunset-horizon') {
+        this.scene.background = new THREE.Color('#1a0f2e');
+        this.scene.fog = null;
+        this.ambientLight.color.set('#ffd166');
+        this.dirLight.color.set('#ef476f');
+        if (this.starfieldMesh) this.starfieldMesh.visible = true;
+      } else if (atmosphere === 'studio-neutral') {
+        this.scene.background = new THREE.Color('#263238');
+        this.scene.fog = null; // No fog in studio
+        this.ambientLight.color.set('#eceff1');
+        this.dirLight.color.set('#ffffff');
+      } else if (atmosphere === 'starfield-space') {
+        this.scene.background = new THREE.Color('#020408');
+        this.scene.fog = null;
+        this.ambientLight.color.set('#90caf9');
+        this.dirLight.color.set('#ffffff');
+        if (this.starfieldMesh) this.starfieldMesh.visible = true;
+      } else if (atmosphere === 'custom-pano' && this.customSkyboxTexture) {
+        this.scene.background = this.customSkyboxTexture;
+        this.scene.environment = this.customSkyboxTexture;
+        this.scene.fog = null;
+      }
     }
 
     // 3. Grid rebuild if changed.
@@ -177,7 +198,7 @@ export class EnvironmentManager {
       this.gridHelper = null;
     }
 
-    if (gridVisible) {
+    if (gridVisible && atmosphere !== 'passthrough') {
       let size = 60;
       let divisions = 60;
       if (gridSize === 'studio-20') { size = 20; divisions = 20; }
@@ -196,6 +217,7 @@ export class EnvironmentManager {
 
     // 4. Floor mesh scale matching
     if (this.floorMesh) {
+      this.floorMesh.visible = atmosphere !== 'passthrough';
       let size = 100;
       if (gridSize === 'studio-20') size = 40;
       else if (gridSize === 'arena-200') size = 400;

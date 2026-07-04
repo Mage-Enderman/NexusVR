@@ -1224,6 +1224,7 @@ export class VRHUDManager {
       { id: 'sunset-horizon',  name: 'Sunset Twilight', desc: 'Warm orange horizon' },
       { id: 'studio-neutral',  name: 'Studio Bright',   desc: 'Neutral inspection' },
       { id: 'starfield-space', name: 'Deep Starfield',  desc: 'Star particle void' },
+      { id: 'passthrough',     name: 'Mixed Reality',   desc: 'Passthrough (Quest 3)' },
     ];
     const cols = 2;
     const cardW = (w - 100) / 2;
@@ -1246,7 +1247,8 @@ export class VRHUDManager {
     });
 
     // Lighting read-out
-    const lightsY = bodyTop + 50 + 2 * (cardH + 16) + 14;
+    const rowsCount = Math.ceil(presets.length / cols);
+    const lightsY = bodyTop + 50 + rowsCount * (cardH + 16) + 14;
     ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 14px sans-serif';
     ctx.fillText('LIGHTING (read-only in VR)', 40, lightsY);
     ctx.fillStyle = '#94a3b8'; ctx.font = '12px sans-serif';
@@ -1809,14 +1811,14 @@ export class VRHUDManager {
       {
         label: 'WIREFRAME: ' + ((mat0 as THREE.MeshStandardMaterial | null)?.wireframe ? 'ON' : 'OFF'),
         action: 'inspect.toggle:wireframe',
-        on: !!mat0?.wireframe,
+        on: !!(mat0 as any)?.wireframe,
         accent: (mat0 as THREE.MeshStandardMaterial | null)?.wireframe ? '#06b6d4' : '#475569',
         bg: (mat0 as THREE.MeshStandardMaterial | null)?.wireframe ? 'rgba(6,182,212,0.20)' : 'rgba(30,41,59,0.7)',
       },
       {
         label: 'FLAT SHADING: ' + ((mat0 as THREE.MeshStandardMaterial | null)?.flatShading ? 'ON' : 'OFF'),
         action: 'inspect.toggle:flatShading',
-        on: !!mat0?.flatShading,
+        on: !!(mat0 as any)?.flatShading,
         accent: (mat0 as THREE.MeshStandardMaterial | null)?.flatShading ? '#f472b6' : '#475569',
         bg: (mat0 as THREE.MeshStandardMaterial | null)?.flatShading ? 'rgba(244,114,182,0.20)' : 'rgba(30,41,59,0.7)',
       },

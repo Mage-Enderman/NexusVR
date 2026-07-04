@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { VRButton } from 'three/examples/jsm/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/examples/jsm/webxr/XRControllerModelFactory.js';
+import { XRHandModelFactory } from 'three/examples/jsm/webxr/XRHandModelFactory.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { VRInputManager } from './VRInputManager.ts';
 import { SpatialPanelManager } from './SpatialPanelManager.ts';
@@ -108,6 +109,7 @@ export class SceneEngine {
   private fpsTimer = 0;
   private isVRMode = false;
   private vrButtonElement: HTMLElement | null = null;
+  public environmentManager: any = null;
 
   public cameraMode: 'orbit' | 'first-person' = 'first-person';
   public locomotionMode: 'walk' | 'flight' | 'noclip' = 'walk';
@@ -160,7 +162,7 @@ export class SceneEngine {
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
-      alpha: false,
+      alpha: true,
       stencil: false
     });
     this.renderer.setSize(width, height);
@@ -280,7 +282,9 @@ export class SceneEngine {
 
   private setupXR(): void {
     try {
-      this.vrButtonElement = VRButton.createButton(this.renderer);
+      this.vrButtonElement = VRButton.createButton(this.renderer, {
+        optionalFeatures: ['local-floor', 'hand-tracking']
+      });
       this.vrButtonElement.style.display = 'none'; // We can trigger it from our custom React HUD
       document.body.appendChild(this.vrButtonElement);
 
@@ -301,6 +305,29 @@ export class SceneEngine {
       this.controllerGrip2 = this.renderer.xr.getControllerGrip(1);
       this.controllerGrip2.add(controllerModelFactory.createControllerModel(this.controllerGrip2));
       this.scene.add(this.controllerGrip2);
+
+      // Hand Tracking (Quest 3 support)
+      const handModelFactory = new XRHandModelFactory();
+
+      const hand1 = this.renderer.xr.getHand(0);
+      hand1.add(handModelFactory.createHandModel(hand1, 'mesh'));
+      this.scene.add(hand1);
+
+      const hand2 = this.renderer.xr.getHand(1);
+      hand2.add(handModelFactory.createHandModel(hand2, 'mesh'));
+      this.scene.add(hand2);
+
+      // On session start, request the appropriate blend mode for passthrough if enabled
+      this.renderer.xr.addEventListener('sessionstart', () => {
+        const session = this.renderer.xr.getSession();
+        if (session) {
+          if (this.environmentManager?.settings?.atmosphere === 'passthrough') {
+            (session as any).requestBlendMode?.('alpha-blend').catch((err: any) => {
+              console.warn('Failed to set alpha-blend blend mode:', err);
+            });
+          }
+        }
+      });
 
       // Add laser rays to controllers
       const geometry = new THREE.BufferGeometry().setFromPoints([
