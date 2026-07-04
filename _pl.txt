@@ -1,0 +1,63 @@
+L53|function createLoadingPlaceholder(
+L54|  name: string,
+L55|  requesterName: string,
+L56|  position: THREE.Vector3
+L57|): { group: THREE.Group; dispose: () => void } {
+L58|  const group = new THREE.Group();
+L59|  group.position.copy(position);
+L60|
+L61|  // Wireframe cyan icosahedron — pulses scale to read as "loading".
+L62|  const icoGeo = new THREE.IcosahedronGeometry(0.4, 0);
+L63|  const icoMat = new THREE.MeshBasicMaterial({
+L64|    color: 0x00f0ff,
+L65|    wireframe: true,
+L66|    transparent: true,
+L67|    opacity: 0.7,
+L68|  });
+L69|  group.add(new THREE.Mesh(icoGeo, icoMat));
+L70|
+L71|  // Purple glow ring counter-rotation, matches the app's palette.
+L72|  const ringGeo = new THREE.TorusGeometry(0.55, 0.02, 16, 32);
+L73|  const ringMat = new THREE.MeshBasicMaterial({
+L74|    color: 0xa855f7,
+L75|    transparent: true,
+L76|    opacity: 0.65,
+L77|  });
+L78|  const ring = new THREE.Mesh(ringGeo, ringMat);
+L79|  ring.rotation.x = Math.PI / 2;
+L80|  group.add(ring);
+L81|
+L82|  // Floating canvas-textured sprite label: "Loading / <name> / by <>".
+L83|  const canvas = document.createElement('canvas');
+L84|  canvas.width = 512;
+L85|  canvas.height = 128;
+L86|  const ctx = canvas.getContext('2d');
+L87|  if (ctx) {
+L88|    ctx.fillStyle = 'rgba(7, 9, 14, 0.78)';
+L89|    ctx.fillRect(0, 0, canvas.width, canvas.height);
+L90|    ctx.strokeStyle = '#00f0ff';
+L91|    ctx.lineWidth = 4;
+L92|    ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+L93|    ctx.font = 'bold 36px sans-serif';
+L94|    ctx.fillStyle = '#00f0ff';
+L95|    ctx.textAlign = 'center';
+L96|    ctx.textBaseline = 'middle';
+L97|    ctx.fillText('Loading', canvas.width / 2, canvas.height / 2 - 28);
+L98|    ctx.font = 'bold 26px sans-serif';
+L99|    ctx.fillStyle = '#e2e8f0';
+L100|    const maxLen = 26;
+L101|    const displayName = name.length > maxLen ? name.slice(0, maxLen - 1) + '…' : name;
+L102|    ctx.fillText(displayName, canvas.width / 2, canvas.height / 2 + 8);
+L103|    ctx.font = '20px sans-serif';
+L104|    ctx.fillStyle = '#a855f7';
+L105|    ctx.fillText(`by ${requesterName}`, canvas.width / 2, canvas.height / 2 + 44);
+L106|  }
+L107|  const spriteTexture = new THREE.CanvasTexture(canvas);
+L108|  spriteTexture.colorSpace = THREE.SRGBColorSpace;
+L109|  spriteTexture.needsUpdate = true;
+L110|  const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
+L111|  const sprite = new THREE.Sprite(spriteMat);
+L112|  sprite.scale.set(1.6, 0.4, 1);
+L113|  sprite.position.y = 0.9;
+L114|  group.add(sprite);
+L115|

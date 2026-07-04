@@ -5,7 +5,7 @@ import type { AssetType } from '../engine/AssetManager.ts';
 export interface InventoryItem {
   id: string;
   name: string;
-  type: AssetType | 'primitive' | 'tool';
+  type: AssetType | 'primitive' | 'tool' | 'system';
   createdAt: number;
   fileData?: ArrayBuffer;
   url?: string;

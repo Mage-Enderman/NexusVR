@@ -22,6 +22,14 @@ export interface AssetSnapshot {
   fileData?: ArrayBuffer;
   primitiveType?: string;
   isCollidable: boolean;
+  // Optional persistence flag. Mirrors `TransformUpdate.isPersistent`
+  // so an undo'd delete (re-recorded as a fresh spawn) restores the
+  // same persisting-state on the user's mesh via userData, and re-
+  // broadcasts an `AssetSpawnData` envelope containing the bit so peers
+  // re-receiving the redrawn asset see the same flag. Sourced from /
+  // written back to `asset.object3d.userData.isPersistent` to match
+  // the convention the Scene Inspector's checkbox and tree dot use.
+  isPersistent?: boolean;
 }
 
 /** A single undoable action with symmetric undo/redo operations. */

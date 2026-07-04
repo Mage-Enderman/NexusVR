@@ -79,7 +79,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200">
-      <div className="w-full max-w-6xl h-[90vh] sm:h-[85vh] flex flex-col bg-slate-900/90 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden">
+      <div className="w-full max-w-5xl h-[80vh] flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden">
         
         {/* Top Header */}
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
@@ -400,7 +400,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4 pb-6 overflow-y-auto max-h-[calc(85vh-210px)] pr-2">
+                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 gap-2.5 pb-4">
                   {/* Default primitives */}
                   {['cube', 'sphere', 'cylinder', 'torus', 'cone'].map((prim) => (
                     <div
@@ -409,7 +409,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                         if (permissions.canSpawnItems) {
                           onSpawnItem({
                             id: `prim-${prim}`,
-                            name: `Primitive ${prim.toUpperCase()}`,
+                            name: `Primitive (${prim.toUpperCase()})`,
                             type: 'primitive',
                             primitiveType: prim as any,
                             createdAt: Date.now()
@@ -417,51 +417,64 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                           onClose();
                         }
                       }}
-                      className={`p-4 rounded-xl border flex flex-col items-center justify-center gap-2 text-center transition ${
+                      className={`p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1.5 text-center transition ${
                         permissions.canSpawnItems
-                          ? 'bg-slate-800/60 hover:bg-slate-700/80 border-slate-700 hover:border-cyan-500/60 cursor-pointer'
+                          ? 'bg-slate-800/60 hover:bg-slate-700/80 border-slate-700 hover:border-cyan-500/60 cursor-pointer shadow-sm'
                           : 'bg-slate-900/40 border-slate-800 opacity-50 cursor-not-allowed'
                       }`}
                     >
-                      <div className="w-12 h-12 rounded-xl bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300 font-extrabold uppercase text-xs">
-                        {prim}
+                      <div className="w-10 h-10 rounded-lg bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300 font-extrabold uppercase text-[10px]">
+                        {prim.slice(0, 4)}
                       </div>
-                      <span className="text-sm font-bold text-white capitalize">{prim}</span>
-                      <span className="text-[10px] text-cyan-400 font-mono">SHAPE</span>
-                    </div >
+                      <span className="text-xs font-bold text-white capitalize truncate w-full">{prim}</span>
+                      <span className="text-[9px] text-cyan-400 font-mono font-semibold">SHAPE</span>
+                    </div>
                   ))}
 
                   {/* Stored inventory items & tools */}
-                  {inventoryItems.map((item) => (
-                    <div
-                      key={item.id}
-                      onClick={() => {
-                        if (item.type === 'vrm') {
-                          onEquipVrm(item);
-                          onClose();
-                        } else if (item.type === 'tool') {
-                          onSpawnItem(item);
-                          onClose();
-                        } else if (permissions.canSpawnItems) {
-                          onSpawnItem(item);
-                          onClose();
-                        }
-                      }}
-                      className="p-4 rounded-xl bg-slate-800/60 hover:bg-slate-700/80 border border-slate-700 hover:border-emerald-500/60 cursor-pointer flex flex-col items-center justify-center gap-2 text-center transition"
-                    >
-                      <div className={`w-12 h-12 rounded-xl border flex items-center justify-center font-extrabold uppercase text-xs overflow-hidden ${
-                        item.type === 'tool' ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
-                        item.type === 'primitive' ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300' :
-                        'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                      }`}>
-                        {item.previewUrl ? <img src={item.previewUrl} alt="" className="w-full h-full object-cover" /> : (item.toolType || item.primitiveType || item.type)}
+                  {inventoryItems.map((item) => {
+                    const displayName =
+                      item.name === 'Primitive' && item.primitiveType ? `Shape: ${item.primitiveType}` :
+                      item.name === 'Tool' && item.toolType ? `Tool: ${item.toolType}` :
+                      item.name || 'Unnamed Asset';
+
+                    const typeLabel =
+                      item.type === 'vrm' ? 'Avatar' :
+                      item.type === 'tool' ? `${item.toolType || 'Tool'}` :
+                      item.type === 'primitive' ? `${item.primitiveType || 'Shape'}` :
+                      'Asset';
+
+                    return (
+                      <div
+                        key={item.id}
+                        onClick={() => {
+                          if (item.type === 'vrm') {
+                            onEquipVrm(item);
+                            onClose();
+                          } else if (item.type === 'tool') {
+                            onSpawnItem(item);
+                            onClose();
+                          } else if (permissions.canSpawnItems) {
+                            onSpawnItem(item);
+                            onClose();
+                          }
+                        }}
+                        className="p-2.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/80 border border-slate-700 hover:border-emerald-500/60 cursor-pointer flex flex-col items-center justify-center gap-1.5 text-center transition shadow-sm"
+                      >
+                        <div className={`w-10 h-10 rounded-lg border flex items-center justify-center font-extrabold uppercase text-[10px] overflow-hidden ${
+                          item.type === 'tool' ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
+                          item.type === 'primitive' ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300' :
+                          'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                        }`}>
+                          {item.previewUrl ? <img src={item.previewUrl} alt="" className="w-full h-full object-cover" /> : (item.toolType || item.primitiveType || item.type)?.slice(0, 4)}
+                        </div>
+                        <span className="text-xs font-bold text-white truncate w-full" title={displayName}>{displayName}</span>
+                        <span className="text-[9px] text-slate-400 uppercase font-mono font-semibold truncate w-full">
+                          {typeLabel}
+                        </span>
                       </div>
-                      <span className="text-sm font-bold text-white truncate w-full" title={item.name}>{item.name}</span>
-                      <span className="text-[10px] text-slate-400 uppercase font-mono font-semibold">
-                        {item.type === 'vrm' ? 'Equip Avatar' : item.type === 'tool' ? `Tool: ${item.toolType || 'dev'}` : item.type === 'primitive' ? `Shape: ${item.primitiveType || 'cube'}` : 'Spawn Item'}
-                      </span>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}

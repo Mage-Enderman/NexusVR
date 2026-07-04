@@ -1,0 +1,24 @@
+L901|    net.onSpawn((data) => {
+L902|      // If asset is already loaded, skip
+L903|      if (assetManager.assets.has(data.id)) return;
+L904|      
+L905|      const pos = new THREE.Vector3(...data.position);
+L906|      if (data.type === 'primitive' && data.primitiveType) {
+L907|        const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+L908|        prim.object3d.rotation.set(...data.rotation);
+L909|        prim.object3d.scale.set(...data.scale);
+L910|        // Restore the sender's persistent flag onto userData so the
+L911|        // inspector tree's orange-dot indicator and the checkbox state
+L912|        // both reflect what the host had. Skipped when undefined for
+L913|        // backward compat with older senders.
+L914|        if (data.isPersistent !== undefined) {
+L915|          prim.object3d.userData.isPersistent = data.isPersistent;
+L916|        }
+L917|      } else if (data.fileData && data.name) {
+L918|        const blob = new Blob([data.fileData]);
+L919|        // Pass `data.id` as the AssetManager's customId so the local
+L920|        // placeholder (already drawn from this asset's 'pending'
+L921|        // broadcast via onPendingSpawn above) and the actual asset
+L922|        // share the SAME id. registerOnAssetAdded's id-match cleanup
+L923|        // (top of this engine-init effect) then removes the
+L924|        // placeholder the moment this asset resolves — clean

@@ -15,9 +15,20 @@ export interface EnvironmentSettings {
 
 export class EnvironmentManager {
   private scene: THREE.Scene;
+  /**
+   * World-parent for the floor / grid. The grid lives here (not in
+   * `scene`) so VR inverse-treadmill locomotion translates it together
+   * with the floor — without this, the user sees TWO floor grids during
+   * a jump: the worldRoot one drops with the inverse-treadmill while
+   * the scene-attached EnvironmentManager grid stays anchored to the
+   * physical play area, reading as a "copy" of the grid rising with the
+   * player. Mirrors SceneEngine.createFloor()'s choice so behaviour is
+   * identical regardless of which manager rebuilt the grid last.
+   */
+  private worldRoot: THREE.Object3D;
   private ambientLight: THREE.AmbientLight;
   private dirLight: THREE.DirectionalLight;
-  
+
   private floorMesh: THREE.Mesh | null = null;
   private gridHelper: THREE.GridHelper | null = null;
   private starfieldMesh: THREE.Points | null = null;
@@ -32,8 +43,9 @@ export class EnvironmentManager {
     dirLightIntensity: 1.5,
   };
 
-  constructor(scene: THREE.Scene, ambientLight: THREE.AmbientLight, dirLight: THREE.DirectionalLight) {
+  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D, ambientLight: THREE.AmbientLight, dirLight: THREE.DirectionalLight) {
     this.scene = scene;
+    this.worldRoot = worldRoot;
     this.ambientLight = ambientLight;
     this.dirLight = dirLight;
 
@@ -99,7 +111,18 @@ export class EnvironmentManager {
     this.starfieldMesh = new THREE.Points(geometry, material);
     this.starfieldMesh.name = 'WorldStarfield';
     this.starfieldMesh.visible = false;
-    this.scene.add(this.starfieldMesh);
+    // Parented to worldRoot (not scene) so the starfield rotates with
+    // the world when the VR player smooth-turns. Without this, the
+    // stars stay anchored to the player's view while the floor/grid/
+    // assets rotate around them, producing the "skybox stuck to my
+    // face" effect. The starfield is at radius 300-500m, so when the
+    // user walks (inverse-treadmill translates worldRoot) the stars
+    // translate with it — a mild parallax that is negligible in
+    // practice (user typically walks < 100m, stars at 300-500m). The
+    // proper long-term fix for walking would be a real skybox
+    // (CubeTexture on scene.background, always at infinity) but
+    // that's a separate change from the spin fix.
+    this.worldRoot.add(this.starfieldMesh);
   }
 
   public applySettings(newSettings: Partial<EnvironmentSettings>): void {
@@ -142,10 +165,15 @@ export class EnvironmentManager {
       this.scene.fog = null;
     }
 
-    // 3. Grid rebuild if changed
+    // 3. Grid rebuild if changed.
+    // IMPORTANT: grid is parented to worldRoot (NOT scene) so VR inverse-
+    // treadmill locomotion translates it together with the floor. Adding
+    // directly to scene here was the duplicate-grid bug: worldRoot's grid
+    // (from SceneEngine.createFloor) dropped on jump while this grid stayed
+    // fixed to scene, looking like a "copy" rising with the player.
     if (this.gridHelper) {
-      this.scene.remove(this.gridHelper);
-      this.gridHelper.dispose();
+      this.worldRoot.remove(this.gridHelper);
+      this.disposeGridResources();
       this.gridHelper = null;
     }
 
@@ -163,7 +191,7 @@ export class EnvironmentManager {
       this.gridHelper = new THREE.GridHelper(size, divisions, color1, color2);
       this.gridHelper.position.y = 0.01;
       this.gridHelper.name = 'WorldGrid';
-      this.scene.add(this.gridHelper);
+      this.worldRoot.add(this.gridHelper);
     }
 
     // 4. Floor mesh scale matching
@@ -191,13 +219,31 @@ export class EnvironmentManager {
 
   public dispose(): void {
     if (this.gridHelper) {
-      this.scene.remove(this.gridHelper);
-      this.gridHelper.dispose();
+      this.worldRoot.remove(this.gridHelper);
+      this.disposeGridResources();
+      this.gridHelper = null;
     }
     if (this.starfieldMesh) {
-      this.scene.remove(this.starfieldMesh);
+      this.worldRoot.remove(this.starfieldMesh);
       this.starfieldMesh.geometry.dispose();
       (this.starfieldMesh.material as THREE.Material).dispose();
+      this.starfieldMesh = null;
     }
+  }
+
+  /**
+   * Release the GPU resources owned by the current gridHelper. Called
+   * from BOTH `applySettings()`'s rebuild branch (every grid size / color
+   * change) and `dispose()` (full teardown). GridHelper.dispose() alone
+   * only frees the geometry — its two LineBasicMaterials (centre-line
+   * + off-line) would otherwise leak each rebuild.
+   */
+  private disposeGridResources(): void {
+    if (!this.gridHelper) return;
+    const mats = Array.isArray(this.gridHelper.material)
+      ? this.gridHelper.material
+      : [this.gridHelper.material];
+    mats.forEach((m) => m.dispose());
+    this.gridHelper.dispose();
   }
 }

@@ -20,19 +20,30 @@ export class PeerAvatar {
   public peerId: string;
   public group: THREE.Group;
   public headMesh: THREE.Mesh | null = null;
-  public leftHandMesh: THREE.Mesh | null = null;
-  public rightHandMesh: THREE.Mesh | null = null;
+  // Typed as Object3D (not Mesh) so the hand node can be a Group holding
+  // a stylized controller grip + halo ring, not just a single sphere.
+  // The previous purple-sphere representation read as "abstract ball"
+  // on a non-VR viewer — a cylinder-grip-with-ring reads unambiguously
+  // as "VR controller" even when the viewer has no WebXR session and
+  // XRControllerModelFactory cannot resolve the real device model.
+  public leftHandMesh: THREE.Object3D | null = null;
+  public rightHandMesh: THREE.Object3D | null = null;
   public vrm: VRM | null = null;
   public audioSpeakerMesh: THREE.Mesh | null = null;
   public positionalAudio: THREE.PositionalAudio | null = null;
   public isSpeaking = false;
   public vrmUrl: string | null = null;
 
-  constructor(peerId: string, scene: THREE.Scene) {
+  constructor(peerId: string, _scene: THREE.Scene, worldRoot: THREE.Object3D) {
     this.peerId = peerId;
+    // Peer avatars live on worldRoot (not the raw scene) so they ride
+    // along with the local user's simulated motion in VR. Without this
+    // a standing peer would stay at fixed scene coordinates while the
+    // local user "moves" — the peer would appear to teleport relative
+    // to the local viewer on every stick-forward tick.
     this.group = new THREE.Group();
     this.group.name = `Avatar_${peerId}`;
-    scene.add(this.group);
+    worldRoot.add(this.group);
     
     this.createDefaultAvatar();
   }
@@ -53,15 +64,42 @@ export class PeerAvatar {
 
     this.group.add(this.headMesh);
 
+    // Stylized VR controller (replaces the previous purple sphere).
+    // A short cylindrical grip + a purple torus ring at the thumbstick
+    // position reads as a generic controller from any viewing angle, and
+    // uses the same purple as the old sphere so the avatar's color
+    // language stays consistent. No external assets / no async loading
+    // — important because peer avatars are spawned synchronously on
+    // every 'av' envelope arrival and shouldn't block on a fetch.
+    const createControllerMesh = (): THREE.Group => {
+      const group = new THREE.Group();
+      // Grip body — slightly tapered cylinder, rotated to point
+      // forward (the controller's "business end"). Sized to ~12cm to
+      // match a real Quest Touch controller's length.
+      const gripGeo = new THREE.CylinderGeometry(0.022, 0.025, 0.12, 16);
+      const gripMat = new THREE.MeshStandardMaterial({ color: '#2a2a35', roughness: 0.6, metalness: 0.3 });
+      const grip = new THREE.Mesh(gripGeo, gripMat);
+      grip.rotation.x = Math.PI / 2 + 0.25;
+      group.add(grip);
+      // Thumbstick ring — a thin purple torus on top of the grip.
+      // Same #a855f7 as the old sphere, so the avatar still has a
+      // purple accent that pairs with the cyan head.
+      const ringGeo = new THREE.TorusGeometry(0.028, 0.006, 12, 24);
+      const ringMat = new THREE.MeshStandardMaterial({ color: '#a855f7', roughness: 0.3, emissive: '#3b1d6e', emissiveIntensity: 0.4 });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.set(0, 0.025, 0.02);
+      group.add(ring);
+      return group;
+    };
+
     // Left hand
-    const handGeo = new THREE.SphereGeometry(0.08, 16, 16);
-    const handMat = new THREE.MeshStandardMaterial({ color: '#a855f7', roughness: 0.3 });
-    this.leftHandMesh = new THREE.Mesh(handGeo, handMat);
+    this.leftHandMesh = createControllerMesh();
     this.leftHandMesh.position.set(-0.3, -0.3, -0.2);
     this.group.add(this.leftHandMesh);
 
     // Right hand
-    this.rightHandMesh = new THREE.Mesh(handGeo.clone(), handMat.clone());
+    this.rightHandMesh = createControllerMesh();
     this.rightHandMesh.position.set(0.3, -0.3, -0.2);
     this.group.add(this.rightHandMesh);
 
@@ -165,14 +203,16 @@ export class PeerAvatar {
 
 export class AvatarManager {
   private scene: THREE.Scene;
+  private worldRoot: THREE.Object3D;
   private audioListener: THREE.AudioListener;
   private gltfLoader: GLTFLoader;
   public peers: Map<string, PeerAvatar> = new Map();
   public localVrmUrl: string | null = null;
   public localVrm: VRM | null = null;
 
-  constructor(scene: THREE.Scene, camera: THREE.Camera) {
+  constructor(scene: THREE.Scene, camera: THREE.Camera, worldRoot: THREE.Object3D) {
     this.scene = scene;
+    this.worldRoot = worldRoot;
     this.audioListener = new THREE.AudioListener();
     camera.add(this.audioListener);
 
@@ -203,7 +243,7 @@ export class AvatarManager {
   public updatePeerAvatar(transform: AvatarTransform): void {
     let peer = this.peers.get(transform.peerId);
     if (!peer) {
-      peer = new PeerAvatar(transform.peerId, this.scene);
+      peer = new PeerAvatar(transform.peerId, this.scene, this.worldRoot);
       this.peers.set(transform.peerId, peer);
     }
 
@@ -217,7 +257,7 @@ export class AvatarManager {
   public attachPeerAudio(peerId: string, stream: MediaStream): void {
     let peer = this.peers.get(peerId);
     if (!peer) {
-      peer = new PeerAvatar(peerId, this.scene);
+      peer = new PeerAvatar(peerId, this.scene, this.worldRoot);
       this.peers.set(peerId, peer);
     }
     peer.attachAudioStream(stream, this.audioListener);
@@ -232,14 +272,39 @@ export class AvatarManager {
   }
 
   public getLocalTransform(camera: THREE.Camera, controller1?: THREE.Object3D, controller2?: THREE.Object3D, isSpeaking = false, isCompanion = false): AvatarTransform {
+    // VR joystick movement uses the inverse-treadmill: SceneEngine's
+    // updateVRLocomotion() translates worldRoot in the OPPOSITE direction
+    // of intended motion, so the HMD-tracked camera.position never changes
+    // when the user pushes the stick. If we broadcast camera.position
+    // directly, other clients see the VR user's avatar frozen at the HMD
+    // real-world position — only physical HMD movement (which writes to
+    // camera.position) syncs. The fix: subtract worldRoot.position so the
+    // broadcast reflects the VR user's SIMULATED world position, i.e.
+    // "where they would be if they'd walked physically". Similarly for
+    // smooth-turn: worldRoot.rotation.y is incremented by the turn angle,
+    // so the avatar's head Y rotation needs the inverse to face the
+    // right direction in the world frame.
+    //
+    // Desktop mode leaves worldRoot at identity (position 0,0,0,
+    // rotation 0,0,0), so the subtraction is a no-op for desktop users —
+    // the broadcast is unchanged. Only VR mode sees the correction.
+    //
+    // Y-only rotation correction because updateVRSmoothTurn only rotates
+    // around Y; worldRoot.rotation.x/z are always 0. A general quaternion
+    // correction (worldRoot.quaternion.inverse() * camera.quaternion) would
+    // be equivalent here but is overkill for the current Y-only case.
+    const wx = this.worldRoot.position.x;
+    const wy = this.worldRoot.position.y;
+    const wz = this.worldRoot.position.z;
+    const wyaw = this.worldRoot.rotation.y;
     return {
       peerId: 'local',
-      headPosition: [camera.position.x, camera.position.y, camera.position.z],
-      headRotation: [camera.rotation.x, camera.rotation.y, camera.rotation.z],
-      leftHandPosition: controller1 ? [controller1.position.x, controller1.position.y, controller1.position.z] : undefined,
-      leftHandRotation: controller1 ? [controller1.rotation.x, controller1.rotation.y, controller1.rotation.z] : undefined,
-      rightHandPosition: controller2 ? [controller2.position.x, controller2.position.y, controller2.position.z] : undefined,
-      rightHandRotation: controller2 ? [controller2.rotation.x, controller2.rotation.y, controller2.rotation.z] : undefined,
+      headPosition: [camera.position.x - wx, camera.position.y - wy, camera.position.z - wz],
+      headRotation: [camera.rotation.x, camera.rotation.y - wyaw, camera.rotation.z],
+      leftHandPosition: controller1 ? [controller1.position.x - wx, controller1.position.y - wy, controller1.position.z - wz] : undefined,
+      leftHandRotation: controller1 ? [controller1.rotation.x, controller1.rotation.y - wyaw, controller1.rotation.z] : undefined,
+      rightHandPosition: controller2 ? [controller2.position.x - wx, controller2.position.y - wy, controller2.position.z - wz] : undefined,
+      rightHandRotation: controller2 ? [controller2.rotation.x, controller2.rotation.y - wyaw, controller2.rotation.z] : undefined,
       isSpeaking,
       vrmUrl: this.localVrmUrl || undefined,
       isCompanion

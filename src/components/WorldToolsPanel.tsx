@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import * as THREE from 'three';
 import { 
-  Wrench, Palette, Lightbulb, Box, Brush, X, Sliders, Eye, EyeOff, 
-  Trash2, Plus, Sparkles, Check, RefreshCw, Layers, Move, RotateCw, 
+  Wrench, Palette, Lightbulb, Box, Brush, X, Eye, 
+  Trash2, Plus, Sparkles, Move, RotateCw, 
   Maximize2, Zap, Sun, Target
 } from 'lucide-react';
 import type { LoadedAsset } from '../engine/AssetManager.ts';

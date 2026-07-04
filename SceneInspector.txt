@@ -1,0 +1,86 @@
+The Scene Inspector is used to navigate all objects (called slots) in a world to view and edit the properties of any object. The scene inspector will let you modify absolutely anything in your current world. This includes things that could break how you interact with the world, so use caution when changing things that you are not familiar with; especially things on the root slot. You can always quit and come back to reset everything though; you won't break anything permanently unless you save changes to the world, so feel free to experiment.
+Left Pane
+
+    The current root object slot name of the visible hierarchy
+        Prefixed with "Root: "
+    Object root button
+    Root up button
+    Scene hierarchy
+
+Scene Hierarchy:
+
+    Double-trigger-click a slot to select it. The currently selected item's name will be colored yellow. The item will also be selected in the world.
+    Drag a slot using the grip (on desktop grip is the right mouse button) button and release it on top of a different item to move it. This re-parents the dragged item.
+    Dragging a slot with grip can also be used to open a new scene inspector by using the grip button on the controller to grab the slot, and then pressing the trigger.
+    Slots with a filled circle in front of them have no children.
+    Slots with a box with an arrow in front of them have children; click the box to expand the hierarchy of that slot and show that slot's children.
+    Slots with a downward pointing arrow are expanded; click the arrow to collapse.
+    To go up one level in the hierarchy, click the root up button. Note that this does not change the selected slot, you will have to double-trigger-click to change the selection.
+    To navigate to the root of the current object, click the object root button. The root of an object is defined using components.
+    To set the current slot as the base of the visible hierarchy in the inspector, click the set root button. Viewing the hierarchy from the root can cause lag, so this can help with performance. Also, in deep hierarchies the item names can get small and hard to read, and resetting the visible hierarchy will help with that.
+    Orange colored items are not persistent and won't be saved when the world is saved.
+
+
+Right Pane
+
+    Currently selected slot name.
+        Prefixed with "Slot: "
+    Destroy button
+    Destroy preserving assets button
+    Insert parent button
+    Add child button
+    Duplicate button
+    Set root button
+    Slot properties
+    Component list
+    Attach Component button
+
+Slot Properties:
+
+    Slot name
+        The name of the slot. This is what you will see in the world hierarchy.
+        Use the Ø button to null the field.
+    Slot parent
+        The parent of the selected slot.
+        Use the Ø button to set the slot parent to the world root.
+    Slot tag
+        Slot tag is a string variable assigned to every slot.
+        Default is null.
+        Use the Ø button to null the field.
+    Slot active bool
+        Boolean indicating if the selected slot and its children are active.
+        Inactive slots will deactivate most components.
+        Inactive slots and its children will be slightly darker in the world hierarchy.
+    Slot persistent bool
+        Boolean indicating if the selected slot and its children are persistent.
+        If a slot is non-persistent it will not save with the world/item; it will not persist.
+        Non-persistent slots and its children will be orange in the world hierarchy.
+    Slot position
+        float3 value notating its x, y, and z coordinates relative to its parent slot.
+    Slot rotation
+        floatq value notating its euler x, y, and z rotation relative to its parent slot.
+    Slot scale
+        float3 value notating its x, y, and z scale relative to its parent slot.
+    Slot order offset
+    X, Y, and Z coordinate space key
+        X: +Right -Left
+        Y: +Up -Down
+        Z: +Forward -Backward
+    Reset slot TRS buttons
+        Position
+            Reset to (0, 0, 0)
+        Rotation
+            Reset to (0, 0, 0)
+        Scale
+            Reset to (1, 1, 1)
+    Create Pivot At Center button
+        This will create an empty object parent at the center of the selected slot's bounding box.
+    Jump To button
+        This will teleport you near the selected item.
+    Bring To button
+        This will teleport the selected item in front of or near you.
+    Parent Under buttons
+        Local User Space
+            Parent the selected slot under the same slot that your user is parented to.
+        World Root
+            Parent the selected slot under the world root

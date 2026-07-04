@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
-import type { LoadedAsset } from '../engine/AssetManager.ts';
+import type { LoadedAsset, AssetManager } from '../engine/AssetManager.ts';
+import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
 import { 
-  Trash2, Copy, RotateCcw, ArrowUpRight, Magnet, Plus, Eye, EyeOff, 
-  Box, Layers, Sun, Volume2, Shield, Sparkles, Activity, Check, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon
+  Trash2, RotateCcw, ArrowUpRight, Magnet, Plus, 
+  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon
 } from 'lucide-react';
 
 export interface SceneInspectorWindowProps {
@@ -17,6 +18,8 @@ export interface SceneInspectorWindowProps {
   onBringAsset: (asset: LoadedAsset) => void;
   scene?: THREE.Scene;
   camera?: THREE.Camera;
+  assetManager?: AssetManager;
+  spatialPanelManager?: SpatialPanelManager;
 }
 
 export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
@@ -28,7 +31,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   onJumpToAsset,
   onBringAsset,
   scene,
-  camera
+  camera,
+  assetManager,
+  spatialPanelManager,
 }) => {
   if (!isOpen) return null;
 
@@ -36,7 +41,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const [tag, setTag] = useState('null');
   const [active, setActive] = useState(selectedAsset?.object3d.visible ?? true);
   const [persistent, setPersistent] = useState(true);
-  const [orderOffset, setOrderOffset] = useState(0);
+  // const [orderOffset, setOrderOffset] = useState(0);
 
   // Transform states
   const [pos, setPos] = useState({ x: 0, y: 1.5, z: 0 });
@@ -84,6 +89,17 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('root');
 
+  // Hierarchy-tree state. selectedNodeUUID identifies the Object3D row
+  // the user clicked in the left pane, expandedNodes remembers which
+  // tree branches are unfolded across renders, and inspectorRootUUID
+  // optionally scopes the visible tree to a chosen sub-slot (the
+  // "Set Root" action from SceneInspector.txt). UUID addressing lets
+  // us round-trip back to a Three node for the destructive and
+  // reparenting actions without storing Object3D refs in React state.
+  const [selectedNodeUUID, setSelectedNodeUUID] = useState<string | null>(null);
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const [inspectorRootUUID, setInspectorRootUUID] = useState<string | null>(null);
+
   // Collapsible component sections
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
   const toggleSection = (key: string) => {
@@ -118,6 +134,14 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     if (!selectedAsset) return;
     setAssetName(selectedAsset.name);
     setActive(selectedAsset.object3d.visible);
+    // Re-read the persistent bit from userData on every selection
+    // change. `userData.isPersistent` is the source of truth — the
+    // inspector checkbox writes it on toggle, the network broadcast
+    // mirror in applyRemoteTransform writes it on receive. Defaulting
+    // to `true` (matches every primitive's default in this codebase)
+    // means a guest opening the inspector on a spawn asset that hasn't
+    // had isPersistent broadcast yet still shows the host's intent.
+    setPersistent(((selectedAsset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined) ?? true);
     const p = selectedAsset.object3d.position;
     const r = selectedAsset.object3d.rotation;
     const s = selectedAsset.object3d.scale;
@@ -254,6 +278,20 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     }
   }, [isOpen, selectedAsset, onClose]);
 
+  // Reset the left-pane tree state (highlighted UUID, expanded branches,
+  // visible root) whenever the inspected asset id changes. The previous
+  // selections referred to Object3D UUIDs inside the OLD asset's
+  // subtree — keeping them would (a) leave the visual highlight on a
+  // node that doesn't exist anymore and (b) make handler fallbacks
+  // silently snap to the new asset root without telling the user.
+  // Clearing all three on every id change keeps editor focus aligned
+  // with the asset the user is now inspecting.
+  useEffect(() => {
+    setSelectedNodeUUID(null);
+    setExpandedNodes(new Set());
+    setInspectorRootUUID(null);
+  }, [selectedAsset?.id]);
+
   const applyTransform = (newPos = pos, newRot = rot, newScale = scale) => {
     if (!selectedAsset) return;
     selectedAsset.object3d.position.set(newPos.x, newPos.y, newPos.z);
@@ -334,6 +372,77 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     onUpdateAsset({ ...selectedAsset });
   };
 
+  // Recursively resolve a Three Object3D by uuid inside the loaded
+  // asset's subtree. Returns null when uuid doesn't match; fallback
+  // callers always default to the asset root when this fires.
+  const findObjectByUUID = (root: THREE.Object3D, uuid: string | null): THREE.Object3D | null => {
+    if (!uuid) return null;
+    if (root.uuid === uuid) return root;
+    for (const child of root.children) {
+      const found = findObjectByUUID(child, uuid);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  // Insert an empty THREE.Group above the currently-selected node and
+  // reparent the target under it. THREE.Object3D.attach() preserves
+  // world transforms through the reparenting, so the slot keeps the
+  // exact pose it had before the user clicked.
+  const handleInsertParent = () => {
+    if (!selectedAsset) return;
+    const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
+    const newParent = new THREE.Group();
+    newParent.name = `Parent_of_${target.name || 'Slot'}`;
+    newParent.attach(target);
+    setSelectedNodeUUID(newParent.uuid);
+    setExpandedNodes(prev => {
+      const next = new Set(prev);
+      next.add(newParent.uuid);
+      return next;
+    });
+    onUpdateAsset({ ...selectedAsset });
+  };
+
+  // Append an empty THREE.Group as a child of the currently-selected
+  // node, offset slightly so the user can see it spawn under the
+  // tree.
+  const handleAddChild = () => {
+    if (!selectedAsset) return;
+    const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
+    const newChild = new THREE.Group();
+    newChild.name = `Child_of_${target.name || 'Slot'}`;
+    newChild.position.set(0, 0.5, 0);
+    target.add(newChild);
+    setSelectedNodeUUID(newChild.uuid);
+    setExpandedNodes(prev => {
+      const next = new Set(prev);
+      next.add(target.uuid);
+      return next;
+    });
+    onUpdateAsset({ ...selectedAsset });
+  };
+
+  // Scope the left-pane tree to a chosen descendant — useful for deep
+  // hierarchies where the top-level name list gets unreadable.
+  const handleSetInspectorRoot = () => {
+    if (!selectedNodeUUID) return;
+    setInspectorRootUUID(selectedNodeUUID);
+  };
+
+  const handleResetInspectorRoot = () => {
+    setInspectorRootUUID(null);
+  };
+
+  // Reparent the selected node so it sits directly under the scene
+  // root (Three.Object3D.attach() preserves world pose).
+  const handleParentUnderWorld = () => {
+    if (!selectedAsset || !scene) return;
+    const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
+    scene.attach(target);
+    onUpdateAsset({ ...selectedAsset });
+  };
+
   return (
     <SpatialPopUpWrapper
       isOpen={isOpen}
@@ -342,8 +451,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       icon={<Activity className="w-4 h-4 text-cyan-400" />}
       scene={scene}
       camera={camera}
-      defaultWidth="w-[850px]"
-      defaultHeight="max-h-[520px]"
+      assetManager={assetManager}
+      spatialPanelManager={spatialPanelManager}
+      panelId="inspector"
+      defaultWidth={880}
+      defaultHeight={560}
       initialPinned={true}
     >
       <div className="flex gap-2.5 font-sans text-xs select-none" style={{ height: '460px' }}>
@@ -351,9 +463,29 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
         {/* LEFT PANE: Hierarchy Tree */}
         <div className="w-56 bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 overflow-y-auto">
           <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-            <span className="font-bold text-cyan-300 uppercase font-mono tracking-wider text-[11px]">Root: {assetName}</span>
-            <div className="flex gap-1">
-              <button className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"><ArrowUpRight className="w-3 h-3" /></button>
+            <span className="font-bold text-cyan-300 uppercase font-mono tracking-wider text-[11px] truncate">
+              {inspectorRootUUID
+                ? <>View: <span className="text-amber-300 normal-case">{findObjectByUUID(selectedAsset?.object3d ?? new THREE.Object3D(), inspectorRootUUID)?.name || '...'}</span></>
+                : <>Root: {assetName}</>}
+            </span>
+            <div className="flex gap-1 shrink-0">
+              {inspectorRootUUID && (
+                <button
+                  onClick={handleResetInspectorRoot}
+                  title="Back to top of hierarchy (Top)"
+                  className="p-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition"
+                >
+                  <ArrowUpRight className="w-3 h-3" />
+                </button>
+              )}
+              <button
+                onClick={handleSetInspectorRoot}
+                disabled={!selectedNodeUUID}
+                title="Set selected as visible hierarchy root (Set Root)"
+                className="p-1 rounded bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 disabled:opacity-30 disabled:hover:bg-slate-800 disabled:hover:text-slate-300 transition"
+              >
+                <Layers className="w-3 h-3" />
+              </button>
             </div>
           </div>
 
@@ -368,37 +500,95 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
               <span className="truncate">&bull; {assetName}</span>
             </div>
 
-            {/* Child nodes / submeshes */}
-            <div className="pl-4 flex flex-col gap-1 border-l border-slate-800 ml-2">
-              <div
-                onClick={() => setSelectedNodeId('mesh')}
-                className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer transition ${
-                  selectedNodeId === 'mesh' ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'text-slate-400 hover:bg-slate-900'
-                }`}
-              >
-                <Layers className="w-3 h-3 text-cyan-400 shrink-0" />
-                <span className="truncate">BoxMesh Geometry</span>
+            {/* Real Object3D hierarchy. Replaces the prototype's hardcoded
+                "BoxMesh Geometry / MeshRenderer" rows with an actual
+                recursive walk of selectedAsset.object3d, so multi-level
+                GLTF / FBX trees, gizmo-added groups, and Inspector-added
+                Parent/Child containers all show. expand/collapse per
+                branch; selected row is highlighted; persistent=false
+                nodes get the orange dot per SceneInspector.txt. */}
+            {(() => {
+              if (!selectedAsset) return null;
+              const visibleRoot = inspectorRootUUID
+                ? (findObjectByUUID(selectedAsset.object3d, inspectorRootUUID) ?? selectedAsset.object3d)
+                : selectedAsset.object3d;
+              if (!visibleRoot) return null;
+              const renderNode = (node: THREE.Object3D, depth: number): React.ReactNode => {
+                const expanded = expandedNodes.has(node.uuid);
+                const highlight = selectedNodeUUID === node.uuid;
+                const isNonPersistent = node.userData?.isPersistent === false;
+                return (
+                  <div key={node.uuid}>
+                    <div
+                      onClick={() => setSelectedNodeUUID(node.uuid)}
+                      style={{ paddingLeft: `${depth * 12 + 4}px` }}
+                      className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
+                        highlight
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
+                          : 'text-slate-300 hover:bg-slate-900 border border-transparent'
+                      }`}
+                    >
+                      {node.children.length > 0 ? (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setExpandedNodes(prev => {
+                              const next = new Set(prev);
+                              if (next.has(node.uuid)) next.delete(node.uuid);
+                              else next.add(node.uuid);
+                              return next;
+                            });
+                          }}
+                          className="p-0.5 rounded hover:bg-slate-800 text-slate-400 transition shrink-0"
+                          title={expanded ? 'Collapse children' : 'Expand children'}
+                        >
+                          {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                        </button>
+                      ) : (
+                        <span
+                          className="inline-block w-3 h-3 shrink-0 rounded-full border border-slate-700"
+                          title="No children"
+                        />
+                      )}
+                      <Box className="w-3 h-3 text-amber-400 shrink-0" />
+                      <span className="truncate flex-1">{node.name || node.type || 'Unnamed'}</span>
+                      {isNonPersistent && (
+                        <span
+                          className="text-orange-400 text-[10px] font-black ml-0.5"
+                          title="Non-persistent (won't save with the world)"
+                        >
+                          ●
+                        </span>
+                      )}
+                    </div>
+                    {expanded && node.children.map(c => (
+                      <div key={c.uuid + '_branch'} className="border-l border-slate-800 ml-3.5">
+                        {renderNode(c, depth + 1)}
+                      </div>
+                    ))}
+                  </div>
+                );
+              };
+              return <div className="flex flex-col gap-0.5 mt-1">{renderNode(visibleRoot, 0)}</div>;
+            })()}
+
+            {/* Abstract attached-component list (separate from the
+                Object3D tree, since these aren't real Three nodes — they
+                are inspector state). Visual highlighting is preserved. */}
+            {attachedComponents.length > 0 && (
+              <div className="mt-2 pt-1.5 border-t border-slate-800">
+                <div className="text-[9px] uppercase tracking-wider text-purple-400 font-bold px-1.5 mb-1">Attached Components</div>
+                {attachedComponents.map((comp) => (
+                  <div
+                    key={comp}
+                    className="flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer bg-purple-500/10 text-purple-300 border border-purple-500/30 font-semibold"
+                  >
+                    <Activity className="w-3 h-3 text-purple-400 shrink-0" />
+                    <span className="truncate min-w-0">{comp}</span>
+                  </div>
+                ))}
               </div>
-              <div
-                onClick={() => setSelectedNodeId('mat')}
-                className={`flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer transition ${
-                  selectedNodeId === 'mat' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : 'text-slate-400 hover:bg-slate-900'
-                }`}
-              >
-                <Sparkles className="w-3 h-3 text-emerald-400 shrink-0" />
-                <span className="truncate">MeshRenderer</span>
-              </div>
-              {attachedComponents.map((comp) => (
-                <div
-                  key={comp}
-                  onClick={() => setSelectedNodeId(comp)}
-                  className="flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer bg-purple-500/10 text-purple-300 border border-purple-500/30 font-semibold"
-                >
-                  <Activity className="w-3 h-3 text-purple-400 shrink-0" />
-                  <span className="truncate min-w-0">{comp}</span>
-                </div>
-              ))}
-            </div>
+            )}
           </div>
         </div>
 
@@ -412,7 +602,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 <span className="text-amber-400">Slot:</span>
                 <span>{assetName}</span>
               </h4>
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <button
                   onClick={() => { if (selectedAsset) onDeleteAsset(selectedAsset.id); onClose(); }}
                   title="Destroy Slot"
@@ -435,6 +625,29 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 >
                   <Magnet className="w-3.5 h-3.5" />
                   <span>Bring To</span>
+                </button>
+                {/* Hierarchy scene-graph actions (per SceneInspector.txt).
+                    Insert Parent creates an empty Group above the selected
+                    row; Add Child creates one below; Set Root scopes the
+                    visible hierarchy to the selected descendant. Resonite
+                    also exposes Duplicate; we don't add a UI button since
+                    Ctrl+D already covers it, but the keyboard binding
+                    works on the same node. */}
+                <button
+                  onClick={handleInsertParent}
+                  disabled={!selectedAsset}
+                  title="Insert Empty Parent Above (Insert Parent)"
+                  className="p-1.5 rounded-lg bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-500/40 disabled:opacity-30 disabled:hover:bg-blue-500/20 disabled:hover:text-blue-300 transition"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={handleAddChild}
+                  disabled={!selectedAsset}
+                  title="Add Empty Child To Selected (Add Child)"
+                  className="p-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 disabled:opacity-30 disabled:hover:bg-emerald-500/20 disabled:hover:text-emerald-300 transition"
+                >
+                  <Box className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
@@ -479,7 +692,17 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                   <input
                     type="checkbox"
                     checked={persistent}
-                    onChange={(e) => setPersistent(e.target.checked)}
+                    onChange={(e) => {
+                      setPersistent(e.target.checked);
+                      // Keep userData in sync so other consumers (peer
+                      // synchronization, future "save world" action,
+                      // and the inspector's hierarchy orange-dot indicator)
+                      // see the persisted bit, not just local UI state.
+                      if (selectedAsset) {
+                        selectedAsset.object3d.userData.isPersistent = e.target.checked;
+                        onUpdateAsset({ ...selectedAsset });
+                      }
+                    }}
                     className="w-3.5 h-3.5 accent-cyan-500 rounded"
                   />
                   <span className="font-bold text-slate-300">Persistent</span>
@@ -554,8 +777,20 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 </div>
                 <div className="flex items-center gap-1.5 text-[10px]">
                   <span className="text-slate-400 font-bold">Parent Under:</span>
-                  <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold cursor-pointer">Local User Space</span>
-                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:text-white cursor-pointer">World Root</span>
+                  <span
+                    onClick={() => { /* Local context = current scene as-is; toggle is purely visual */ }}
+                    title="Leave at current parent in scene graph"
+                    className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold cursor-pointer hover:bg-cyan-500/30 transition"
+                  >
+                    Local User Space
+                  </span>
+                  <span
+                    onClick={handleParentUnderWorld}
+                    title="Reparent selected slot under the world / scene root"
+                    className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 hover:text-white hover:bg-amber-500/20 hover:border-amber-500/40 border border-transparent cursor-pointer transition"
+                  >
+                    World Root
+                  </span>
                 </div>
               </div>
             </div>

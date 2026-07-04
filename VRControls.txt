@@ -1,0 +1,8 @@
+X button - Open/Close Dash (Left controller)
+Trigger - Primary (Also toggles laser)
+Laser should determine if the user can interact/grab something at a distance
+If the laser is disabled they should have to intersect their hand/controller with the object to grab it if that makes sense
+Grip - Grab
+Y button - Context menu
+Thumbstick - Move/rotate (Press to jump/secondary)
+Thumbstick extra info, Left joystick for movement, Right for turning.

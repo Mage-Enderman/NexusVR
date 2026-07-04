@@ -1,5 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Upload, FileBox, Image as ImageIcon, Video, User, Link2, Sparkles, Sliders, ArrowRight } from 'lucide-react';
+import * as THREE from 'three';
+import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
+import type { AssetManager } from '../engine/AssetManager.ts';
+import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
+import { Upload, FileBox, Image as ImageIcon, Video, User, Link2, Sliders, ArrowRight } from 'lucide-react';
 
 export interface ImportConfig {
   file?: File;
@@ -27,12 +31,20 @@ interface AssetImportDialogProps {
   initialFile?: File | null;
   onImport: (config: ImportConfig) => Promise<void>;
   onClose: () => void;
+  scene?: THREE.Scene;
+  camera?: THREE.Camera;
+  assetManager?: AssetManager;
+  spatialPanelManager?: SpatialPanelManager;
 }
 
 export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   initialFile,
   onImport,
   onClose,
+  scene,
+  camera,
+  assetManager,
+  spatialPanelManager,
 }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(initialFile || null);
   const [urlInput, setUrlInput] = useState<string>('');
@@ -123,30 +135,25 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const category = getFileCategory();
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <SpatialPopUpWrapper
+      isOpen={true}
+      onClose={onClose}
+      title="Import & Customize Asset"
+      icon={<FileBox className="w-4 h-4 text-purple-400" />}
+      scene={scene}
+      camera={camera}
+      assetManager={assetManager}
+      spatialPanelManager={spatialPanelManager}
+      panelId="import"
+      defaultWidth={500}
+      defaultHeight={560}
+      initialPinned={true}
+    >
       <div
-        className="modal-content glass-panel w-[90vw] max-h-[85vh] flex flex-col p-5"
+        className="w-full flex flex-col p-3 bg-slate-950/95 text-white overflow-hidden font-sans text-xs select-none"
         onClick={(e) => e.stopPropagation()}
+        style={{ height: '440px', maxHeight: '72vh' }}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-white/10 pb-3 mb-3 shrink-0">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-purple-500/20 text-purple-400 border border-purple-500/30">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-white">Import & Customize Asset</h2>
-              <p className="text-[11px] text-slate-400">Configure spawn, scale, shading, and storage before importing.</p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            title="Close"
-            className="btn-icon btn-glass hover:text-rose-400"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
 
         {/* Scrollable body — wraps the existing inner content (tabs, input
             area, category options, footer). The outer modal-content stays
@@ -462,6 +469,6 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
         </div>
         </div>
       </div>
-    </div>
+    </SpatialPopUpWrapper>
   );
 };

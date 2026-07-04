@@ -26,6 +26,17 @@ export interface LoadedAsset {
 
 export class AssetManager {
   private scene: THREE.Scene;
+  /**
+   * Parent for spawned objects. In the SceneEngine VR-locomotion
+   * pattern every world-bound asset lives under `worldRoot` so the
+   * engine's inverse-treadmill translation carries the asset along
+   * with the simulation. Desktop modes leave worldRoot at identity,
+   * so this is visually equivalent to the previous `scene.add(obj)`.
+   * Kept separate from `scene` because some operations (skybox BG,
+   * scene environment) target the actual THREE.Scene, not the
+   * worldRoot group.
+   */
+  private worldRoot: THREE.Object3D;
   private gltfLoader: GLTFLoader;
   private objLoader: OBJLoader;
   private fbxLoader: FBXLoader;
@@ -40,9 +51,21 @@ export class AssetManager {
   public assets: Map<string, LoadedAsset> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
   private onAssetRemovedCallbacks: Set<(id: string) => void> = new Set();
+  // In-progress import dedup. Concurrent calls to `importFile` /
+  // `importFromUrl` with the same customId return the same Promise
+  // instead of each starting their own async work, so we never end up
+  // calling `worldRoot.add(asset.object3d)` twice for the same id.
+  // Without this, two near-simultaneous `'spawn'` envelopes for the
+  // same id race past the Map-based `assets.has(id)` short-circuit
+  // (the Map isn't populated until either import's promise resolves)
+  // and each one independently does `worldRoot.add(...)` plus its own
+  // `onAssetAdded` callback fire, which then broadcasts ANOTHER
+  // `'spawn'` envelope — a visible duplicate mesh + a fan-out loop.
+  private inProgressImports: Map<string, Promise<LoadedAsset | null>> = new Map();
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D) {
     this.scene = scene;
+    this.worldRoot = worldRoot;
     this.gltfLoader = new GLTFLoader();
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
@@ -121,11 +144,48 @@ export class AssetManager {
     return () => this.onAssetRemovedCallbacks.delete(cb);
   }
 
-  public async importFile(file: File, position = new THREE.Vector3(0, 1.5, 0), config?: ImportConfig): Promise<LoadedAsset | null> {
+  /**
+   * Returns true if there's an in-flight `importFile` / `importFromUrl`
+   * for the given id that hasn't yet populated `assets` or fired its
+   * `onAssetAdded` callbacks. App.tsx's `net.onSpawn` and
+   * `net.onSyncResp` consult this alongside `assets.has(id)` to
+   * short-circuit BOTH the already-loaded case AND the mid-import
+   * case, which closes the race window where two duplicate listeners
+   * see the Map empty before either's importFile promise resolves.
+   */
+  public isImporting(id: string): boolean {
+    return this.inProgressImports.has(id);
+  }
+
+  public async importFile(file: File, position = new THREE.Vector3(0, 1.5, 0), config?: ImportConfig, customId?: string): Promise<LoadedAsset | null> {
+    // Resolve the id BEFORE any async work so two near-simultaneous
+    // calls with the same customId hit the dedup short-circuit
+    // immediately — otherwise both would each reach
+    // `await file.arrayBuffer()` before either registers an
+    // in-progress Promise, and each would proceed into its own
+    // loadGLB + worldRoot.add + onAssetAdded → broadcastSpawn chain.
+    // `customId` lets callers reserve a stable id BEFORE awaiting so a
+    // pending-spawn placeholder mesh (drawn from a 'pending' network
+    // broadcast) and the eventual asset share the same id. Without
+    // this, the placeholder would have to be reconciled via a
+    // separate tempId → assetId mapping at network-sync time. Falls
+    // back to the existing random id scheme when unspecified.
+    const id = customId ?? `asset-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const inFlight = this.inProgressImports.get(id);
+    if (inFlight) return inFlight;
+    const promise = this._loadFile(file, position, config, id);
+    this.inProgressImports.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inProgressImports.delete(id);
+    }
+  }
+
+  private async _loadFile(file: File, position: THREE.Vector3, config: ImportConfig | undefined, id: string): Promise<LoadedAsset | null> {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     const arrayBuffer = await file.arrayBuffer();
     const blobUrl = URL.createObjectURL(file);
-    const id = `asset-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
     let asset: LoadedAsset | null = null;
 
@@ -147,7 +207,7 @@ export class AssetManager {
     }
 
     if (asset) {
-      this.scene.add(asset.object3d);
+      this.worldRoot.add(asset.object3d);
       this.assets.set(asset.id, asset);
       for (const cb of this.onAssetAddedCallbacks) cb(asset);
     }
@@ -155,10 +215,26 @@ export class AssetManager {
     return asset;
   }
 
-  public async importFromUrl(url: string, position = new THREE.Vector3(0, 1.5, 0), config?: ImportConfig): Promise<LoadedAsset | null> {
+  public async importFromUrl(url: string, position = new THREE.Vector3(0, 1.5, 0), config?: ImportConfig, customId?: string): Promise<LoadedAsset | null> {
+    // Mirror of `importFile`'s pre-await id + dedup. Same race
+    // description applies: two `'spawn'` envelopes for the same id
+    // would otherwise each start an independent fetch + GLB parse +
+    // worldRoot.add.
+    const id = customId ?? `remote-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const inFlight = this.inProgressImports.get(id);
+    if (inFlight) return inFlight;
+    const promise = this._loadFromUrl(url, position, config, id);
+    this.inProgressImports.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inProgressImports.delete(id);
+    }
+  }
+
+  private async _loadFromUrl(url: string, position: THREE.Vector3, config: ImportConfig | undefined, id: string): Promise<LoadedAsset | null> {
     const ext = url.split('.').pop()?.split('?')[0].toLowerCase() || 'png';
     const name = url.split('/').pop()?.split('?')[0] || `remote-${Date.now()}.${ext}`;
-    const id = `remote-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
     try {
       const resp = await fetch(url);
@@ -183,7 +259,7 @@ export class AssetManager {
       }
 
       if (asset) {
-        this.scene.add(asset.object3d);
+        this.worldRoot.add(asset.object3d);
         this.assets.set(asset.id, asset);
         for (const cb of this.onAssetAddedCallbacks) cb(asset);
       }
@@ -444,34 +520,150 @@ export class AssetManager {
     const group = new THREE.Group();
     group.position.copy(pos);
 
-    // Holographic File Icon Cube
-    const geo = new THREE.OctahedronGeometry(0.5, 0);
-    const mat = new THREE.MeshStandardMaterial({
-      color: '#00f0ff',
-      roughness: 0.2,
-      metalness: 0.9,
-      wireframe: false,
-      emissive: '#004466',
-      emissiveIntensity: 0.5
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    group.add(mesh);
+    // Draw a generic document icon with the filename + size + extension
+    // baked into a CanvasTexture. Portrait aspect so it reads as a
+    // "document / sheet of paper" rather than a landscape image. 512x640
+    // is high enough that the filename text stays readable when the user
+    // dollies the camera close; anything bigger burns VRAM on the Quest
+    // for text that's already capped at the ~22px font below.
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 640;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      // Outer card background (slate-800 with a slate-600 frame).
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(16, 16, canvas.width - 32, canvas.height - 32);
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(16, 16, canvas.width - 32, canvas.height - 32);
 
-    // Outer glow ring
-    const ringGeo = new THREE.TorusGeometry(0.7, 0.02, 16, 32);
-    const ringMat = new THREE.MeshBasicMaterial({ color: '#a855f7' });
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.rotation.x = Math.PI / 2;
-    group.add(ring);
+      // Document silhouette: rectangle with a folded top-right corner.
+      // Sized to leave headroom for the filename + size + extension
+      // below; the icon occupies the top ~55% of the card.
+      const iconX = canvas.width / 2 - 80;
+      const iconY = 90;
+      const iconW = 160;
+      const iconH = 200;
+      const foldSize = 28;
 
-    // Store custom user data on Object3D so raycaster/UI can read it
+      // Document body (trapezoid-with-notch effect via the fold path).
+      ctx.fillStyle = '#cbd5e1';
+      ctx.beginPath();
+      ctx.moveTo(iconX, iconY);
+      ctx.lineTo(iconX + iconW - foldSize, iconY);
+      ctx.lineTo(iconX + iconW, iconY + foldSize);
+      ctx.lineTo(iconX + iconW, iconY + iconH);
+      ctx.lineTo(iconX, iconY + iconH);
+      ctx.closePath();
+      ctx.fill();
+
+      // Folded corner — slightly darker so it reads as a separate plane.
+      ctx.fillStyle = '#94a3b8';
+      ctx.beginPath();
+      ctx.moveTo(iconX + iconW - foldSize, iconY);
+      ctx.lineTo(iconX + iconW - foldSize, iconY + foldSize);
+      ctx.lineTo(iconX + iconW, iconY + foldSize);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(iconX + iconW - foldSize, iconY);
+      ctx.lineTo(iconX + iconW - foldSize, iconY + foldSize);
+      ctx.lineTo(iconX + iconW, iconY + foldSize);
+      ctx.stroke();
+
+      // Filename — truncate the middle (not the end) so the
+      // extension stays visible. The full string is still available
+      // via the radial context menu / inventory, so truncation is
+      // purely a visual readability choice.
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillStyle = '#e2e8f0';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const maxLen = 24;
+      let displayName: string;
+      if (name.length > maxLen) {
+        const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')) : '';
+        const stem = name.slice(0, name.length - ext.length);
+        const keep = Math.max(4, maxLen - ext.length - 1);
+        displayName = stem.slice(0, keep) + '…' + ext;
+      } else {
+        displayName = name;
+      }
+      ctx.fillText(displayName, canvas.width / 2, iconY + iconH + 50);
+
+      // Human-readable size.
+      ctx.font = '20px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      const sizeText = size < 1024
+        ? `${size} B`
+        : size < 1024 * 1024
+          ? `${(size / 1024).toFixed(1)} KB`
+          : `${(size / 1024 / 1024).toFixed(2)} MB`;
+      ctx.fillText(sizeText, canvas.width / 2, iconY + iconH + 90);
+
+      // Extension badge — colored chip, anchors the file-type read.
+      const ext = (name.split('.').pop() ?? '').toUpperCase();
+      if (ext && ext !== name.toUpperCase()) {
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#00f0ff';
+        ctx.fillText(ext, canvas.width / 2, canvas.height - 60);
+      } else {
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillStyle = '#94a3b8';
+        ctx.fillText('FILE', canvas.width / 2, canvas.height - 60);
+      }
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+
+    // Mesh: thin frame + flat plane, mirroring the imported-image
+    // 'panel' mode so misc files feel like the same family of flat
+    // 2D world objects. DoubleSide so the icon stays visible from
+    // the back when the user rotates the panel 180° with the gizmo.
+    const aspect = canvas.width / canvas.height;
+    const width = 0.8;
+    const height = width / aspect;
+
+    const frameGeo = new THREE.BoxGeometry(width + 0.04, height + 0.04, 0.02);
+    const frameMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.4, metalness: 0.1 });
+    const frame = new THREE.Mesh(frameGeo, frameMat);
+    frame.castShadow = true;
+    frame.receiveShadow = true;
+    group.add(frame);
+
+    const planeGeo = new THREE.PlaneGeometry(width, height);
+    const planeMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+    const planeMesh = new THREE.Mesh(planeGeo, planeMat);
+    planeMesh.position.z = 0.012;
+    group.add(planeMesh);
+
+    // CRITICAL: the CanvasTexture is NOT disposed by Three's
+    // material.dispose() path. Stash a dispose() callback in
+    // userData so removeAsset can call it; without this, every
+    // removed/duplicated misc file leaks a 512x640 RGBA texture on
+    // GPU until the GL context is destroyed.
+    const dispose = () => {
+      frameGeo.dispose();
+      frameMat.dispose();
+      planeGeo.dispose();
+      planeMat.dispose();
+      texture.dispose();
+    };
+
     group.userData = {
       isMiscFile: true,
       fileName: name,
       fileSize: size,
       mimeType,
-      fileData: buffer
+      fileData: buffer,
+      dispose,
     };
 
     return {
@@ -480,7 +672,12 @@ export class AssetManager {
       type: 'misc',
       object3d: group,
       fileData: buffer,
-      isCollidable: false,
+      // Collidable so RMB-grab / VR-grip / E+drag treat the panel the
+      // same as any other selectable world object (was false under
+      // the old Octahedron+Torus representation, which made the file
+      // invisible to the grab raycaster and forced the auto-modal
+      // approach as the only way to interact with it).
+      isCollidable: true,
       metadata: { fileSize: size, mimeType, extension: name.split('.').pop() }
     };
   }
@@ -526,8 +723,32 @@ export class AssetManager {
     mesh.position.copy(pos);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
+    // Persist the primitive type string on the mesh's userData so it
+    // round-trips through every downstream consumer that reads it back:
+    //   - App.tsx's `registerOnAssetAdded` broadcasts a spawn envelope
+    //     to peers and includes it in scene snapshots
+    //   - `handleDuplicateSelected` re-spawns the primitive
+    //   - `handleDeleteSelected`, `recordSpawnUndo`, and
+    //     `respawnFromSnapshot` all hit `obj.userData.primitiveType`
+    //     to reconstruct the asset after undo/redo
+    //   - `handleSpawnFromInventory` likewise reads it for re-import
+    // Without this, all four of those paths silently degraded to
+    // fall-through no-ops on primitives — the most visible symptom
+    // being that host-spawned cube/torus never appeared on guests in
+    // the network sync flow.
+    mesh.userData.primitiveType = type;
+    // Default every freshly-spawned primitive to persistent=true so
+    // the network broadcast's read-from-userData sources always has a
+    // defined value. Without this, a host that never opened the
+    // Scene Inspector for a given primitive would broadcast
+    // `isPersistent: undefined`, every receiver guard would skip, and
+    // the guest's checkbox would silently default-to-true via the
+    // inspector's `?? true` fallback — visible by coincidence, not by
+    // design. This makes the userData byte well-defined from asset
+    // birth so every downstream consumer reads consistent bytes.
+    mesh.userData.isPersistent = true;
 
-    this.scene.add(mesh);
+    this.worldRoot.add(mesh);
 
     const asset: LoadedAsset = {
       id,
@@ -541,6 +762,26 @@ export class AssetManager {
     for (const cb of this.onAssetAddedCallbacks) cb(asset);
 
     return asset;
+  }
+
+  public registerCustomAsset(id: string, name: string, object3d: THREE.Object3D, type: AssetType = 'primitive'): LoadedAsset {
+    const asset: LoadedAsset = {
+      id,
+      name,
+      type,
+      object3d,
+      isCollidable: false
+    };
+    this.assets.set(id, asset);
+    for (const cb of this.onAssetAddedCallbacks) cb(asset);
+    return asset;
+  }
+
+  public unregisterCustomAsset(id: string): void {
+    const asset = this.assets.get(id);
+    if (!asset) return;
+    this.assets.delete(id);
+    for (const cb of this.onAssetRemovedCallbacks) cb(id);
   }
 
   private enableShadows(obj: THREE.Object3D): void {
@@ -600,7 +841,7 @@ export class AssetManager {
     const asset = this.assets.get(id);
     if (!asset) return;
 
-    this.scene.remove(asset.object3d);
+    this.worldRoot.remove(asset.object3d);
     
     // Dispose memory
     asset.object3d.traverse((child) => {
@@ -614,6 +855,25 @@ export class AssetManager {
         }
       }
     });
+
+    // CRITICAL: run any asset-specific dispose callback the
+    // spawner stashed on userData. The traverse above disposes
+    // geometry + material(s) but does NOT release textures they
+    // reference — Three.js doesn't track material→texture ownership
+    // (textures are frequently shared across materials). The misc
+    // file CanvasTexture is the current consumer; without this hook
+    // every duplicated / removed misc file leaks a 512x640 RGBA
+    // backing on the GPU until the GL context is destroyed. Pattern
+    // is generic — any future asset that holds a non-mesh GPU
+    // resource can opt in by attaching a `dispose` fn to userData.
+    const customDispose = (asset.object3d.userData as { dispose?: () => void })?.dispose;
+    if (typeof customDispose === 'function') {
+      try {
+        customDispose();
+      } catch (e) {
+        console.warn('[AssetManager] Custom dispose() threw for', id, e);
+      }
+    }
 
     if (asset.url) {
       URL.revokeObjectURL(asset.url);
