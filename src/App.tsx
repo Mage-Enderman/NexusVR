@@ -540,9 +540,11 @@ export const App: React.FC = () => {
                               //          which made the grid appear to
                               //          "rise with the player" on jump).
       sceneEngine.ambientLight,
-      sceneEngine.dirLight
+      sceneEngine.dirLight,
+      sceneEngine.renderer
     );
     environmentManagerRef.current = environmentManager;
+    sceneEngine.environmentManager = environmentManager;
 
 const vrHud = new VRHUDManager(
         sceneEngine.scene,
@@ -878,7 +880,7 @@ const vrHud = new VRHUDManager(
                   const op = tail.substring(1);
                   const delta = 5 / 255; // ~0.019
                   for (const m of mats) {
-                    const c2 = m.color as THREE.Color;
+                    const c2 = (m as any).color as THREE.Color;
                     if (op === 'reset') {
                       c2.setRGB(1, 1, 1);
                     } else {
