@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Globe, Sun, Grid, Sparkles, Moon, Sunset, Camera } from 'lucide-react';
+import { X, Globe, Sun, Grid, Sparkles, Moon, Sunset, Camera, Eye } from 'lucide-react';
 import type { EnvironmentSettings, AtmospherePreset } from '../engine/EnvironmentManager.ts';
 
 interface WorldEnvironmentModalProps {
@@ -18,6 +18,7 @@ export const WorldEnvironmentModal: React.FC<WorldEnvironmentModalProps> = ({
     { id: 'sunset-horizon', name: 'Sunset Twilight', desc: 'Warm magenta & orange evening sky', icon: Sunset, color: 'text-pink-400' },
     { id: 'studio-neutral', name: 'Studio Bright', desc: 'Clean neutral lighting for model inspection', icon: Camera, color: 'text-slate-300' },
     { id: 'starfield-space', name: 'Deep Starfield', desc: 'Infinite void with twinkling star particles', icon: Moon, color: 'text-indigo-400' },
+    { id: 'passthrough', name: 'Mixed Reality', desc: 'Full-color passthrough background (Quest 3)', icon: Eye, color: 'text-emerald-400' },
   ];
 
   return (
