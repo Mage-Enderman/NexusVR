@@ -447,9 +447,12 @@ export const App: React.FC = () => {
       raf = requestAnimationFrame(tick);
       const mesh = vrRadialMenuRef.current;
       const se = sceneEngineRef.current;
-      const side = vrRadialActiveSideRef.current;
-      if (!mesh || mesh.disposed || !se || !se.renderer.xr.isPresenting || !mesh.isVisible || !side) return;
-      const ctr = se.vrInput?.getController(side);
+      if (!mesh || mesh.disposed || !se || !se.renderer.xr.isPresenting || !mesh.isVisible) return;
+      // Always aim with the right controller (Resonite convention: the menu
+      // floats near the left wrist, the right laser aims and selects).
+      // vrRadialActiveSideRef records which controller OPENED the menu so
+      // the initial placement is correct; once open, aiming is always right.
+      const ctr = se.vrInput?.getController('right');
       if (!ctr) return;
       ctr.updateWorldMatrix(true, false);
       // Allocation-free: hoisted scratch refs (vrRadialAim*Ref) reused
@@ -460,21 +463,22 @@ export const App: React.FC = () => {
         .set(0, 0, -1)
         .applyQuaternion(vrRadialAimDirQuatRef.current)
         .normalize();
-      // Re-place the menu every frame so it follows the active
-      // controller's current pose (origin + laser direction).
-      // The previous flow only placed once on B/Y press, leaving
-      // the menu world-anchored -- wrist motion then drifted the
-      // aim ray off the panel and the user reported the buttons
-      // as 'non-interactive' despite updateAim + select() running
-      // correctly. placeNearController is now allocation-free
-      // (uses scratch refs internally), so re-placing at 90 Hz
-      // is GC-neutral. Must come BEFORE updateAim so the raycast
-      // tests against the freshly-followed mesh position.
-      mesh.placeNearController(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
+      // The panel is placed near the OPENING controller once (on B/Y press),
+      // then stays world-anchored. We do NOT re-place every frame because the
+      // aim ray now comes from the RIGHT hand while the panel lives near the
+      // LEFT wrist — re-placing would chase the right controller and make it
+      // impossible to aim at the menu. Leave position static after open.
       vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
       mesh.updateAim(vrRadialAimRayRef.current);
-      const ctrlState = side === 'left' ? se.vrInput?.left : se.vrInput?.right;
-      if (ctrlState?.pressedThisFrame?.trigger) mesh.select();
+      // NOTE: mesh.select() is intentionally NOT called here.
+      // `pressedThisFrame` is an edge flag set for exactly ONE XR
+      // frame by VRInputManager.update() inside SceneEngine.animate().
+      // This aim rAF loop is a SEPARATE requestAnimationFrame that
+      // ticks independently, so by the time it reads pressedThisFrame
+      // the XR loop has already cleared the edge on its next tick —
+      // resulting in the trigger presses being silently missed.
+      // The fix is in the onPressed('trigger') handler below, which
+      // runs synchronously inside the XR frame where the edge fires.
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
@@ -1134,6 +1138,22 @@ const vrHud = new VRHUDManager(
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
                     vrRadialMenuRef.current.placeNearController(origin, laserDir);
                   }
+                  // Push fresh state from refs immediately — bypasses the
+                  // async useEffect ref-sync lag so isHeld / heldAssetType
+                  // are correct at open-time even on the first grab+open.
+                  vrRadialMenuRef.current.setState({
+                    locomotionMode: locomotionModeRef.current,
+                    scalingEnabled: scalingEnabledRef.current,
+                    laserEnabled: laserEnabledRef.current,
+                    grabMode: grabModeRef.current,
+                    isHeld: isHeldRef.current,
+                    heldAssetType: heldAssetTypeRef.current,
+                  });
+                  // Auto-switch to 'held' tab if carrying an object,
+                  // mirrors the desktop RadialContextMenu behavior.
+                  vrRadialMenuRef.current.setActiveTab(
+                    isHeldRef.current ? 'held' : 'general'
+                  );
                   vrRadialMenuRef.current.setVisible(true);
                 } else {
                   vrRadialMenuRef.current?.setVisible(false);
@@ -1159,7 +1179,11 @@ const vrHud = new VRHUDManager(
               // reparenting feedback loop).
               setVrRadialOpen((prev) => {
                 const next = !prev;
-                const ctr = se.vrInput?.getController('left');
+                // Y button opens near the LEFT controller (the holding hand),
+                // but the RIGHT controller is always the aiming hand.
+                // Place the panel near the left wrist for ergonomics;
+                // the aim rAF loop will ray-cast from the right controller.
+                const ctrLeft = se.vrInput?.getController('left');
                 if (next) {
                   if (vrRadialMenuRef.current === null) {
                     vrRadialMenuRef.current = new VRRadialMenuMesh(
@@ -1169,13 +1193,29 @@ const vrHud = new VRHUDManager(
                     se.scene.add(vrRadialMenuRef.current.group);
                   }
                   vrRadialActiveSideRef.current = 'left';
-                  if (ctr) {
-                    ctr.updateWorldMatrix(true, false);
-                    const origin = new THREE.Vector3().setFromMatrixPosition(ctr.matrixWorld);
-                    const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctr.matrixWorld);
+                  if (ctrLeft) {
+                    ctrLeft.updateWorldMatrix(true, false);
+                    const origin = new THREE.Vector3().setFromMatrixPosition(ctrLeft.matrixWorld);
+                    const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctrLeft.matrixWorld);
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
                     vrRadialMenuRef.current.placeNearController(origin, laserDir);
                   }
+                  // Push fresh state from refs immediately — bypasses the
+                  // async useEffect ref-sync lag so isHeld / heldAssetType
+                  // are correct at open-time even on the first grab+open.
+                  vrRadialMenuRef.current.setState({
+                    locomotionMode: locomotionModeRef.current,
+                    scalingEnabled: scalingEnabledRef.current,
+                    laserEnabled: laserEnabledRef.current,
+                    grabMode: grabModeRef.current,
+                    isHeld: isHeldRef.current,
+                    heldAssetType: heldAssetTypeRef.current,
+                  });
+                  // Auto-switch to 'held' tab if carrying an object,
+                  // mirrors the desktop RadialContextMenu behavior.
+                  vrRadialMenuRef.current.setActiveTab(
+                    isHeldRef.current ? 'held' : 'general'
+                  );
                   vrRadialMenuRef.current.setVisible(true);
                 } else {
                   vrRadialMenuRef.current?.setVisible(false);
@@ -1268,16 +1308,35 @@ const vrHud = new VRHUDManager(
               return;
             }
           }
-          // Trigger (right hand only — left triggers are reserved for
-          // future activation; right is the canonical interaction
-          // trigger per the OpenXR mapping).
+          // Trigger — handles VR radial menu select (both sides),
+          // two-handed scale grab detection, and HUD click (right side).
           if (button === 'trigger') {
-            // Both-sides trigger detection: if the trigger on
-            // the OTHER hand is also currently held, the user
-            // is doing a two-handed scale grab. Try to start
-            // one on whichever asset BOTH lasers are pointing
-            // at (must be the same asset, otherwise the user
-            // is just doing two unrelated things at once).
+            // PRIORITY 1: VR radial menu select.
+            // This MUST happen in onPressed (the XR-frame-synchronous
+            // edge callback) rather than in the aim rAF loop.
+            // Reason: VRInputManager.update() sets pressedThisFrame for
+            // exactly ONE XR frame. The aim rAF loop is a SEPARATE
+            // requestAnimationFrame that runs independently of the XR
+            // frame loop — by the time the rAF tick executes, the XR
+            // loop has already advanced and cleared pressedThisFrame on
+            // its next frame, so the trigger press is always missed.
+            // Handling it here — which fires synchronously inside the
+            // same XR frame that detected the edge — guarantees the
+            // select() call is never dropped.
+            const radialMesh = vrRadialMenuRef.current;
+            if (radialMesh && radialMesh.isVisible && !radialMesh.disposed) {
+              // The right trigger is always the select trigger for the VR
+              // radial menu, regardless of which hand (B or Y) opened it.
+              // The menu opens near the left wrist; the right laser aims.
+              // Accept either trigger so left-hand-dominant users who open
+              // with B can also click with the left trigger if they prefer.
+              radialMesh.select();
+              return;
+            }
+
+            // PRIORITY 2: Two-handed scale grab.
+            // If the trigger on the OTHER hand is also currently held,
+            // the user is attempting a two-handed scale grab.
             const otherSide: 'left' | 'right' = side === 'left' ? 'right' : 'left';
             const otherSideState = otherSide === 'left' ? se.vrInput?.left : se.vrInput?.right;
             const otherTriggerHeld = otherSideState?.buttons.trigger ?? false;
@@ -1322,14 +1381,9 @@ const vrHud = new VRHUDManager(
                 }
               }
             }
-            // Single-handed right-trigger path: HUD click.
-            // Runs even when the two-handed condition was
-            // checked above (one-shot click is harmless if the
-            // user is now in a two-handed grab instead — the
-            // HUD click already fired before the second
-            // trigger press). Left trigger without a co-held
-            // right trigger is a no-op (left trigger was
-            // previously reserved for future activation).
+            // PRIORITY 3: HUD click (right hand).
+            // Left trigger without a co-held right trigger is a no-op
+            // (left trigger reserved for two-handed scale or future use).
             if (side === 'right') {
               const hud = vrHudRef.current;
               if (hud && (hud.isVisible || hud.activePanel)) {
