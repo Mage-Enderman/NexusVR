@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import ReactDOM from 'react-dom';
 import * as THREE from 'three';
 import confetti from 'canvas-confetti';
 
@@ -36,6 +37,9 @@ import { BrushManager } from './engine/BrushManager.ts';
 import { WorldToolsPanel } from './components/WorldToolsPanel.tsx';
 import type { ToolType } from './components/WorldToolsPanel.tsx';
 import { SceneInspectorWindow } from './components/SceneInspectorWindow.tsx';
+import { VideoControls } from './components/VideoControls.tsx';
+import { VideoObjectControls } from './components/VideoObjectControls.tsx';
+import type { VideoPlaybackState } from './engine/AssetManager.ts';
 import { RadialContextMenu } from './components/RadialContextMenu.tsx';
 import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
 import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
@@ -159,6 +163,41 @@ function guessAssetType(filename: string): AssetType {
   return 'misc';
 }
 
+
+      <>
+        VIDEO_CONTROL_PORTAL_RENDER — render the React-side controls
+        into each spatial-panel container we created in the asset-added
+        hook. Mounting happens once per panel; callbacks route to the
+        existing handleVideoAction pipeline. The auto-AR resize in
+        AssetManager.loadVideo already updated the parent video's screen
+        height; we don't resize the dock-panel here.
+        {videoControlPanels.flatMap((p) => {
+          const asset = assetManagerRef.current?.assets.get(p.assetId);
+          if (!asset || asset.type !== 'video' || !asset.videoElement) return [];
+          return [ReactDOM.createPortal(
+            <VideoObjectControls
+              key={p.assetId}
+              state={((asset.object3d.userData as { videoState?: VideoPlaybackState }).videoState) ?? {
+                playing: false,
+                currentTime: 0,
+                duration: 0,
+                globalVolume: 0.8,
+                localVolume: 0.8,
+                volumeMode: 'global',
+                muted: true,
+              }}
+              onPlay={() => handleVideoAction(asset.id, 'play')}
+              onPause={() => handleVideoAction(asset.id, 'pause')}
+              onSeek={(t) => handleVideoAction(asset.id, 'seek', t)}
+              onStep={(d) => handleVideoAction(asset.id, 'step', d)}
+              onVolumeChange={(v) => handleVideoAction(asset.id, 'volume', v)}
+              onVolumeModeToggle={(m) => handleVideoAction(asset.id, 'volumeMode', m)}
+              onMuteToggle={() => handleVideoAction(asset.id, 'mute')}
+            />,
+            p.container
+          )];
+        })}
+      </>
 export const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -215,6 +254,101 @@ export const App: React.FC = () => {
   const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(true);
   const [locomotionMode, setLocomotionMode] = useState<'walk' | 'flight' | 'noclip'>('walk');
   const [showSceneInspector, setShowSceneInspector] = useState<boolean>(false);
+
+  PANEL_BROADCAST_SETUP — shared panel state + helpers for the Inspector
+  // and AssetImportDialog panels. WE open → broadcast panelstate
+  // 'open' to peers. WE close → broadcast 'close' ONLY when we are
+  // the originator (peers that hide their mirror locally must NOT
+  // echo a close, that would race-condition with the originator's
+  // intent and could prematurely close the originator's panel from
+  // a peer's POV). Receive handlers live in the disposers area
+  // below so they're wired alongside the other network subscriptions.
+  type PanelOriginator = { peerId: string; userName?: string; role?: 'admin' | 'builder' | 'moderator' | 'guest' | 'spectator' };
+  const [inspectorPanelOriginator, setInspectorPanelOriginator] = useState<PanelOriginator | null>(null);
+  const [importPanelOriginator, setImportPanelOriginator] = useState<PanelOriginator | null>(null);
+
+  const openInspectorFromLocal = (opts?: { targetAssetId?: string | null }) => {
+    openInspectorFromLocal();
+    const ns = networkServiceRef.current;
+    const originatorId = ns?.localPeerId ?? '__local__';
+    setInspectorPanelOriginator({ peerId: originatorId, userName: localUserName, role: localRole });
+    if (ns && ns.mode !== 'offline' && originatorId !== '__local__') {
+      ns.broadcastPanelState({
+        action: 'open',
+        panelId: 'inspector',
+        originatorPeerId: originatorId,
+        originatorUserName: localUserName,
+        originatorRole: localRole,
+        targetAssetId: opts?.targetAssetId ?? selectedAsset?.id ?? null,
+        ts: Date.now(),
+      });
+    }
+  };
+  const closeInspectorFromLocal = () => {
+    closeInspectorFromLocal();
+    const ns = networkServiceRef.current;
+    if (inspectorPanelOriginator?.peerId === ns?.localPeerId && ns && ns.mode !== 'offline') {
+      ns.broadcastPanelState({
+        action: 'close',
+        panelId: 'inspector',
+        originatorPeerId: ns.localPeerId,
+        ts: Date.now(),
+      });
+    }
+    setInspectorPanelOriginator(null);
+  };
+  const openImportFromLocal = () => {
+    openImportFromLocal();
+    const ns = networkServiceRef.current;
+    const originatorId = ns?.localPeerId ?? '__local__';
+    setImportPanelOriginator({ peerId: originatorId, userName: localUserName, role: localRole });
+    if (ns && ns.mode !== 'offline' && originatorId !== '__local__') {
+      ns.broadcastPanelState({
+        action: 'open',
+        panelId: 'import',
+        originatorPeerId: originatorId,
+        originatorUserName: localUserName,
+        originatorRole: localRole,
+        ts: Date.now(),
+      });
+    }
+  };
+  const closeImportFromLocal = () => {
+    closeImportFromLocal();
+    const ns = networkServiceRef.current;
+    if (importPanelOriginator?.peerId === ns?.localPeerId && ns && ns.mode !== 'offline') {
+      ns.broadcastPanelState({
+        action: 'close',
+        panelId: 'import',
+        originatorPeerId: ns.localPeerId,
+        ts: Date.now(),
+      });
+    }
+    setImportPanelOriginator(null);
+  };
+
+  // Permission gates for shared-panel interactivity. Per the design
+  // analysis recommendation E: gate entirely on the LOCAL role (via
+  // ROLE_PERMISSIONS); the originator's role does NOT augment peer
+  // permissions — peers don't get admin powers just because an admin
+  // opened a panel. The originator themselves also passes the gate
+  // because they intentionally opened the panel.
+  // 'admin' / 'builder' gate on canEditWorld for inspector edits;
+  // 'admin' / 'builder' / 'guest' gate on canSpawnItems for import.
+  const localPerms = ROLE_PERMISSIONS[localRole] || ROLE_PERMISSIONS.guest;
+  const inspectorInteractiveEnabled = !!localPerms?.canEditWorld;
+  const importInteractiveEnabled = !!localPerms?.canSpawnItems;
+  // Originator-header JSX (only rendered when the panel is a peer's
+  // mirror). On the originator's own view this collapses to “null” so
+  // the panel-body banner doesn't show a confusing 'shared by me' line.
+  const myPeerId = networkServiceRef.current?.localPeerId;
+  const inspectorPanelOriginatorHeader = (inspectorPanelOriginator && inspectorPanelOriginator.peerId !== myPeerId)
+    ? (<>Inspector: shared by <span className='text-cyan-200 font-bold'>{inspectorPanelOriginator.userName || 'peer'}</span></>)
+    : null;
+  const importPanelOriginatorHeader = (importPanelOriginator && importPanelOriginator.peerId !== myPeerId)
+    ? (<>Import: shared by <span className='text-cyan-200 font-bold'>{importPanelOriginator.userName || 'peer'}</span></>)
+    : null;
+
   // Ref so the canvas click handler can read the current value without
   // being re-created every time showSceneInspector changes.
   const showSceneInspectorRef = useRef(false);
@@ -302,6 +436,18 @@ export const App: React.FC = () => {
   const [shareModalTab, setShareModalTab] = useState<'multiplayer' | 'pairing'>('multiplayer');
   const [showInventoryModal, setShowInventoryModal] = useState<boolean>(false);
   const [showImportModal, setShowImportModal] = useState<boolean>(false);
+  // Active in-world video-control panels. Each entry is one spatial
+  // panel docked under a video asset's object3d — the SpatialPanelManager
+  // takes care of the THREE.Group + DOM + HTMLMesh; we just need React
+  // state so the JSX portal render <VideoObjectControls> into the
+  // detached <div> container.
+  type VideoControlPanelEntry = {
+    assetId: string;
+    panelId: string;
+    container: HTMLDivElement;
+  };
+  const [videoControlPanels, setVideoControlPanels] = useState<VideoControlPanelEntry[]>([]);
+
   const [showImportDialog, setShowImportDialog] = useState<boolean>(false);
   const [importInitialFile, setImportInitialFile] = useState<File | null>(null);
   const [showWorldEnvModal, setShowWorldEnvModal] = useState<boolean>(false);
@@ -593,7 +739,7 @@ const vrHud = new VRHUDManager(
                   }
                   break;
                 case 'sys-inspector':
-                  setShowSceneInspector(true);
+                  openInspectorFromLocal();
                   break;
               }
             }
@@ -1483,6 +1629,35 @@ const vrHud = new VRHUDManager(
         placeholder.dispose();
         pendingAssetsRef.current.delete(asset.id);
       }
+      
+      // PERSISTENT_VIDEO_CONTROLS_HOOK: dock an in-world video-controls panel
+      // under the freshly-added video asset. The panel's anchor is computed
+      // from the video's screen-plane height so it sits just below the frame
+      // regardless of aspect ratio (16:9 / 9:16 / 1:1 / 'auto' post-loadedmetadata).
+      // We add a new entry to React state so the JSX portal renders
+      // <VideoObjectControls> into the detached container on the next render.
+      if (asset.type === 'video' && asset.object3d && asset.videoElement && spatialPanelManagerRef.current) {
+        const domContainer = document.createElement('div');
+        domContainer.style.pointerEvents = 'auto';
+        const screenPlane = asset.object3d.children.find(c => c.geometry instanceof THREE.PlaneGeometry) as THREE.Object3D | undefined;
+        const screenH = (screenPlane?.geometry as THREE.PlaneGeometry | undefined)?.parameters?.height ?? 1.6875;
+        const panelId = `video-controls-${asset.id}`;
+        const se = sceneEngineRef.current;
+        if (!se) return;
+        const anchorOffset = new THREE.Vector3(0, -screenH / 2 - 0.05, 0.06);
+        spatialPanelManagerRef.current.createPanel(
+          panelId,
+          domContainer,
+          se.scene,
+          se.camera,
+          600, // cssWidth — wide enough to match HD-ish video widths
+          100, // cssHeight — bumped from 90 to give the bottom-right cluster ~6px breathing room (mode-toggle stack vs volume slider)
+          asset.object3d,
+          anchorOffset
+        );
+        setVideoControlPanels(prev => [...prev, { assetId: asset.id, panelId, container: domContainer }]);
+      }
+
       if (net.mode !== 'offline') {
         // The `primitiveType` tag is sourced from `asset.object3d.userData`
         // — `AssetManager.spawnPrimitive` sets it there in the same edit
@@ -1611,6 +1786,20 @@ const vrHud = new VRHUDManager(
       }
     });
 
+
+    // PERSISTENT_VIDEO_CONTROLS_REMOVE: Asset-removed callback — clean up the
+    // docked video-controls panel (if any) so a peer who deletes a video
+    // triggers a clean local teardown. The panel's destroyPanel tears down
+    // the CSS3D / HTMLMesh / THREE.Group; the React state update drops the
+    // JSX portal entry on the next render.
+    disposers.push(assetManager.registerOnAssetRemoved((id) => {
+      const panelId = `video-controls-${id}`;
+      const spm = spatialPanelManagerRef.current;
+      if (spm && spm.getGroup(panelId)) {
+        spm.destroyPanel(panelId);
+      }
+      setVideoControlPanels(prev => prev.filter(p => p.assetId !== id));
+    }));
     disposers.push(net.onRemove((id) => {
       assetManager.removeAsset(id);
       if (manipulationManager.selectedAsset?.id === id) {
@@ -1679,6 +1868,39 @@ const vrHud = new VRHUDManager(
       avatarManager.attachPeerAudio(peerId, stream);
     }));
 
+        PANEL_BROADCAST_RECEIVE — receive a peer's 'panelstate' envelope and mirror the
+    // panel-open state locally. Echo guard first: every browser
+    // receives its OWN broadcasts back through the DataConnection
+    // round-trip; if originPeerId === localPeerId we drop the
+    // envelope so the local openInspectorFromLocal/initializer is
+    // the single source of truth.
+    disposers.push(net.onPanelState((payload) => {
+      if (payload.originatorPeerId === networkServiceRef.current?.localPeerId) return;
+      if (payload.panelId === 'inspector') {
+        if (payload.action === 'open') {
+          if (payload.targetAssetId) {
+            const am = assetManagerRef.current;
+            const asset = am?.assets.get(payload.targetAssetId);
+            if (asset) {
+              setSelectedAsset(asset);
+            }
+          }
+          setInspectorPanelOriginator({ peerId: payload.originatorPeerId, userName: payload.originatorUserName, role: payload.originatorRole });
+          openInspectorFromLocal();
+        } else {
+          closeInspectorFromLocal();
+          setInspectorPanelOriginator(null);
+        }
+      } else if (payload.panelId === 'import') {
+        if (payload.action === 'open') {
+          setImportPanelOriginator({ peerId: payload.originatorPeerId, userName: payload.originatorUserName, role: payload.originatorRole });
+          openImportFromLocal();
+        } else {
+          closeImportFromLocal();
+          setImportPanelOriginator(null);
+        }
+      }
+    }));
     disposers.push(net.onRoleUpdate((data) => {
       if (data.targetPeerId === net.localPeerId) {
         setLocalRole(data.newRole);
@@ -2326,20 +2548,28 @@ const vrHud = new VRHUDManager(
         asset.object3d.scale.y,
         asset.object3d.scale.z
       );
-      // Duplicate-while-holding: keep holding the DUPLICATE, not
-      // the original. swapGrabbedAsset atomically ends the current
-      // grab on `asset` and starts an equivalent grab on
-      // `newAsset` (same VR-side when applicable, cursor-anchored
-      // RMB-grab on desktop). No-op during a two-handed grab --
-      // that path would need the live grip world positions to
-      // re-establish the scale, which is intentionally out of
-      // scope here. Guard is always-true for the held-tab
-      // Duplicate verb (handleDuplicateHeld sets asset =
-      // grabbedAsset by construction) and only fires for
-      // handleDuplicateSelected when the selected asset happens
-      // to also be currently grabbed.
+      // Duplicate-while-holding: leave the DUPLICATE in place and
+      // select it (so the inspector + gizmo follow the new instance),
+      // while KEEPING the original under the user's grab. The user
+      // can then drag the original away from the duplicate that's
+      // now floating in front of them, which is the natural Resonite
+      // "duplicate-then-tug" workflow. The previous behaviour called
+      // swapGrabbedAsset(), which atomically transferred the grab to
+      // the duplicate and dropped the original — making the
+      // duplicate held and the original free-floating instead of the
+      // reverse. Guard matches the original: the held-tab Duplicate
+      // verb (handleDuplicateHeld) and handleDuplicateSelected when
+      // the selected asset happens to also be currently grabbed both
+      // reach this branch. For all other entry points (RMB-grab not
+      // selected, neither grabbed nor selected) the existing select
+      // fallback fires.
       if (manipulationManagerRef.current?.grabbedAsset?.id === asset.id) {
-        manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
+        // Original stays held — DO NOT touch the grab. Just retarget
+        // the inspector + gizmo to the duplicate. The ManipulationManager
+        // continues to apply its carry math (update()/updateGrabbedAssetPosition
+        // for RMB-grab; vrGrabWithController-attached parent for
+        // VR-grip; two-handed scale-factor multiplier) to the original.
+        manipulationManagerRef.current?.selectAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
       }
@@ -2469,7 +2699,7 @@ const vrHud = new VRHUDManager(
         // throwing the inspector up empty.
         if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedAsset) {
           e.preventDefault();
-          setShowSceneInspector((prev) => !prev);
+          showSceneInspector ? closeInspectorFromLocal() : openInspectorFromLocal();
           return;
         }
       } else if (e.key === 'v' || e.key === 'V') {
@@ -2480,7 +2710,7 @@ const vrHud = new VRHUDManager(
         setShowInventoryModal((prev) => !prev);
       } else if (e.key === 'u' || e.key === 'U') {
         setImportInitialFile(null);
-        setShowImportDialog((prev) => !prev);
+        showImportDialog ? closeImportFromLocal() : openImportFromLocal();
       } else      if (e.key === 'Delete' || e.key === 'Backspace') {
         handleDeleteSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
@@ -2531,7 +2761,7 @@ const vrHud = new VRHUDManager(
       e.preventDefault();
       if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
         setImportInitialFile(e.dataTransfer.files[0]);
-        setShowImportDialog(true);
+        openImportFromLocal();
       }
     };
     const handlePaste = (e: ClipboardEvent) => {
@@ -2554,12 +2784,12 @@ const vrHud = new VRHUDManager(
 
       if (e.clipboardData?.files && e.clipboardData.files[0]) {
         setImportInitialFile(e.clipboardData.files[0]);
-        setShowImportDialog(true);
+        openImportFromLocal();
       } else if (e.clipboardData) {
         const text = e.clipboardData.getData('text');
         if (text && (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:'))) {
           setImportInitialFile(null);
-          setShowImportDialog(true);
+          openImportFromLocal();
         }
       }
     };
@@ -2726,20 +2956,28 @@ const vrHud = new VRHUDManager(
         asset.object3d.scale.y,
         asset.object3d.scale.z
       );
-      // Duplicate-while-holding: keep holding the DUPLICATE, not
-      // the original. swapGrabbedAsset atomically ends the current
-      // grab on `asset` and starts an equivalent grab on
-      // `newAsset` (same VR-side when applicable, cursor-anchored
-      // RMB-grab on desktop). No-op during a two-handed grab --
-      // that path would need the live grip world positions to
-      // re-establish the scale, which is intentionally out of
-      // scope here. Guard is always-true for the held-tab
-      // Duplicate verb (handleDuplicateHeld sets asset =
-      // grabbedAsset by construction) and only fires for
-      // handleDuplicateSelected when the selected asset happens
-      // to also be currently grabbed.
+      // Duplicate-while-holding: leave the DUPLICATE in place and
+      // select it (so the inspector + gizmo follow the new instance),
+      // while KEEPING the original under the user's grab. The user
+      // can then drag the original away from the duplicate that's
+      // now floating in front of them, which is the natural Resonite
+      // "duplicate-then-tug" workflow. The previous behaviour called
+      // swapGrabbedAsset(), which atomically transferred the grab to
+      // the duplicate and dropped the original — making the
+      // duplicate held and the original free-floating instead of the
+      // reverse. Guard matches the original: the held-tab Duplicate
+      // verb (handleDuplicateHeld) and handleDuplicateSelected when
+      // the selected asset happens to also be currently grabbed both
+      // reach this branch. For all other entry points (RMB-grab not
+      // selected, neither grabbed nor selected) the existing select
+      // fallback fires.
       if (manipulationManagerRef.current?.grabbedAsset?.id === asset.id) {
-        manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
+        // Original stays held — DO NOT touch the grab. Just retarget
+        // the inspector + gizmo to the duplicate. The ManipulationManager
+        // continues to apply its carry math (update()/updateGrabbedAssetPosition
+        // for RMB-grab; vrGrabWithController-attached parent for
+        // VR-grip; two-handed scale-factor multiplier) to the original.
+        manipulationManagerRef.current?.selectAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
       }
@@ -3601,9 +3839,9 @@ const vrHud = new VRHUDManager(
         onFocusSelected={handleFocusSelected}
         onSpawnPrimitive={handleSpawnPrimitive}
         onOpenInventory={() => setShowInventoryModal(true)}
-        onOpenImport={() => { setImportInitialFile(null); setShowImportDialog(true); }}
+        onOpenImport={() => { setImportInitialFile(null); openImportFromLocal(); }}
         onOpenTools={() => setShowToolsPanel(!showToolsPanel)}
-        onOpenInspector={() => setShowSceneInspector(true)}
+        onOpenInspector={() => openInspectorFromLocal()}
         onOpenRadialMenu={() => {
           setRadialMenuPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
           setShowRadialMenu(true);
@@ -3612,6 +3850,50 @@ const vrHud = new VRHUDManager(
         transformSpace={transformSpace}
         onToggleSpace={handleToggleSpace}
       />
+
+      {/* Persistent Video Controls HUD — visible whenever a video is selected,
+          regardless of inspector / modal state, so playback controls are
+          always one click away. Sits at top-center (top-20) to mirror
+          typical media-player chrome. VideoControls compact={true} doesn't
+          render its own header so we provide an inline close X. Pressing
+          X (and the equivalent non-compact X if user ever flips it) calls
+          handleDeleteSelected which removes the asset — selectedAsset
+          becomes null and the HUD disappears automatically. */}
+      {selectedAsset?.type === 'video' && selectedAsset.videoElement && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-20 w-[520px] max-w-[92vw] pointer-events-auto animate-in fade-in slide-in-from-top-4 duration-200">
+          <div className="flex items-start gap-2">
+            <button
+              onClick={() => handleDeleteSelected()}
+              title="Remove video from world (X)"
+              className="mt-2 p-1.5 rounded-lg bg-slate-800/80 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 transition border border-slate-700 hover:border-rose-500/40 shadow-md"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+            <div className="flex-1 min-w-0">
+              <VideoControls
+                compact={true}
+                state={((selectedAsset.object3d.userData as { videoState?: VideoPlaybackState })?.videoState) ?? {
+                  playing: false,
+                  currentTime: 0,
+                  duration: 0,
+                  globalVolume: 0.8,
+                  localVolume: 0.8,
+                  volumeMode: 'global',
+                  muted: true,
+                }}
+                onPlay={() => handleVideoAction(selectedAsset.id, 'play')}
+                onPause={() => handleVideoAction(selectedAsset.id, 'pause')}
+                onSeek={(t) => handleVideoAction(selectedAsset.id, 'seek', t)}
+                onStep={(d) => handleVideoAction(selectedAsset.id, 'step', d)}
+                onVolumeChange={(v) => handleVideoAction(selectedAsset.id, 'volume', v)}
+                onVolumeModeToggle={(m) => handleVideoAction(selectedAsset.id, 'volumeMode', m)}
+                onMuteToggle={() => handleVideoAction(selectedAsset.id, 'mute')}
+                onClose={() => handleDeleteSelected()}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Resonite / World Tools Panel */}
       {showToolsPanel && (
@@ -3718,8 +4000,12 @@ const vrHud = new VRHUDManager(
 
       {/* Resonite Spatial Scene Inspector Window */}
       <SceneInspectorWindow
+        key={selectedAsset?.id ?? "inspector-empty"}
+        targetObject={selectedAsset?.object3d ?? undefined}
+        interactivePermissionGranted={inspectorInteractiveEnabled}
+        originatorHeader={inspectorPanelOriginatorHeader}
         isOpen={showSceneInspector}
-        onClose={() => setShowSceneInspector(false)}
+        onClose={() => closeInspectorFromLocal()}
         selectedAsset={selectedAsset}
         onUpdateAsset={(updated) => {
           setSelectedAsset({ ...updated });
@@ -3793,7 +4079,7 @@ const vrHud = new VRHUDManager(
       {showImportModal && (
         <FileImportModal
           onImportFile={handleImportFile}
-          onClose={() => setShowImportModal(false)}
+          onClose={() => closeImportFromLocal()}
         />
       )}
 
@@ -3802,7 +4088,7 @@ const vrHud = new VRHUDManager(
       <AssetImportDialog
           initialFile={importInitialFile}
           onImport={handleImportAssetFromConfig}
-          onClose={() => setShowImportDialog(false)}
+          onClose={() => closeImportFromLocal()}
           scene={sceneEngineRef.current?.scene}
           camera={sceneEngineRef.current?.camera}
           assetManager={assetManagerRef.current || undefined}

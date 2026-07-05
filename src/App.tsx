@@ -952,6 +952,40 @@ const vrHud = new VRHUDManager(
                   }
                   return;
                 }
+
+                // ---- Video controls (only valid when sel.type === 'video') ----
+                // Mirror of handleVideoAction + handleVideoClose above so
+                // desktop + VR + network all mutate through the same path.
+                if (actionId.startsWith('inspect.video:')) {
+                  if (sel.type !== 'video') return;
+                  const tail = actionId.substring('inspect.video:'.length);
+                  if (tail === 'play') handleVideoAction(sel.id, 'play');
+                  else if (tail === 'pause') handleVideoAction(sel.id, 'pause');
+                  else if (tail === 'togglePlay') {
+                    const vs = assetManagerRef.current?.getVideoState(sel.id);
+                    if (vs) handleVideoAction(sel.id, vs.playing ? 'pause' : 'play');
+                  }
+                  else if (tail === 'seekPrev' || tail === 'seekNext') {
+                    handleVideoAction(sel.id, 'step', tail === 'seekPrev' ? -5 : 5);
+                  }
+                  else if (tail === 'restart') handleVideoAction(sel.id, 'seek', 0);
+                  else if (tail === 'volUp' || tail === 'volDown') {
+                    const vs = assetManagerRef.current?.getVideoState(sel.id);
+                    if (vs) {
+                      const cur = vs.volumeMode === 'global' ? vs.globalVolume : vs.localVolume;
+                      handleVideoAction(sel.id, 'volume', Math.max(0, Math.min(1, cur + (tail === 'volUp' ? 0.1 : -0.1))));
+                    }
+                  }
+                  else if (tail === 'toggleMute') handleVideoAction(sel.id, 'mute');
+                  else if (tail === 'mode:global' || tail === 'mode:local') {
+                    handleVideoAction(sel.id, 'volumeMode', tail === 'mode:global' ? 'global' : 'local');
+                  }
+                  else if (tail === 'close') handleVideoClose(sel.id);
+                  else return;
+                  dirty();
+                  return;
+                }
+
                 if (actionId === 'inspect.bringTo:camera') {
                   // Move the asset to the camera's world position.
                   // Use camera-local forward offset (-2m in camera Z)
@@ -1515,6 +1549,23 @@ const vrHud = new VRHUDManager(
         };
         net.broadcastSpawn(spawnData);
       }
+
+      // Auto-open the inspector when a freshly-imported video lands.
+      // Per the feature request, videos start PAUSED + MUTED so the
+      // user isn't audio-blasted on landing. Pop the scene inspector
+      // open pointing at the new asset so the play/mute/volume
+      // controls are exactly one click away. Skipped when something
+      // is already selected so we don't steal focus. queueMicrotask
+      // defers past this callback so setState doesn't fire inside
+      // the importer's synchronous callback dispatch.
+      if (asset.type === 'video') {
+        queueMicrotask(() => {
+          if (selectedAssetRef.current == null) {
+            setSelectedAsset(asset);
+            setShowSceneInspector(true);
+          }
+        });
+      }
     }));
 
     // Network listeners
@@ -1533,6 +1584,27 @@ const vrHud = new VRHUDManager(
 
     net.onAvatar((update) => {
       avatarManager.updatePeerAvatar(update);
+    });
+
+    // Apply remote video-state envelopes. AssetManager.applyVideoState
+    // is a no-op when every applicable field already matches local
+    // state, so we apply unconditionally rather than threading peerId
+    // plumbing through. After apply, bump selectedAsset if it matches
+    // and force-redraw the VR HUD panel so visible values sync without
+    // waiting for the next setDataContext round-trip.
+    net.onVideoState((data) => {
+      const am = assetManagerRef.current;
+      if (!am) return;
+      am.applyVideoState(data.assetId, {
+        playing: data.playing,
+        currentTime: data.currentTime,
+        globalVolume: data.globalVolume
+      });
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === data.assetId) {
+        setSelectedAsset({ ...sel });
+      }
+      vrHudRef.current?.redrawPanel();
     });
 
     net.onSpawn((data) => {
@@ -2865,7 +2937,132 @@ const vrHud = new VRHUDManager(
     }
   }, []);
 
-  const handleDeleteSelected = () => {
+  /**
+   * Single funnel for video control intents; wraps the local apply
+   * call and the network broadcast so the React UI doesn't need to
+   * know which fields are shared vs local-only.
+   *   - play / pause / seek / step  -> broadcast (everyone syncs)
+   *   - volume                      -> broadcast ONLY in 'global' mode
+   *   - volumeMode / mute           -> local-only UI preference
+   */
+  // Throttle map: assetId -> last seek broadcast timestamp (ms).
+  // Scrubbing fires ~60Hz pointermove broadcasts otherwise. A 50 ms
+  // ceiling allows 20 seeks/sec which is perceptually continuous, and
+  // is well under any reasonable WebRTC bandwidth budget for a single
+  // `<number>` envelope. Other peers receive continuous throttled seeks
+  // and an unconditional final seek on `pointerup` (forced-flushed via
+  // flushVideoSeekThrottle below at the call sites that need it).
+  const videoSeekThrottleRef = useRef<Map<string, number>>(new Map());
+  const SEEK_THROTTLE_MS = 50;
+
+  const broadcastVideoSeek = (assetId: string, playing: boolean, currentTime: number, globalVolume: number): void => {
+    const net = networkServiceRef.current;
+    if (!net) return;
+    const now = Date.now();
+    const last = videoSeekThrottleRef.current.get(assetId) ?? 0;
+    if (now - last < SEEK_THROTTLE_MS) return;
+    videoSeekThrottleRef.current.set(assetId, now);
+    net.broadcastVideoState({ assetId, playing, currentTime, globalVolume });
+  };
+
+  // Plain arrows (not useCallback) so the dep array never needs to
+  // reference any sibling identifier declared later in the function
+  // body. The closure body only executes on call, so even though
+  // handleDeleteSelected is declared textually AFTER these arrows
+  // below, every user-driven invoke happens AFTER the React render
+  // has finished so handleDeleteSelected is well-defined.
+  // VideoControls isn't React.memo'd, so handler-identity churn
+  // between renders doesn't cause regression.
+  const handleVideoAction = (assetId: string, kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute', payload?: number | 'global' | 'local') => {
+    const am = assetManagerRef.current;
+    const net = networkServiceRef.current;
+    if (!am) return;
+    const state = am.getVideoState(assetId);
+    if (!state) return;
+    // Clamp helper: bound `s` into [0, max(0, duration - 0.05)]. Mirrors
+    // applyVideoState's internal clamp so the broadcast value matches
+    // what the local engine will land on after apply. Without this,
+    // step/skip spam clicks would emit wildly-OOB values onto the wire
+    // for receivers that haven't yet finished importing the file.
+    const clampSeek = (s: number): number => {
+      const dur = state.duration || 0;
+      return Math.max(0, Math.min(Math.max(0, dur - 0.05), s));
+    };
+    switch (kind) {
+      case 'play':
+        am.applyVideoState(assetId, { playing: true });
+        net?.broadcastVideoState({ assetId, playing: true, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'pause':
+        am.applyVideoState(assetId, { playing: false });
+        net?.broadcastVideoState({ assetId, playing: false, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'seek':
+        if (typeof payload === 'number') {
+          const clamped = clampSeek(payload);
+          am.applyVideoState(assetId, { currentTime: clamped });
+          broadcastVideoSeek(assetId, state.playing, clamped, state.globalVolume);
+        }
+        break;
+      case 'step':
+        if (typeof payload === 'number') {
+          const next = clampSeek(state.currentTime + payload);
+          am.applyVideoState(assetId, { currentTime: next });
+          // Step buttons are discrete (1 click = 1 broadcast) so we
+          // bypass the throttle and send unconditionally. The cltampSeek
+          // call above means the wire value is always within bounds.
+          net?.broadcastVideoState({ assetId, playing: state.playing, currentTime: next, globalVolume: state.globalVolume });
+        }
+        break;
+      case 'volume':
+        if (typeof payload === 'number') {
+          if (state.volumeMode === 'global') {
+            am.applyVideoState(assetId, { globalVolume: payload });
+            net?.broadcastVideoState({ assetId, playing: state.playing, currentTime: state.currentTime, globalVolume: payload });
+          } else {
+            am.applyVideoState(assetId, { localVolume: payload });
+          }
+        }
+        break;
+      case 'volumeMode':
+        if (payload === 'global' || payload === 'local') {
+          am.applyVideoState(assetId, { volumeMode: payload });
+        }
+        break;
+      case 'mute':
+        am.applyVideoState(assetId, { muted: !state.muted });
+        break;
+    }
+    // Reset the throttle on play/pause so the NEXT scrub starts fresh,
+    // but DO NOT re-broadcast here -- the play/pause arm already
+    // emitted a broadcast with the full payload. Sending a second
+    // identical envelope just doubles wire traffic for no benefit.
+    // (Original implementation also flushed, which was a duplicate.)
+    if (kind === 'pause' || kind === 'play') {
+      videoSeekThrottleRef.current.set(assetId, Date.now());
+    }
+    const sel = selectedAssetRef.current;
+    if (sel && sel.id === assetId) setSelectedAsset({ ...sel });
+    vrHudRef.current?.redrawPanel();
+  };
+
+  /**
+   * Close = remove from world. Reuses the deletion pipeline so
+   * broadcast + undo/redo + selection-clear fire consistently across
+   * VR and desktop close paths.
+   */
+  const handleVideoClose = (assetId: string): void => {
+    if (selectedAssetRef.current?.id === assetId) {
+      handleDeleteSelected();
+      return;
+    }
+    const am = assetManagerRef.current;
+    if (!am) return;
+    am.removeAsset(assetId);
+    networkServiceRef.current?.broadcastRemove(assetId);
+  };
+
+    const handleDeleteSelected = () => {
     if (!selectedAsset) return;
     const asset = selectedAsset;
     const obj = asset.object3d;
@@ -3757,6 +3954,16 @@ const vrHud = new VRHUDManager(
         camera={sceneEngineRef.current?.camera}
         assetManager={assetManagerRef.current || undefined}
         spatialPanelManager={sceneEngineRef.current?.spatialPanelManager}
+        videoActions={(selectedAsset && selectedAsset.type === 'video') ? {
+          onPlay: () => handleVideoAction(selectedAsset.id, 'play'),
+          onPause: () => handleVideoAction(selectedAsset.id, 'pause'),
+          onSeek: (t) => handleVideoAction(selectedAsset.id, 'seek', t),
+          onStep: (d) => handleVideoAction(selectedAsset.id, 'step', d),
+          onVolumeChange: (v) => handleVideoAction(selectedAsset.id, 'volume', v),
+          onVolumeModeToggle: (m) => handleVideoAction(selectedAsset.id, 'volumeMode', m),
+          onMuteToggle: () => handleVideoAction(selectedAsset.id, 'mute'),
+          onClose: () => handleVideoClose(selectedAsset.id)
+        } : null}
       />
 
       {/* Text & Voice Chat Sidebar */}

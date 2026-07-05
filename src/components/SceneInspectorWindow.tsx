@@ -3,9 +3,10 @@ import * as THREE from 'three';
 import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
 import type { LoadedAsset, AssetManager } from '../engine/AssetManager.ts';
 import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
-import { 
-  Trash2, RotateCcw, ArrowUpRight, Magnet, Plus, 
-  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon
+import { VideoControls } from './VideoControls.tsx';
+import {
+  Trash2, RotateCcw, ArrowUpRight, Magnet, Plus,
+  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye
 } from 'lucide-react';
 
 export interface SceneInspectorWindowProps {
@@ -20,6 +21,57 @@ export interface SceneInspectorWindowProps {
   camera?: THREE.Camera;
   assetManager?: AssetManager;
   spatialPanelManager?: SpatialPanelManager;
+  /**
+   * Video action callbacks. Only used when the selected asset is a
+   * video; null when not. Wired by App.tsx to forward into
+   * AssetManager.applyVideoState (+ NetworkService.broadcastVideoState
+   * for the shared-with-peers fields). Passed as a single bundle
+   * rather than 8 separate props so the inspector's prop surface
+   * stays readable and adding new actions doesn't touch this
+   * component's signature.
+   */
+  videoActions?: VideoActions | null;
+  /**
+   * Multiplayer panel-broadcast:
+   *   - targetObject: Object3D to dock the inspector's 3D panel at
+   *     so it follows the asset through gizmo drags / RMB grab.
+   *     Forwarded to SpatialPopUpWrapper's `parentObject` prop.
+   *     Defaults to selectedAsset?.object3d, so callers that don't
+   *     pass it explicitly get the existing camera-relative float.
+   *   - interactivePermissionGranted: when false, renders a banner
+   *     + blocks click events on the body (pointer-events-none)
+   *     so the peer's mirror view is read-only. Originated by the
+   *     originator's localRole permission gate (ROLE_PERMISSIONS in
+   *     App.tsx); the originator themselves always sees the panel
+   *     fully interactive regardless.
+   */
+  targetObject?: THREE.Object3D | null;
+  interactivePermissionGranted?: boolean;
+  /**
+   * Optional header text rendered above the title when the panel
+   * was opened from a peer's panelstate broadcast (so the mirrored
+   * view shows "X is inspecting…" instead of just "Scene Inspector").
+   * Hidden when undefined.
+   */
+  originatorHeader?: React.ReactNode;
+}
+
+/**
+ * Action bundle for the video-controls section. All mutations to
+ * video playback state go through these — the inspector component
+ * never mutates `asset.videoElement` directly. Volume in global
+ * mode is broadcast by App.tsx; local volume / mute / mode toggle
+ * are deliberately not broadcast (per-user UI preference).
+ */
+export interface VideoActions {
+  onPlay: () => void;
+  onPause: () => void;
+  onSeek: (time: number) => void;
+  onStep: (deltaSec: number) => void;
+  onVolumeChange: (vol: number) => void;
+  onVolumeModeToggle: (mode: 'global' | 'local') => void;
+  onMuteToggle: () => void;
+  onClose: () => void;
 }
 
 export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
@@ -34,7 +86,18 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   camera,
   assetManager,
   spatialPanelManager,
+  videoActions,
+  targetObject,
+  interactivePermissionGranted,
+  originatorHeader,
 }) => {
+  // Mirror of the prop with a default so we don't sprinkle `?? true`
+  // checks across the JSX. The defaults preserve the pre-broadcast
+  // behaviour: panel is fully interactive, asset docks via default
+  // propping the spatial wrapper's parentObject to selectedAsset?.object3d.
+  const interactive = interactivePermissionGranted ?? true;
+  const dockTarget = targetObject ?? selectedAsset?.object3d ?? undefined;
+
   if (!isOpen) return null;
 
   const [assetName, setAssetName] = useState(selectedAsset?.name || 'Box');
@@ -126,6 +189,38 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // we can distinguish "opened with no selection" (stay open) from
   // "selection was deleted out from under us" (auto-close).
   const hadSelectionRef = useRef(false);
+
+  // Per-asset video-event bump. When the inspected asset is a video,
+  // we listen for every meaningful playback lifecycle event on the
+  // underlying HTMLVideoElement so the inspector's render reflects
+  // the current element state (play → icon flips to Pause, volume
+  // change → slider thumb moves, timeupdate → progress bar tick).
+  // Cheap: each event handler just increments an integer — React
+  // doesn't diff tree, just schedules a render for the very next
+  // microtask. The setState's identity shift is the re-render
+  // trigger; the actual displayed values are read live from
+  // `asset.object3d.userData.videoState` so this is just a "force one
+  // more render" mechanism. timeupdate fires ~4x/sec on most
+  // browsers while playback is active, which produces a small but
+  // acceptable re-render load (the heavy meshStats useEffect above
+  // doesn't re-run because its deps array is `[selectedAsset?.id]`,
+  // not the bump counter).
+  const [, setVideoTick] = useState(0);
+
+  // Subscribe to the HTMLVideoElement lifecycle so the inspector
+  // mirrors the user's playback engine. Bound to selection id so
+  // re-selecting the same asset (e.g. via selection-clear + re-click)
+  // re-attaches cleanly.
+  useEffect(() => {
+    if (selectedAsset?.type !== 'video' || !selectedAsset.videoElement) return;
+    const v = selectedAsset.videoElement;
+    const bump = () => setVideoTick((t) => t + 1);
+    const events = ['play', 'pause', 'volumechange', 'loadedmetadata', 'ended', 'seeked', 'ratechange', 'timeupdate'];
+    events.forEach((ev) => v.addEventListener(ev, bump));
+    return () => {
+      events.forEach((ev) => v.removeEventListener(ev, bump));
+    };
+  }, [selectedAsset?.id, selectedAsset?.type, selectedAsset?.videoElement]);
 
   // Light selection sync — runs once per asset change. Holds the source-of-
   // truth state for the Reset buttons and applyTransform defaults; the
@@ -290,10 +385,17 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setSelectedNodeUUID(null);
     setExpandedNodes(new Set());
     setInspectorRootUUID(null);
-  }, [selectedAsset?.id]);
-
-  const applyTransform = (newPos = pos, newRot = rot, newScale = scale) => {
+  }, [selectedAsset?.id]);  const applyTransform = (newPos = pos, newRot = rot, newScale = scale) => {
+    // Multiplayer panel-broadcast (Issue 2 fix): gate the apply path at
+    // the handler level. The read-only mirror UI already has
+    // pointer-events-none on its body, but Tab-key navigation can still
+    // fire onChange on the X/Y/Z number inputs and the existing asset
+    // would propagate through onUpdateAsset → handleUpdateAsset →
+    // broadcastAssetUpdate to ALL peers. The early return below blocks
+    // any keyboard-driven mutation reaching the broadcast site.
+    if (!interactive) return;
     if (!selectedAsset) return;
+
     selectedAsset.object3d.position.set(newPos.x, newPos.y, newPos.z);
     selectedAsset.object3d.rotation.set(
       THREE.MathUtils.degToRad(newRot.x),
@@ -305,24 +407,28 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
 
   const handleResetPos = () => {
+    if (!interactive) return;
     const next = { x: 0, y: 1.5, z: 0 };
     setPos(next);
     applyTransform(next, rot, scale);
   };
 
   const handleResetRot = () => {
+    if (!interactive) return;
     const next = { x: 0, y: 0, z: 0 };
     setRot(next);
     applyTransform(pos, next, scale);
   };
 
   const handleResetScale = () => {
+    if (!interactive) return;
     const next = { x: 1, y: 1, z: 1 };
     setScale(next);
     applyTransform(pos, rot, next);
   };
 
   const handleUpdateMaterial = (key: string, val: any) => {
+    if (!interactive) return;
     const next = { ...matProps, [key]: val };
     setMatProps(next);
     if (!selectedAsset) return;
@@ -353,6 +459,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
 
   const handleAttachComponent = (compType: string) => {
+    if (!interactive) return;
     if (!selectedAsset) return;
     if (!attachedComponents.includes(compType)) {
       setAttachedComponents([...attachedComponents, compType]);
@@ -390,6 +497,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // world transforms through the reparenting, so the slot keeps the
   // exact pose it had before the user clicked.
   const handleInsertParent = () => {
+    if (!interactive) return;
     if (!selectedAsset) return;
     const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
     const newParent = new THREE.Group();
@@ -408,6 +516,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // node, offset slightly so the user can see it spawn under the
   // tree.
   const handleAddChild = () => {
+    if (!interactive) return;
     if (!selectedAsset) return;
     const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
     const newChild = new THREE.Group();
@@ -437,6 +546,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // Reparent the selected node so it sits directly under the scene
   // root (Three.Object3D.attach() preserves world pose).
   const handleParentUnderWorld = () => {
+    if (!interactive) return;
     if (!selectedAsset || !scene) return;
     const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
     scene.attach(target);
@@ -457,11 +567,30 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       defaultWidth={880}
       defaultHeight={560}
       initialPinned={true}
+      parentObject={dockTarget ?? undefined}
     >
+      {originatorHeader && (
+        <div className="mb-2 flex items-center gap-2 bg-purple-500/10 border border-purple-500/40 rounded-lg px-3 py-2">
+          <Eye className="w-4 h-4 text-purple-300 shrink-0" />
+          <div className="flex-1 text-[11px] text-purple-200 font-semibold">
+            {originatorHeader}
+          </div>
+        </div>
+      )}
+      {!interactive && (
+        <div className="mb-2 flex items-center gap-2 bg-amber-500/10 border border-amber-500/40 rounded-lg px-3 py-2">
+          <Eye className="w-4 h-4 text-amber-300 shrink-0" />
+          <div className="flex-1 text-[11px] text-amber-200 font-semibold">
+            Read-only mirror — your role does not include edit permission; changes here would not broadcast.
+          </div>
+        </div>
+      )}
       <div className="flex gap-2.5 font-sans text-xs select-none" style={{ height: '460px' }}>
 
         {/* LEFT PANE: Hierarchy Tree */}
-        <div className="w-56 bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 overflow-y-auto">
+        <div className={`w-56 bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 overflow-y-auto ${
+          !interactive ? 'pointer-events-none opacity-80' : ''
+        }`}>
           <div className="flex items-center justify-between border-b border-slate-800 pb-2">
             <span className="font-bold text-cyan-300 uppercase font-mono tracking-wider text-[11px] truncate">
               {inspectorRootUUID
@@ -593,8 +722,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
         </div>
 
         {/* RIGHT PANE: Slot Inspector & Components */}
-        <div className="flex-1 bg-slate-950/60 border border-slate-800 rounded-xl p-3 overflow-y-auto flex flex-col gap-3 custom-scrollbar">
-          
+        <div className={`flex-1 bg-slate-950/60 border border-slate-800 rounded-xl p-3 overflow-y-auto flex flex-col gap-3 custom-scrollbar ${
+          !interactive ? 'pointer-events-none opacity-85' : ''
+        }`}>
+
           {/* SLOT HEADER */}
           <div className="flex flex-col gap-2.5 bg-slate-900/80 p-2.5 rounded-xl border border-slate-700/80 shadow-md">
             <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
@@ -984,7 +1115,36 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>}
           </div>
 
-          {/* COMPONENT 3: StaticTexture2D */}
+          {/* COMPONENT 0: Video Controls (only rendered when the selected asset is a video).
+              Positioned at the top so it's the first thing the user sees after
+              Slot Header. Asset type drives inclusion so non-video assets don't
+              render an empty video card. The component is dumb — it just emits
+              callbacks that App.tsx forwards to AssetManager.applyVideoState +
+              NetworkService.broadcastVideoState. */}
+          {selectedAsset?.type === 'video' && videoActions && (
+            <VideoControls
+              state={((selectedAsset.object3d.userData as { videoState?: import('../engine/AssetManager.ts').VideoPlaybackState }).videoState) ?? {
+                playing: false,
+                currentTime: 0,
+                duration: 0,
+                globalVolume: 0.8,
+                localVolume: 0.8,
+                volumeMode: 'global',
+                muted: true,
+              }}
+              onPlay={videoActions.onPlay}
+              onPause={videoActions.onPause}
+              onSeek={videoActions.onSeek}
+              onStep={videoActions.onStep}
+              onVolumeChange={videoActions.onVolumeChange}
+              onVolumeModeToggle={videoActions.onVolumeModeToggle}
+              onMuteToggle={videoActions.onMuteToggle}
+              onClose={videoActions.onClose}
+              compact={true}
+            />
+          )}
+
+          {/* COMPONENT 1: StaticMesh / SkinnedMeshRenderer */}
           <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
             <div
               onClick={() => toggleSection('texture')}

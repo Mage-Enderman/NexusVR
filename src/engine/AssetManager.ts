@@ -8,6 +8,44 @@ import type { ImportConfig } from '../components/AssetImportDialog.tsx';
 
 export type AssetType = '3d-model' | 'image' | 'video' | 'vrm' | 'misc' | 'primitive';
 
+/**
+ * Per-video playback state. Stored on `asset.object3d.userData.videoState`
+ * so it's intrinsically tied to the Three.js node (mirroring how
+ * `isPersistent` is stored on the same userData object). Consumers (the
+ * React inspector, the VR HUD inspector, and any other UI) read this
+ * synchronously without subscribing to a separate event stream.
+ *
+ * Split into broadcast-relevant and local-only fields:
+ *   - `playing`, `currentTime`, `globalVolume` are shared with peers
+ *     (act on the room's "shared reality": everyone should see the same
+ *     content at the same time and same loudness).
+ *   - `localVolume`, `volumeMode`, `muted` are local-only. Each user
+ *     picks whether they're listening at the room's global volume or at
+ *     their own overridden level; the mute flag is a personal safety
+ *     override that doesn't clobber either remembered volume.
+ *
+ * The applied `video.volume` is always derived:
+ *   `video.volume = (muted ? 0 : (volumeMode === 'global' ? globalVolume : localVolume))`
+ * So switching the toggle live updates the playback volume and the play /
+ * pause decisions remain global.
+ */
+export interface VideoPlaybackState {
+  /** Is the video currently playing. Updated via HTMLVideoElement events. */
+  playing: boolean;
+  /** Current playback position in seconds. Mirrored from `video.currentTime`. */
+  currentTime: number;
+  /** Total duration in seconds. Mirrored from `video.duration` after metadata loads. */
+  duration: number;
+  /** Volume level applied to all users when in 'global' mode (0..1). */
+  globalVolume: number;
+  /** Per-user volume override (0..1). Never broadcast. */
+  localVolume: number;
+  /** Which volume slider is "active" — controls whether slider changes broadcast. */
+  volumeMode: 'global' | 'local';
+  /** Local-only mute toggle. Stored separately from volume so it survives scroll/swap. */
+  muted: boolean;
+}
+
 export interface LoadedAsset {
   id: string;
   name: string;
@@ -466,19 +504,27 @@ export class AssetManager {
     video.src = url;
     video.crossOrigin = 'anonymous';
     video.loop = config ? config.videoLoop : true;
-    video.muted = false;
+    // Start muted so an importing user isn't blasted with audio. They
+    // explicitly unmute via the video controls — keeps video imports
+    // courteous in social / VR sessions where a sudden sound blast
+    // would be unwelcome. The persistent `muted=true` flag in
+    // userData.videoState keeps this fact authoritative even if some
+    // browser policy toggles the html element's muted attribute.
+    video.muted = true;
     video.volume = 0.8;
-    
-    if (!config || config.videoAutoplay) {
-      video.play().catch(() => {
-        video.muted = true;
-        video.play();
-      });
-    }
+
+    // Do NOT autoplay regardless of `config.videoAutoplay`. The
+    // previous behaviour auto-played with sound; users complained
+    // that an import landed alongside their camera focus and started
+    // screaming before they could mute it. Now they explicitly hit
+    // Play. Imports always start PAUSED + MUTED so the importing
+    // user has a moment to decide whether they want sound. `config
+    // .videoAutoplay` is no longer honored — leave the field in the
+    // type for source compatibility but treat it as a documented no-op.
 
     const texture = new THREE.VideoTexture(video);
     texture.colorSpace = THREE.SRGBColorSpace;
-    
+
     let width = 3.0;
     let height = 1.6875; // 16:9
     if (config?.videoAspectRatio === '9:16') {
@@ -503,6 +549,81 @@ export class AssetManager {
     screenMesh.position.z = 0.042;
     group.add(screenMesh);
 
+    // Source-of-truth playback state lives on userData. UI components
+    // read from it directly (no events), so the React inspector /
+    // VR HUD both see consistent values without us needing a
+    // subscribe/notify bridge that fires on every play / timeupdate.
+    // Mirrors the `isPersistent` userData pattern used elsewhere in
+    // this codebase — keeps networked + local state colocated on the
+    // same Three.js node.
+    const videoState: VideoPlaybackState = {
+      playing: false,
+      currentTime: 0,
+      duration: 0,
+      globalVolume: 0.8,
+      localVolume: 0.8,
+      volumeMode: 'global',
+      muted: true,
+    };
+    group.userData.videoState = videoState;
+
+    // Mirror the HTMLVideoElement lifecycle into the state object so
+    // the React UI's progress bar / play-button copy stays in sync
+    // without a polling rAF. timeupdate fires roughly 4x/sec on
+    // most browsers — fine for visible progress updates without
+    // thrashing React re-renders.
+    // `loadedmetadata` also drives the `'auto'` aspect-ratio path:
+    // once the browser knows the source codec dimensions we resize the
+    // frame box + screen plane so vertical / cinematic / squarish
+    // videos display at their true aspect ratio rather than the
+    // 16:9 placeholder geometry this method bakes in synchronously
+    // for the other three fixed ratio options.
+    video.addEventListener('loadedmetadata', () => {
+      videoState.duration = Number.isFinite(video.duration) ? video.duration : 0;
+      if (
+        config?.videoAspectRatio === 'auto' &&
+        Number.isFinite(video.videoWidth) && video.videoWidth > 0 &&
+        Number.isFinite(video.videoHeight) && video.videoHeight > 0
+      ) {
+        const aspect = video.videoWidth / video.videoHeight;
+        // Hold the vertical extent at the existing 16:9 placeholder
+        // height (`height`, captured in the closure above) and let the
+        // horizontal extent stretch / shrink to match the source. This
+        // keeps the scene composition familiar for HD videos (where
+        // height stays at ~1.69m and width = 1.69 × aspect) while
+        // gracefully handling 9:16 / 21:9 / 4:3 / 1:1 etc. Vertical
+        // videos therefore render as narrow tall strips, cinematic
+        // videos as wide rectangular panels, etc. — the user sees the
+        // actual shape of their source instead of a stretched 16:9.
+        const newHeight = height;
+        const newWidth = newHeight * aspect;
+        frame.geometry.dispose();
+        frame.geometry = new THREE.BoxGeometry(newWidth + 0.1, newHeight + 0.1, 0.08);
+        screenMesh.geometry.dispose();
+        screenMesh.geometry = new THREE.PlaneGeometry(newWidth, newHeight);
+      }
+    });
+    video.addEventListener('timeupdate', () => {
+      videoState.currentTime = video.currentTime;
+    });
+    video.addEventListener('play', () => {
+      videoState.playing = true;
+    });
+    video.addEventListener('pause', () => {
+      videoState.playing = false;
+    });
+    video.addEventListener('volumechange', () => {
+      // Keep state.muted / volumeMode-derived value coherent with the
+      // element so re-mounting the UI after a network-snap reads
+      // consistent data. Mute is authoritative (user-driven), the
+      // mirrors handle element-driven changes like browser autoplay
+      // stripping audio.
+      videoState.muted = video.muted;
+    });
+    video.addEventListener('ended', () => {
+      videoState.playing = false;
+    });
+
     return {
       id,
       name,
@@ -513,6 +634,100 @@ export class AssetManager {
       isCollidable: true,
       videoElement: video
     };
+  }
+
+  /**
+   * Read the live playback state for a video asset. Returns null when
+   * the asset isn't a video or has been removed. Callers (React
+   * components, VR HUD drawers) read this on every render to mirror
+   * the playback engine's state in their UI. Reads are O(1) — the
+   * state object is stored on userData with a stable reference, so
+   * a property flip is immediately visible to subscribers.
+   */
+  public getVideoState(assetId: string): VideoPlaybackState | null {
+    const asset = this.assets.get(assetId);
+    if (!asset || asset.type !== 'video') return null;
+    return (asset.object3d.userData as { videoState?: VideoPlaybackState }).videoState ?? null;
+  }
+
+  /**
+   * Apply a partial playback-state mutation. Drives the
+   * HTMLVideoElement directly (so the playback engine sees the
+   * change) AND updates the userData mirror (so the UI sees the
+   * change). Element trigger fires propagate back via the
+   * `play`/`pause`/`volumechange` event listeners above — we
+   * intentionally skip re-stamping `playing` / `muted` here so the
+   * element event is the single source of truth for those flags.
+   *
+   * Returns true on successful apply, false if the asset isn't a
+   * video / isn't loaded / has no element. Callers can use the
+   * boolean to decide whether to broadcast.
+   */
+  public applyVideoState(assetId: string, partial: Partial<VideoPlaybackState>): boolean {
+    const asset = this.assets.get(assetId);
+    if (!asset || !asset.videoElement) return false;
+    const v = asset.videoElement;
+    const state = (asset.object3d.userData as { videoState?: VideoPlaybackState }).videoState;
+    if (!state) return false;
+    let changed = false;
+
+    if (partial.playing !== undefined && partial.playing !== state.playing) {
+      if (partial.playing) {
+        // play() returns a Promise — fire-and-forget; the success /
+        // failure path emits `play` / `pause` events that update
+        // userData.mirror. The .catch is silent because browser
+        // autoplay policy rejections just mean the element stays
+        // paused; the user can retry by clicking play again.
+        v.play().catch(() => { /* autoplay rejected; user must retry */ });
+      } else {
+        v.pause();
+      }
+      changed = true;
+    }
+    if (
+      partial.currentTime !== undefined &&
+      state.duration > 0 &&
+      Math.abs(partial.currentTime - state.currentTime) > 0.25
+    ) {
+      // Clamp into [0, duration-0.05] so seeking to exactly the end
+      // doesn't double-fire `ended` + the next play attempt. The
+      // 0.25-second guard prevents redundant broadcasts from
+      // scrubbing-driven micro-updates; the UI syncs back via
+      // timeupdate events regardless.
+      v.currentTime = Math.max(0, Math.min(state.duration - 0.05, partial.currentTime));
+      changed = true;
+    }
+    if (partial.globalVolume !== undefined && partial.globalVolume !== state.globalVolume) {
+      state.globalVolume = Math.max(0, Math.min(1, partial.globalVolume));
+      if (state.volumeMode === 'global' && !state.muted) {
+        v.volume = state.globalVolume;
+      }
+      changed = true;
+    }
+    if (partial.localVolume !== undefined && partial.localVolume !== state.localVolume) {
+      state.localVolume = Math.max(0, Math.min(1, partial.localVolume));
+      if (state.volumeMode === 'local' && !state.muted) {
+        v.volume = state.localVolume;
+      }
+      changed = true;
+    }
+    if (partial.volumeMode !== undefined && partial.volumeMode !== state.volumeMode) {
+      state.volumeMode = partial.volumeMode;
+      // Re-apply whichever volume is now active. Mute override
+      // preserved: muted=true forces volume=0 regardless of slider.
+      v.volume = state.muted ? 0 : state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
+      changed = true;
+    }
+    if (partial.muted !== undefined && partial.muted !== state.muted) {
+      v.muted = partial.muted;
+      // Element volumechange event will reflect v.muted ↔ state.muted;
+      // we set the derived volume here so the next read is consistent
+      // even if the event hasn't fired yet (event loop ordering).
+      v.volume = partial.muted ? 0 : state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
+      state.muted = partial.muted;
+      changed = true;
+    }
+    return changed;
   }
 
 

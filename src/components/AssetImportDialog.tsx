@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
 import type { AssetManager } from '../engine/AssetManager.ts';
 import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
-import { Upload, FileBox, Image as ImageIcon, Video, User, Link2, Sliders, ArrowRight } from 'lucide-react';
+import { Upload, FileBox, Image as ImageIcon, Video, User, Link2, Sliders, ArrowRight, Eye, Lock } from 'lucide-react';
 
 export interface ImportConfig {
   file?: File;
@@ -35,6 +35,22 @@ interface AssetImportDialogProps {
   camera?: THREE.Camera;
   assetManager?: AssetManager;
   spatialPanelManager?: SpatialPanelManager;
+  /**
+   * Multiplayer panel-broadcast (panel-broadcast feature):
+   *  - interactivePermissionGranted: when false, render a banner that
+   *    explains this is a read-only mirror of someone else's import
+   *    panel, and disable the file/url inputs + the submit button
+   *    so edits don't accidentally fire onImport (which would create
+   *    an asset from a peer's configuration, not the local user's).
+   *  - originatorHeader: optional ReactNode rendered above the title
+   *    when the panel was opened from a peer's panelstate broadcast
+   *    (so the mirror shows "X is choosing…" instead of just the
+   *    vanilla "Import & Customize Asset" title).
+   *
+   * Defaults to true so existing callers don't need to change.
+   */
+  interactivePermissionGranted?: boolean;
+  originatorHeader?: React.ReactNode;
 }
 
 export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
@@ -45,7 +61,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   camera,
   assetManager,
   spatialPanelManager,
+  interactivePermissionGranted,
+  originatorHeader,
 }) => {
+  // Mirror to a default so the rest of the JSX can use `interactive`
+  // without sprinkling `?? true` everywhere. The default preserves the
+  // pre-broadcast behaviour: full interactivity, default title.
+  const interactive = interactivePermissionGranted ?? true;
   const [selectedFile, setSelectedFile] = useState<File | null>(initialFile || null);
   const [urlInput, setUrlInput] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'file' | 'url'>(initialFile ? 'file' : 'file');
@@ -65,7 +87,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const [maxResolution, setMaxResolution] = useState<'original' | '1024' | '512' | '2048'>('original');
 
   // Video settings
-  const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16' | '1:1' | 'auto'>('16:9');
+  // Default 'auto' — read the actual videoWidth/videoHeight off the
+  // <video> element once metadata loads and resize the imported plane
+  // to match. Users importing vertical / cinematic / squarish videos no
+  // longer have to flip a dropdown to avoid a stretched preview. They
+  // can still pin a fixed ratio via the buttons (which set state to
+  // '1:1' / '9:16' / '16:9' on click).
+  const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16' | '1:1' | 'auto'>('auto');
   const [videoLoop, setVideoLoop] = useState<boolean>(true);
   const [videoAutoplay, setVideoAutoplay] = useState<boolean>(true);
 
@@ -107,6 +135,14 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   };
 
   const handleSubmit = async () => {
+    // Guard against submitting from a read-only mirror. Without this, a
+    // peer's accidental click on the "Import & Spawn" button of someone
+    // else's import dialog would call onImport with the originator's
+    // settings + the peer's file picker result, creating a confusing
+    // hybrid config that would then broadcastSpawn a malformed asset.
+    // Originator themselves always has interactive=true so the check
+    // is a no-op for them.
+    if (!interactive) return;
     if (!selectedFile && !urlInput.trim()) return;
     setIsSubmitting(true);
 
@@ -150,16 +186,49 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       initialPinned={true}
     >
       <div
-        className="w-full flex flex-col p-3 bg-slate-950/95 text-white overflow-hidden font-sans text-xs select-none"
+        className={`w-full flex flex-col p-3 bg-slate-950/95 text-white overflow-hidden font-sans text-xs select-none ${
+          !interactive ? 'opacity-90' : ''
+        }`}
         onClick={(e) => e.stopPropagation()}
         style={{ height: '440px', maxHeight: '72vh' }}
       >
 
+        {/* Read-only banner + originator header (panel-broadcast feature).
+            Both render conditionally above the form so a peer's mirror view
+            shows clear context about WHO opened the panel and WHAT their
+            permission level allows. */}
+        {(originatorHeader || !interactive) && (
+          <div className="mb-2 space-y-1.5">
+            {originatorHeader && (
+              <div className="flex items-center gap-2 bg-purple-500/10 border border-purple-500/40 rounded-lg px-3 py-2">
+                <Eye className="w-4 h-4 text-purple-300 shrink-0" />
+                <div className="flex-1 text-[11px] text-purple-200 font-semibold">
+                  {originatorHeader}
+                </div>
+              </div>
+            )}
+            {!interactive && (
+              <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/40 rounded-lg px-3 py-2">
+                <Lock className="w-4 h-4 text-amber-300 shrink-0" />
+                <div className="flex-1 text-[11px] text-amber-200 font-semibold">
+                  Read-only mirror — your role does not include spawn permission. To import your own file, close this dialog and open import locally.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Scrollable body — wraps the existing inner content (tabs, input
             area, category options, footer). The outer modal-content stays
             a HUD-like dialog with a fixed header; the body scrolls and the
-            footer lives inside it (keeps the diff small). */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4 font-sans text-xs select-none">
+            footer lives inside it (keeps the diff small). The pointer-
+            events-none wrapper below blocks all click-and-drag inside the
+            body when the panel is read-only, so even though inputs are
+            technically keyboard-navigable, the user can't accidentally fire
+            changes that wouldn't broadcast anyway. */}
+        <div className={`flex-1 overflow-y-auto custom-scrollbar pr-1 space-y-4 font-sans text-xs select-none ${
+          !interactive ? 'pointer-events-none' : ''
+        }`}>
         {/* Source Tabs: Local File vs Direct URL */}
         <div className="flex items-center gap-2 bg-slate-900/60 p-1.5 rounded-2xl border border-white/5">
           <button
@@ -454,7 +523,8 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
           <button
             type="button"
             onClick={handleSubmit}
-            disabled={(!selectedFile && !urlInput.trim()) || isSubmitting}
+            disabled={(!selectedFile && !urlInput.trim()) || isSubmitting || !interactive}
+            title={!interactive ? 'Read-only mirror: spawn disabled while viewing a peer panel' : undefined}
             className="btn btn-primary text-xs py-2 px-6 bg-gradient-to-r from-[#00f0ff] to-[#0088ff] text-black font-bold disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             {isSubmitting ? (

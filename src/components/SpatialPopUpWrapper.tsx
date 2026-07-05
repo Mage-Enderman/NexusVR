@@ -20,6 +20,23 @@ export interface SpatialPopUpWrapperProps {
   initialPinned?: boolean;
   /** Unique id used as the panel key in SpatialPanelManager */
   panelId?: string;
+  /**
+   * Optional Object3D parent for the panel. When supplied, the panel
+   * group's transform follows the parent's local frame, so 3D-locked
+   * inspectors / modals ride along with their target asset through
+   * gizmo drags + RMB grab + VR locomotion. The default
+   * camera-relative placement still applies when this is undefined
+   * (e.g. the import dialog, which has no asset context).
+   *
+   * Changes to this prop trigger a destroy + recreate of the
+   * underlying SpatialPanelManager entry — the wrapper does NOT
+   * re-parent in-place because the existing createPanel path does
+   * `parent.add(group)` once. A recreate is heavy enough to be
+   * acceptable for the user-driven assignment flow (click asset →
+   * targetAssetId changes), but try NOT to bind this to a parent
+   * that mutates every frame.
+   */
+  parentObject?: THREE.Object3D;
 }
 
 /**
@@ -54,6 +71,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   defaultHeight = 640,
   initialPinned = true,
   panelId,
+  parentObject,
 }) => {
   const id = panelId ?? `spatial_${title.replace(/\s+/g, '_').toLowerCase()}`;
   const [isPinned, setIsPinned] = useState<boolean>(initialPinned);
@@ -84,8 +102,21 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
     domContainer.style.width = `${defaultWidth}px`;
     domContainer.style.height = `${defaultHeight}px`;
 
-    // Create the CSS3DObject in the scene
-    const group = spatialPanelManager.createPanel(id, domContainer, scene, camera, defaultWidth, defaultHeight);
+    // Create the CSS3DObject in the scene. Pass `parentObject` so the
+    // panel docks at the supplied Object3D's local frame (e.g. an
+    // asset's three.Object3d). When undefined, createPanel falls back
+    // to its default camera-relative placement (good for the import
+    // dialog, which has no asset context).
+    const group = spatialPanelManager.createPanel(
+      id,
+      domContainer,
+      scene,
+      camera,
+      defaultWidth,
+      defaultHeight,
+      parentObject,        // optional — see SpatialPanelManager.createPanel
+      undefined            // anchorOffset — use default for now
+    );
 
     // Register the frame group as a custom asset so ManipulationManager can
     // select/grab it via RMB (same as any 3D object)
@@ -96,6 +127,12 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
       assetManager?.unregisterCustomAsset(assetIdKey);
       spatialPanelManager.destroyPanel(id);
     };
+    // NB: parentObject is intentionally NOT a dep — re-creating the
+    // panel on parent-object identity changes is the heavy recovery
+    // path (see `useEffect` target asset change flow). When the parent
+    // prop changes App.tsx is expected to remount the wrapper (key=
+    // selectedAsset?.id) so we only pay the recreate cost once per
+    // asset, not on every render.
   }, [isOpen, isPinned, scene, camera, spatialPanelManager, id, title, assetManager, defaultWidth, defaultHeight]);
 
   // ---- Scale sync (scale buttons → 3D group) ------------------------------

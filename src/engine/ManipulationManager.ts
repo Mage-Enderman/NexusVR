@@ -789,6 +789,17 @@ export class ManipulationManager {
   };
 
   private onMouseDownWindow = (e: MouseEvent): void => {
+    // BUGFIX: bail out when the radial context menu is open. This
+    // listener is attached with { capture: true } at window scope and
+    // runs BEFORE the menu's own handler; without this early-return,
+    // a left-click on the menu's "Destroy" slice (held tab) while an
+    // object is grabbed was hijacked by the snap-rotate branch below
+    // — `e.stopImmediatePropagation()` swallowed the event, the held
+    // object silently rotated 90\u00b0, and `RadialContextMenu`'s
+    // `onClickAction` for `onDestroy?.()` never fired. Mirrors the
+    // `(window as any).__isRadialMenuOpen` flag maintained by
+    // `RadialContextMenu`'s mount/unmount useEffect.
+    if ((window as any).__isRadialMenuOpen) return;
     if (e.button === 0 && this.isGrabDragging && this.grabbedAsset) {
       e.preventDefault();
       e.stopImmediatePropagation();

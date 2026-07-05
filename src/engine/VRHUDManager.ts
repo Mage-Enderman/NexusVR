@@ -1618,6 +1618,138 @@ export class VRHUDManager {
 
     // ===== SLOT HEADER (y 190..254) =====
     drawCard(190, 254, 'SLOT HEADER', '#a855f7');
+    // Video controls card sits BETWEEN slot header and basic when
+    // the selected asset is a video. A yShift pushes all later
+    // sections down so the layout doesn't overlap. We pre-declare
+    // yShift = 0 so the bulk of the renderer can keep using literal
+    // y-coords (only the BASIC card origin branches on it).
+    let yShift = 0;
+    if (sel.type === 'video') {
+      yShift = 110;
+      const vcTop = 264;
+      const vcBot = 264 + yShift;
+      drawCard(vcTop, vcBot, 'VIDEO CONTROLS', '#ec4899');
+      // Read live videoState from userData so the values always
+      // mirror the HTMLVideoElement engine state (no event-bridge).
+      const vs = (sel.object3d.userData as {
+        videoState?: {
+          playing: boolean;
+          currentTime: number;
+          duration: number;
+          globalVolume: number;
+          localVolume: number;
+          volumeMode: 'global' | 'local';
+          muted: boolean;
+        }
+      }).videoState;
+
+      // Top row: PLAY / PAUSE (single toggle button), SKIP BACK/FR
+      const vRowY = vcTop + 30;
+      const vBtnH = 36;
+      const vBtnGap = 8;
+      const colW = (w - 80 - vBtnGap * 4) / 5;
+      drawBtn(
+        56 + 0 * (colW + vBtnGap), vRowY, colW, vBtnH,
+        vs?.playing ? '❚❚ PAUSE' : '▶ PLAY',
+        vs?.playing ? 'inspect.video:pause' : 'inspect.video:play',
+        vs?.playing ? 'rgba(245,158,11,0.20)' : 'rgba(16,185,129,0.20)',
+        vs?.playing ? '#fbbf24' : '#86efac',
+        vs?.playing ? '#f59e0b' : '#10b981'
+      );
+      drawBtn(
+        56 + 1 * (colW + vBtnGap), vRowY, colW, vBtnH,
+        '⏮ SKIP -5',
+        'inspect.video:seekPrev',
+        'rgba(30,41,59,0.7)', '#cbd5e1', '#475569'
+      );
+      drawBtn(
+        56 + 2 * (colW + vBtnGap), vRowY, colW, vBtnH,
+        'SKIP +5 ⏭',
+        'inspect.video:seekNext',
+        'rgba(30,41,59,0.7)', '#cbd5e1', '#475569'
+      );
+      drawBtn(
+        56 + 3 * (colW + vBtnGap), vRowY, colW, vBtnH,
+        '↺ RESTART',
+        'inspect.video:restart',
+        'rgba(30,41,59,0.7)', '#cbd5e1', '#475569'
+      );
+      drawBtn(
+        56 + 4 * (colW + vBtnGap), vRowY, colW, vBtnH,
+        vs?.muted ? '♫ UNMUTE' : '♫ MUTE',
+        'inspect.video:toggleMute',
+        vs?.muted ? 'rgba(244,63,94,0.20)' : 'rgba(6,182,212,0.20)',
+        vs?.muted ? '#fda4af' : '#67e8f9',
+        vs?.muted ? '#f43f5e' : '#06b6d4'
+      );
+
+      // Middle row: VOL down / VAL readout / VOL up
+      const vRow2Y = vRowY + vBtnH + 10;
+      drawBtn(
+        56 + 0 * (colW + vBtnGap), vRow2Y, colW, vBtnH,
+        'VOL −',
+        'inspect.video:volDown',
+        'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444'
+      );
+      // Center: VOL % readout drawn into a non-interactive strip
+      const ctrX = 56 + 1 * (colW + vBtnGap);
+      const ctrW = colW * 3 + vBtnGap * 2;
+      ctx.fillStyle = 'rgba(30,41,59,0.7)';
+      ctx.fillRect(ctrX, vRow2Y, ctrW, vBtnH);
+      ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
+      ctx.strokeRect(ctrX, vRow2Y, ctrW, vBtnH);
+      const activeVol = vs
+        ? (vs.volumeMode === 'global' ? vs.globalVolume : vs.localVolume)
+        : 0;
+      const shownPct = Math.round((vs?.muted ? 0 : activeVol) * 100);
+      ctx.fillStyle = vs?.volumeMode === 'global' ? '#67e8f9' : '#f0abfc';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(
+        (vs?.volumeMode === 'global' ? 'GLOBAL' : 'LOCAL') + ' ' + shownPct + '%',
+        ctrX + ctrW / 2, vRow2Y + vBtnH / 2
+      );
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      drawBtn(
+        ctrX + ctrW + vBtnGap, vRow2Y, colW, vBtnH,
+        'VOL +',
+        'inspect.video:volUp',
+        'rgba(16,185,129,0.20)', '#86efac', '#10b981'
+      );
+
+      // Bottom row: GLOBL mode toggle | LOCAL mode toggle | CLOSE
+      // (no duplicate mute -- the top-row mute button is sufficient)
+      // Uses 3-col layout so each occupies a third of the panel width,
+      // no orphan gap. colW3 is local to this row.
+      const vRow3Y = vRow2Y + vBtnH + 10;
+      const colGap3 = 10;
+      const colW3 = (w - 80 - colGap3 * 2) / 3;
+      drawBtn(
+        56 + 0 * (colW3 + colGap3), vRow3Y, colW3, vBtnH,
+        'GLOBL ◐',
+        'inspect.video:mode:global',
+        vs?.volumeMode === 'global'
+          ? 'rgba(6,182,212,0.20)' : 'rgba(30,41,59,0.7)',
+        vs?.volumeMode === 'global' ? '#67e8f9' : '#cbd5e1',
+        vs?.volumeMode === 'global' ? '#06b6d4' : '#475569'
+      );
+      drawBtn(
+        56 + 1 * (colW3 + colGap3), vRow3Y, colW3, vBtnH,
+        'LOCAL ◑',
+        'inspect.video:mode:local',
+        vs?.volumeMode === 'local'
+          ? 'rgba(244,114,182,0.20)' : 'rgba(30,41,59,0.7)',
+        vs?.volumeMode === 'local' ? '#f0abfc' : '#cbd5e1',
+        vs?.volumeMode === 'local' ? '#f472b6' : '#475569'
+      );
+      drawBtn(
+        56 + 2 * (colW3 + colGap3), vRow3Y, colW3, vBtnH,
+        '✕ CLOSE',
+        'inspect.video:close',
+        'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444'
+      );
+    }
+
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = '#ffffff'; ctx.font = 'bold 18px sans-serif';
     const headerName = (sel.name?.length ? sel.name : o3d.name || 'Unnamed').slice(0, 32);
@@ -1634,9 +1766,9 @@ export class VRHUDManager {
     drawBtn(bx, headerBtnY,    headerBtnW, headerBtnH, 'DESTROY',  'inspect.destroy:selected','rgba(239,68,68,0.20)',  '#fca5a5', '#ef4444');
 
     // ===== BASIC + HIERARCHY + PARENT (y 264..366) =====
-    drawCard(264, 366, 'BASIC PROPS + HIERARCHY', '#10b981');
+    drawCard(264 + yShift, 366 + yShift, 'BASIC PROPS + HIERARCHY', '#10b981');
     // Three toggle/cycle buttons across the top row
-    const basicY = 290;
+    const basicY = 290 + yShift;
     const basicH = 36;
     const basicW = 220;
     let bsx = 56;
@@ -1672,7 +1804,7 @@ export class VRHUDManager {
 
     // Three hierarchy buttons across the bottom row + a read-only parent
     // line so the user knows what they're reparenting from.
-    const hierY = 332;
+    const hierY = 332 + yShift;
     const hierH = 28;
     const hierW = 220;
     let hsx = 56;
@@ -1684,13 +1816,13 @@ export class VRHUDManager {
     // Parent-name read-out (sits beneath the row, smaller font)
     const parentName = o3d.parent?.name || o3d.parent?.type || '\u2014';
     ctx.fillStyle = '#64748b'; ctx.font = '12px sans-serif';
-    ctx.fillText('Current parent: ' + (parentName.length > 30 ? parentName.slice(0,29) + '\u2026' : parentName), 56, 378);
+    ctx.fillText('Current parent: ' + (parentName.length > 30 ? parentName.slice(0,29) + '\u2026' : parentName), 56, 378 + yShift);
 
     // ===== TRANSFORM (y 378..564) =====
-    drawCard(378, 564, 'TRANSFORM', '#06b6d4');
+    drawCard(378 + yShift, 564 + yShift, 'TRANSFORM', '#06b6d4');
     // 3 rows x 3 cols grid. Each cell shows axis label + current value
     // + [-] [+] [reset] buttons at the right.
-    const trStartY = 408;
+    const trStartY = 408 + yShift;
     const trCellH = 38;
     const trGapY  = 4;
     const trGapX  = 12;
@@ -1777,9 +1909,9 @@ export class VRHUDManager {
     );
 
     // ===== MESH STATS + DISPLAY (y 576..686) =====
-    drawCard(576, 686, 'MESH STATS + DISPLAY', '#f59e0b');
+    drawCard(576 + yShift, 686 + yShift, 'MESH STATS + DISPLAY', '#f59e0b');
     // Stats block (read-only) on the left half
-    const statsX = 56, statsY = 600, statsRowH = 22, statsW = 240;
+    const statsX = 56, statsY = 600 + yShift, statsRowH = 22, statsW = 240;
     ctx.fillStyle = 'rgba(15,23,42,0.65)';
     ctx.fillRect(statsX, statsY, statsW, 80);
     ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
@@ -1798,7 +1930,7 @@ export class VRHUDManager {
       ctx.fillText(v, statsX + 110, y);
     });
     // Display toggles on the right half
-    const displayX = 320, displayY = 600, displayW = (w - 80) - 264;
+    const displayX = 320, displayY = 600 + yShift, displayW = (w - 80) - 264;
     const toggleH = 26;
     const toggleRows: Array<{ label: string; action: string; on: boolean; accent: string; bg: string; }> = [
       {
@@ -1832,8 +1964,8 @@ export class VRHUDManager {
     });
 
     // ===== MATERIAL (y 696..758) =====
-    drawCard(696, 758, 'MATERIAL', '#06b6d4');
-    const matY = 720;
+    drawCard(696 + yShift, 758 + yShift, 'MATERIAL', '#06b6d4');
+    const matY = 720 + yShift;
     // Color R/G/B row
     const colorChans: Array<{ label: string; key: 'r'|'g'|'b' }> = [
       { label: 'R', key: 'r' }, { label: 'G', key: 'g' }, { label: 'B', key: 'b' },
@@ -1861,7 +1993,7 @@ export class VRHUDManager {
       { label: 'OPACITY',prop: 'opacity',    fmt: n => n.toFixed(2), get: () => (mat0 as THREE.MeshStandardMaterial | null)?.opacity ?? 1 },
       { label: 'EMISS',  prop: 'emissive',   fmt: n => n.toFixed(2), get: () => ((mat0 as THREE.MeshStandardMaterial | null) as any)?.emissiveIntensity ?? 1 },
     ];
-    const scalarStartY = 720 + 42;
+    const scalarStartY = 720 + yShift + 38;
     const scalarCellW = (w - 80 - cellGap * 3) / 4;
     scalarProps.forEach((p, i) => {
       const cx = 50 + i * (scalarCellW + cellGap);

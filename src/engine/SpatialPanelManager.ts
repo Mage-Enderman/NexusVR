@@ -92,6 +92,11 @@ export class SpatialPanelManager {
   // so _buildHTMLMesh can attach the InteractiveGroup to the scene root
   // without threading the parameter through. Kept null in non-VR mode.
   private sceneRef: THREE.Scene | null = null;
+  // Per-frame scratch Vector3 reused across panels in render()'s
+  // htmlMesh scale sync. Allocated once at construction to avoid
+  // per-frame per-panel GC churn — earlier this was a local
+  // allocation in render()'s loop body.
+  private _htmlMeshScaleBuf: THREE.Vector3 = new THREE.Vector3();
 
   /** Element currently under the locked crosshair, or null */
   private hoveredElement: Element | null = null;
@@ -131,12 +136,22 @@ export class SpatialPanelManager {
    * Register a panel. The caller is responsible for mounting React content
    * into `domContainer` via ReactDOM.createPortal.
    *
-   * @param id         Unique string key (e.g. 'import', 'inspector')
-   * @param domContainer  Detached <div> that React renders the panel UI into
-   * @param scene      Three.js scene to attach the group to
-   * @param camera     Three.js camera (used for initial placement)
-   * @param cssWidth   Logical pixel width of the panel content (default 520)
-   * @param cssHeight  Logical pixel height of the panel content (default 640)
+   * @param id             Unique string key (e.g. 'import', 'inspector')
+   * @param domContainer   Detached <div> that React renders the panel UI into
+   * @param scene          Three.js scene to attach the group to
+   * @param camera         Three.js camera (used for initial placement when
+   *                       `parent` is omitted)
+   * @param cssWidth       Logical pixel width of the panel content (default 520)
+   * @param cssHeight      Logical pixel height of the panel content (default 640)
+   * @param parent         Optional THREE.Object3D to parent the panel group to.
+   *                       When provided, `placeInFrontOfCamera` is skipped and
+   *                       `anchorOffset` (or a default `(0, -h/2 - 0.05, +0.06)`
+   *                       local-space anchor) is applied. Use this for in-world
+   *                       panels that need to ride along with another object's
+   *                       transform (e.g. video-controls HUD docked under a
+   *                       video asset so it follows when the video is dragged).
+   * @param anchorOffset   Optional local-space offset relative to `parent`.
+   *                       Ignored when `parent` is not provided.
    * @returns The THREE.Group anchor — callers can read/write .position / .rotation / .scale
    */
   public createPanel(
@@ -145,7 +160,9 @@ export class SpatialPanelManager {
     scene: THREE.Scene,
     camera: THREE.Camera,
     cssWidth = 520,
-    cssHeight = 640
+    cssHeight = 640,
+    parent?: THREE.Object3D,
+    anchorOffset?: THREE.Vector3
   ): THREE.Group {
     // Destroy any existing entry with the same id
     if (this.panels.has(id)) this.destroyPanel(id);
@@ -162,6 +179,32 @@ export class SpatialPanelManager {
     domContainer.style.background = 'transparent';
     domContainer.style.borderRadius = '16px';
     domContainer.style.overflow = 'hidden';
+    // CRITICAL: enable pointer-events on the panel's DOM content. The
+    // CSS3DRenderer overlay (cssEl) is intentionally `pointer-events:
+    // none` so that clicks on EMPTY space over the panel area fall
+    // through to the WebGL canvas underneath (which is what power-users
+    // expect — the 3D world is the canvas, panels are floats on top).
+    // But `pointer-events: none` CASCADES to all descendants unless a
+    // descendant explicitly sets `pointer-events: auto`. Without this
+    // override the click target for a panel-button press becomes the
+    // WebGL canvas BELOW the panel DOM, which fires the canvas's
+    // `click` listener and triggers `requestPointerLock()` in
+    // `SceneEngine.onCanvasClickForLock`. Result: every panel-button
+    // click silently re-acquires the crosshair, and the user is
+    // trapped in the same "click UI → lock cursor → click crosshair →
+    // nothing happens" loop they reported.
+    //
+    // Setting `pointer-events: auto` on domContainer restores correct
+    // hit-testing: empty overlay space falls through to canvas (good
+    // — raycasts the 3D world), panel CONTENT receives clicks normally
+    // (good — React handlers fire, button onClicks run, inputs focus).
+    // The same fix also unblocks `updateLockedHover`'s
+    // `document.elementFromPoint(cx, cy)` raycast when the crosshair
+    // is over the panel — `elementFromPoint` honours explicit `auto`
+    // descendants even when the overlay ancestor has `none`, so
+    // `spm.isOverPanel` flips to true and the synthetic mousedown/
+    // mouseup/click `handleLockedClick` dispatches reach React.
+    domContainer.style.pointerEvents = 'auto';
 
     const css3dObject = new CSS3DObject(domContainer);
     css3dObject.scale.setScalar(cssScale);
@@ -177,10 +220,34 @@ export class SpatialPanelManager {
     group.add(css3dObject);
     group.add(frameGroup);
 
-    // ---- Initial world placement --------------------------------------------
-    this._placeInFrontOfCamera(group, camera);
+    // Stash whether this panel rides along with another object. Read by
+    // `render()` so it always uses world coordinates for the VR Mesh
+    // sync (a nested group's local transform != its world transform).
+    group.userData.spatialPanelParent = parent ?? null;
 
-    scene.add(group);
+    // ---- Initial placement --------------------------------------------------
+    if (parent) {
+      // Nested case — apply local-space anchorOffset relative to parent.
+      // Default offset places the panel just below the parent's local
+      // origin in Y, slightly forward in Z, so a video control HUD
+      // appears tucked under a video mesh by default. Callers can
+      // override via `anchorOffset`.
+      const offset =
+        anchorOffset ??
+        new THREE.Vector3(0, -(cssHeight * cssScale) / 2 - 0.05, 0.06);
+      parent.add(group);
+      group.position.copy(offset);
+      // Match the parent's world rotation so the panel faces the same
+      // direction the parent does. For non-rotation-sensitive parents
+      // (e.g. a video mesh whose CSS3DObject plane faces -Z) the
+      // caller can override by writing group.rotation directly after
+      // createPanel returns.
+      group.quaternion.copy(parent.quaternion);
+    } else {
+      // Floating case — use camera-relative placement as before.
+      this._placeInFrontOfCamera(group, camera);
+      scene.add(group);
+    }
 
     const entry: SpatialPanelEntry = {
       domContainer,
@@ -387,16 +454,62 @@ export class SpatialPanelManager {
   }
 
   /**
-   * Dispatch a wheel/scroll event to the currently hovered panel element.
-   * Call from App.tsx scroll handler when pointer-locked and over a panel.
+   * Scroll the panel under the locked crosshair by `deltaY`.
+   * Call from App.tsx / SceneEngine scroll handler when pointer-locked
+   * and over a panel.
+   *
+   * Implementation note: the previous version dispatched a synthetic
+   * `WheelEvent` via `el.dispatchEvent(...)` and relied on bubbling to
+   * a scrollable ancestor. That LOOKED correct but failed silently
+   * because Chromium and Firefox both ignore untrusted wheel events
+   * for the actual scroll-position code path — they fire the listener
+   * but do NOT update `scrollTop`. Only user-generated (trusted) wheel
+   * events drive scrolling.
+   *
+   * Pointer-lock also routes wheel events to the locked element — the
+   * panel DOM never sees a real wheel from the user while locked —
+   * so the only reliable path here is to walk up from `hoveredElement`
+   * to the closest scrollable ancestor and mutate `scrollTop` directly.
+   * That mirrors what a trusted wheel would have done.
    */
   public handleLockedScroll(deltaY: number): boolean {
     const el = this.hoveredElement;
     if (!el) return false;
-    el.dispatchEvent(
-      new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY, deltaMode: 0 })
-    );
+    const scrollable = this._findScrollableAncestor(el);
+    if (!scrollable) return false;
+    scrollable.scrollTop += deltaY;
     return true;
+  }
+
+  /**
+   * Walk up the DOM from `el` to find the nearest scrollable ancestor
+   * (`overflow-y: auto|scroll` + actual content overflow). Used by
+   * `handleLockedScroll` so the synthetic wheel dispatch — which the
+   * browser refuses to use for actual scrolling — can be replaced by a
+   * direct `scrollTop` mutation. Stops at `document` (the panel's
+   * domContainer sits inside the CSS3D overlay which sits inside the
+   * scene container — walking past the container would hit the document
+   * and try to scroll the whole page, which is rarely what the user
+   * wants inside a spatial panel).
+   */
+  private _findScrollableAncestor(el: Element | null): HTMLElement | null {
+    let cur: HTMLElement | null = el as HTMLElement | null;
+    while (cur && cur !== document.documentElement) {
+      const cs = window.getComputedStyle(cur);
+      const overflowY = cs.overflowY;
+      const isScrollableY = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+      // `scrollHeight > clientHeight` distinguishes a scrollable that
+      // ACTUALLY needs scrolling (e.g. our `overflow-y-auto` body) from
+      // an outer panel chrome (header / grip rail / footer) that has
+      // the same CSS but never overflows in practice. `clientHeight > 0`
+      // filters out zero-height measurement quirks right after a panel
+      // mounts before its flex children have laid out.
+      if (isScrollableY && cur.clientHeight > 0 && cur.scrollHeight > cur.clientHeight) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+    return null;
   }
 
   /** Clear hover state (call on pointer unlock so stale hover doesn't persist). */
@@ -476,14 +589,22 @@ export class SpatialPanelManager {
   /**
    * Must be called AFTER renderer.render(scene, camera) each frame.
    *
-   * Desktop mode: render the CSS3DRenderer overlay.
-   * VR mode: sync each htmlMesh's LOCAL transform to its panel group's
-   *   WORLD transform. The InteractiveGroup we attach the htmlMesh to
-   *   sits in the scene at identity (see _buildHTMLMesh) so the
-   *   local-transform copy equals the world position the panel content
-   *   should appear at — preserving the visual "panel follows its
-   *   group" behaviour without reparenting the XR controllers to a
-   *   moving parent.
+   * Desktop mode: render the CSS3DRenderer overlay (CSS3DObject handles
+   *   world-matrix updates internally via Object3D.updateMatrixWorld()).
+   * VR mode: each frame, sync each htmlMesh's LOCAL transform to its
+   *   panel group's WORLD transform. The InteractiveGroup we attach the
+   *   htmlMesh to sits in the scene at identity (see _buildHTMLMesh) so
+   *   the htmlMesh's LOCAL transform needs to be set to the GROUP's
+   *   WORLD transform — the InteractiveGroup itself isn't moved.
+   *
+   *   This used to copy local transforms unconditionally, which only
+   *   happened to produce the right answer for scene-root panels (where
+   *   local transform == world transform). Nested panels (e.g. video-
+   *   controls parked under a video group in the scene graph) silently
+   *   drifted into the wrong place because their GROUP.position holds
+   *   LOCAL coordinates relative to the video object. Now we always
+   *   sample world transform — works for both scene-root and nested
+   *   panels without extra bookkeeping.
    */
   public render(scene: THREE.Scene, camera: THREE.Camera): void {
     if (!this.isVRMode) {
@@ -496,16 +617,33 @@ export class SpatialPanelManager {
       // panel doesn't keep its htmlMesh visible.
       if (entry.group.visible) {
         entry.htmlMesh.visible = true;
-        // ig is in the scene at identity (added in _buildHTMLMesh, never moved),
-        // so htmlMesh local transforms directly equal world transforms.
-        entry.htmlMesh.position.copy(entry.group.position);
-        entry.htmlMesh.quaternion.copy(entry.group.quaternion);
-        // Scale copy is INTENTIONAL: HTMLMesh rasterises the DOM at a
-        // fixed CSS-width x CSS-height CanvasTexture, so scaling the
-        // mesh never blurs the DOM render — the texture just covers
-        // more/fewer world-coverage-per-texel. Quality is preserved
-        // regardless of future spm.setScale() calls.
-        entry.htmlMesh.scale.copy(entry.group.scale);
+        // Always use world transform on the group → local on the htmlMesh,
+        // because the InteractiveGroup is anchored to scene root.
+        entry.group.updateMatrixWorld();
+        entry.group.getWorldPosition(entry.htmlMesh.position);
+        entry.group.getWorldQuaternion(entry.htmlMesh.quaternion);
+        // Scale: MULTIPLY the baseline cssSize (set in _buildHTMLMesh
+        // as `cssWidth*cssScale × cssHeight*cssScale`) by the group's
+        // compounded parent worldScale. Just COPYING
+        // `entry.group.getWorldScale(htmlMesh.scale)` would clobber
+        // the initial sizing — entries where the panel group has unit
+        // localScale (which is every entry, since createPanel never
+        // sets group.scale) have worldScale ≈ (1,1,1), so htmlMesh
+        // would shrink to a unit-size plane on the first frame instead
+        // of the (cssWidth*cssScale)x(cssHeight*cssScale) panel size
+        // _buildHTMLMesh configured. The multiply-by-worldScale
+        // preserves cssSize while matching the parent chain's
+        // accumulated scale (a video asset uniformly scaled 0.5x
+        // produces a 0.5x-scaled HUD strip — same behaviour as the
+        // CSS3DRenderer path, where css3dObject.scale=cssScale
+        // compounds through the chain via Object3D.updateMatrixWorld().
+        const __panel_gws = this._htmlMeshScaleBuf;
+        entry.group.getWorldScale(__panel_gws);
+        entry.htmlMesh.scale.set(
+          entry.cssWidth * entry.cssScale * __panel_gws.x,
+          entry.cssHeight * entry.cssScale * __panel_gws.y,
+          __panel_gws.z
+        );
       } else {
         entry.htmlMesh.visible = false;
       }

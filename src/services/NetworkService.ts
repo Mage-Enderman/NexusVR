@@ -42,6 +42,42 @@ export interface AssetSpawnData {
 }
 
 /**
+ * Action + identity payload for a shared UI panel (inspector /
+ * import dialog). Sent whenever one user opens OR closes a panel
+ * that peers are meant to see. The originator's identity rides
+ * along so peers can render a "X is choosing… / X is inspecting…"
+ * header on their mirror instance. close is sent ONLY by the
+ * originator; peers that hide their mirror locally must NOT
+ * broadcast — that would race-condition with the originator's
+ * intent and could prematurely close the originator's panel from
+ * a peer's POV.
+ *
+ * targetAssetId is inspector-only (import has no asset context).
+ * Receivers keys the open action on (panelId) and uses
+ * targetAssetId to look up which asset the panel was opened for.
+ * Empty targetAssetId + open means the originator opened the panel
+ * with no selection (the panel would still render — fine to render
+ * peer-side, the peer's SceneInspector handleEmpty-selection path
+ * kicks in).
+ */
+export interface PanelStateData {
+  action: 'open' | 'close';
+  panelId: 'inspector' | 'import';
+  originatorPeerId: string;
+  originatorUserName?: string;
+  /** Originator's role at broadcast time. Used by peers for header
+      "X is choosing…" rendering; ROLE_PERMISSIONS[localRole] is the
+      actual gate on peer interactivity, originator role does NOT
+      elevate peer permissions (thinker recommendation E). */
+  originatorRole?: 'admin' | 'builder' | 'moderator' | 'guest' | 'spectator';
+  /** Inspector-only: id of the asset the originator was inspecting
+      at open time. Receivers use this to set their own selectedAsset
+      so the panel renders with the same target. */
+  targetAssetId?: string | null;
+  ts: number;
+}
+
+/**
  * Header payload for an in-flight 'pending' broadcast. The host
  * emits this RIGHT BEFORE awaiting `AssetManager.importFile` /
  * `importFromUrl` (the async loads can take seconds for large GLB /
@@ -61,6 +97,29 @@ export interface PendingSpawnData {
   position: [number, number, number];
   fileSize?: number;
   url?: string;
+}
+
+/**
+ * Pay-per-update video playback state. Sent whenever one user's
+ * playback / seek / global-volume decisions should change what other
+ * users see. Only the SHARED fields ride the wire — local volume,
+ * volumeMode toggle position, and the personal mute flag are local
+ * UI state and never broadcast. Each video asset on each peer keeps
+ * its own elements + state mirror with these shared fields driven
+ * by `applyVideoState` on receive.
+ *
+ * Synced intentionally minimal so we don't churn the network on
+ * every playhead tick: `currentTime` is sent on play / pause / seek
+ * events and on play (so late joiners snap to the host's spot),
+ * NOT every frame. `playing` is the toggle mirror. `globalVolume`
+ * rides only when the user is in global-volume mode (App.tsx
+ * guards that in the broadcast call site).
+ */
+export interface VideoStateData {
+  assetId: string;
+  playing: boolean;
+  currentTime: number;
+  globalVolume: number;
 }
 
 export interface SceneStateSnapshot {
@@ -101,7 +160,27 @@ type EnvelopeType =
   //                      route with the reconstructed JSON. Without
   //                      this, Quest's WebRTC bindings would crash on
   //                      >~1MB single envelopes.
-  | 'pending' | 'pendingcancel' | 'chunk';
+  // 'vidstate'         — playback / seek / global-volume update for a
+  //                      single video asset. Peers apply the change
+  //                      via AssetManager.applyVideoState, which drives
+  //                      both the HTMLVideoElement and the userData
+  //                      mirror so the receiving inspector + UI stay
+  //                      in sync. Carries `playing`, `currentTime`,
+  //                      `globalVolume` only — local-only fields
+  //                      (localVolume, volumeMode, muted) stay local.
+  // 'panelstate'       — visibility state for a shared UI panel
+  //                      (SceneInspector / AssetImportDialog). When one
+  //                      user opens the inspector or import dialog
+  //                      with permission, peers see the same panel
+  //                      open (anchored to the asset for inspector,
+  //                      camera-relative for import). The originator's
+  //                      role/identity rides along so peers can
+  //                      render a "X is choosing… / X is inspecting…"
+  //                      header on their mirror instance. Close is
+  //                      also broadcast but ONLY by the originator —
+  //                      peers opting out of their mirror view do not
+  //                      accidentally close the originator's panel.
+  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate';
 
 interface Envelope {
   type: EnvelopeType;
@@ -229,6 +308,8 @@ export class NetworkService {
   private onModCallbacks: Set<(data: ModerationActionPayload) => void> = new Set();
   private onPendingSpawnCallbacks: Set<(data: PendingSpawnData) => void> = new Set();
   private onPendingCancelCallbacks: Set<(id: string) => void> = new Set();
+  private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
+  private onPanelStateCallbacks: Set<(data: PanelStateData) => void> = new Set();
 
   constructor() {
     this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
@@ -771,6 +852,24 @@ export class NetworkService {
         // for the matching id.
         for (const cb of this.onPendingCancelCallbacks) cb(env.payload as string);
         break;
+      case 'vidstate':
+        // Video playback update. Routes through onVideoStateCallbacks
+        // so App.tsx can apply it via AssetManager.applyVideoState.
+        // No local-source guard here — the sender's peer id is known
+        // to the receiving App.tsx layer (via the conn's peer), so
+        // echo-suppression happens on landing in the App.tsx callback.
+        for (const cb of this.onVideoStateCallbacks) cb(env.payload as VideoStateData);
+        break;
+      case 'panelstate':
+        // Shared panel visibility update. Routes through
+        // onPanelStateCallbacks so App.tsx can mirror the panel-open
+        // state and (for inspector) re-target its selectedAsset to
+        // match the originator's targetAssetId. Echoes from a peer's
+        // OWN broadcast are unchecked here — the App.tsx receive
+        // handler drops events whose originatorPeerId matches its
+        // own localPeerId (defensive against re-entry).
+        for (const cb of this.onPanelStateCallbacks) cb(env.payload as PanelStateData);
+        break;
     }
   }
 
@@ -978,6 +1077,65 @@ export class NetworkService {
   public broadcastPendingCancel(id: string): void {
     if (this.mode === 'offline') return;
     this.broadcastEnvelope(this.buildEnvelope('pendingcancel', id));
+  }
+
+  /**
+   * Broadcast a video playback state update. Carries ONLY the
+   * shared-with-peers fields (playing, currentTime, globalVolume);
+   * local-only fields (localVolume, volumeMode, muted) are filtered
+   * out so we don't waste envelope bytes and don't accidentally
+   * force one user's UI choices onto another (e.g. don't clobber
+   * their mute toggle). Callers are expected to gate the
+   * `globalVolume` field themselves — App.tsx only sends it when
+   * the local user is in 'global' volume mode.
+   */
+  public broadcastVideoState(data: VideoStateData): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('vidstate', data));
+  }
+
+  /**
+   * Broadcast a shared-panel visibility update (inspector / import
+   * dialog). Wraps `panelstate` envelope. The originator fields
+   * (peerId, userName, role) live on the payload so peers can
+   * render "X is inspecting…" headers without a separate 'hs'
+   * round-trip. Use `targetAssetId` for the inspector panel —
+   * import has no asset target.
+   *
+   * Caller is responsible for NOT broadcasting a 'close' action
+   * unless they are the originator of the open. App.tsx tracks
+   * whether the panel was opened locally or received, and only
+   * the originator path calls this with action='close'.
+   */
+  public broadcastPanelState(data: PanelStateData): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('panelstate', data));
+  }
+
+  /**
+   * Subscribe to video-state updates from peers. The callback fires
+   * for every vidstate envelope — including ones we sent ourselves,
+   * so callers should compare `conn.peer` against `net.localPeerId`
+   * (or just apply unconditionally and rely on AssetManager's
+   * `applyVideoState` no-op-on-equal-value behavior). Returning the
+   * cleanup function means subscribers can drop the listener in
+   * the same useEffect cleanup that registered it, avoiding
+   * duplicate listeners on a React StrictMode double-mount.
+   */
+  public onVideoState(cb: (data: VideoStateData) => void): () => void {
+    this.onVideoStateCallbacks.add(cb);
+    return () => this.onVideoStateCallbacks.delete(cb);
+  }
+
+  /**
+   * Subscribe to shared-panel state updates from peers. Fires for
+   * every 'panelstate' envelope including ones the local peer
+   * sent itself; the App.tsx receive handler drops echoes whose
+   * originatorPeerId matches localPeerId.
+   */
+  public onPanelState(cb: (data: PanelStateData) => void): () => void {
+    this.onPanelStateCallbacks.add(cb);
+    return () => this.onPanelStateCallbacks.delete(cb);
   }
 
   public broadcastRemove(id: string): void {
