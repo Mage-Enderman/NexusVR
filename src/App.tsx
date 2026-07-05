@@ -448,11 +448,27 @@ export const App: React.FC = () => {
       const mesh = vrRadialMenuRef.current;
       const se = sceneEngineRef.current;
       if (!mesh || mesh.disposed || !se || !se.renderer.xr.isPresenting || !mesh.isVisible) return;
-      // Always aim with the right controller (Resonite convention: the menu
-      // floats near the left wrist, the right laser aims and selects).
-      // vrRadialActiveSideRef records which controller OPENED the menu so
-      // the initial placement is correct; once open, aiming is always right.
-      const ctr = se.vrInput?.getController('right');
+      // Aim with the opening controller (single-hand / wrist-remote UX).
+      // vrRadialActiveSideRef.current is set by the B/Y press handler
+      // to 'right' on B-press or 'left' on Y-press when the menu was
+      // opened. The panel is placed near that hand's wrist once at
+      // open time, so reading the ray from the SAME controller gives
+      // the user a natural cross-axis hover + select: opening with Y
+      // -> placed at left wrist -> aiming with the left hand; opening
+      // with B -> placed at right wrist -> aiming with the right hand.
+      // The previous always-right behavior produced a panel whose
+      // placement was unreachable by the aiming ray in the Y case
+      // (panel at left wrist, ray from right side of body), so the
+      // ray never intersected the mesh and hoveredSlice stayed at
+      // -999, which made select() silently bail without firing any
+      // slice callbacks. Single-hand aim keeps the two aligned.
+      // Fall back to 'right' only in the edge case where the menu is
+      // visible but activeSide hasn't been written yet (shouldn't
+      // happen in normal flow -- isVisible is only true while
+      // activeSide is non-null because both are flipped together
+      // in the B/Y handlers).
+      const aimSide = vrRadialActiveSideRef.current ?? 'right';
+      const ctr = se.vrInput?.getController(aimSide);
       if (!ctr) return;
       ctr.updateWorldMatrix(true, false);
       // Allocation-free: hoisted scratch refs (vrRadialAim*Ref) reused
@@ -464,10 +480,11 @@ export const App: React.FC = () => {
         .applyQuaternion(vrRadialAimDirQuatRef.current)
         .normalize();
       // The panel is placed near the OPENING controller once (on B/Y press),
-      // then stays world-anchored. We do NOT re-place every frame because the
-      // aim ray now comes from the RIGHT hand while the panel lives near the
-      // LEFT wrist — re-placing would chase the right controller and make it
-      // impossible to aim at the menu. Leave position static after open.
+      // then stays world-anchored. We do NOT re-place every frame because
+      // re-placing would chase whichever controller the user is currently
+      // waving around and make consistent aim impossible. Leave position
+      // static after open so the panel sits where the user's wrist was at
+      // the moment of opening -- the natural anchor for single-hand aim.
       vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
       mesh.updateAim(vrRadialAimRayRef.current);
       // NOTE: mesh.select() is intentionally NOT called here.
@@ -1325,11 +1342,51 @@ const vrHud = new VRHUDManager(
             // select() call is never dropped.
             const radialMesh = vrRadialMenuRef.current;
             if (radialMesh && radialMesh.isVisible && !radialMesh.disposed) {
-              // The right trigger is always the select trigger for the VR
-              // radial menu, regardless of which hand (B or Y) opened it.
-              // The menu opens near the left wrist; the right laser aims.
-              // Accept either trigger so left-hand-dominant users who open
-              // with B can also click with the left trigger if they prefer.
+              // PRIORITY 1 must re-aim BEFORE select().
+              // The per-frame aim rAF useEffect (around line 432) ticks on
+              // its OWN requestAnimationFrame schedule, which runs
+              // independently of WebXR's setAnimationLoop. When the user
+              // moves their controller and pulls the trigger within the
+              // same frame, the aim rAF's last tick could land BEFORE the
+              // user's movement, leaving hoveredSlice from the previous
+              // pose. select() then reads a stale hoveredSlice: if it
+              // resolves to <0 (sentinel -999 from setVisible, or any
+              // off-by-one slice number), select() exits silently without
+              // firing any callback and the user reads it as "the slice
+              // click does nothing".
+              //
+              // Rebuild the aim ray from the XR-frame-synchronous
+              // matrixWorld that VRInputManager.update() just used (it ran
+              // inside the XR loop on this same frame and is guaranteed
+              // current), then call mesh.updateAim() so hoveredSlice is
+              // authoritative for this press. The aim rAF loop still
+              // runs for the continuous hover-highlight effect — this
+              // synchronous pre-select update is the belt-and-braces
+              // fix for the click-misses-during-fast-aim case.
+              const se1 = sceneEngineRef.current;
+              if (se1?.vrInput) {
+                const aimSide1 = vrRadialActiveSideRef.current ?? 'right';
+                const ctr1 = se1.vrInput.getController(aimSide1);
+                if (ctr1) {
+                  ctr1.updateWorldMatrix(true, false);
+                  vrRadialAimOriginRef.current.setFromMatrixPosition(ctr1.matrixWorld);
+                  vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctr1.matrixWorld);
+                  vrRadialAimDirRef.current
+                    .set(0, 0, -1)
+                    .applyQuaternion(vrRadialAimDirQuatRef.current)
+                    .normalize();
+                  vrRadialAimRayRef.current.set(
+                    vrRadialAimOriginRef.current,
+                    vrRadialAimDirRef.current
+                  );
+                  radialMesh.updateAim(vrRadialAimRayRef.current);
+                }
+              }
+              // The menu was opened with the active side controller; either
+              // trigger press dispatches a select(). Left-handed users who
+              // opened with B can aim with the left trigger; right-handed
+              // users who opened with Y can aim with the right. The mesh's
+              // hoveredSlice takes care of WHICH slice is fired.
               radialMesh.select();
               return;
             }

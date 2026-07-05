@@ -20,6 +20,26 @@
 
 <!-- Copy the next block into here, then update -->
 
+### 2026-07-05 — VR radial menu: synchronous re-aim in PRIORITY 1 + telemetry
+
+- **Asked by:** user, third report ("Context menu is still not selectable/interactable I can't choose to switch to flight in VR or destroy a held object etc"). Previous fix (single-hand-aim) didn't resolve the symptom.
+- **What I tried to do:** eliminate a race between the per-frame aim rAF useEffect (which sets `mesh.hoveredSlice`) and the XR-frame-synchronous `onPressed` handler (which calls `mesh.select()`). When the user moves their controller and pulls the trigger within the same XR frame, the aim rAF's last tick could land BEFORE the user's motion, leaving hoveredSlice from the previous pose. `mesh.select()` then reads a stale hoveredSlice and silently exits when it resolves to < 0 (the -999 sentinel from `setVisible`, or any off-by-one slice). The user reads this as "the slice click does nothing."
+- **Fix applied:** PRIORITY 1 of `src/App.tsx`'s `onPressed('trigger')` handler now rebuilds the aim ray from the XR-frame-synchronous `ctr.matrixWorld` (the same matrixWorld that `VRInputManager.update()` just read inside the XR loop on this frame), then calls `mesh.updateAim()` synchronously BEFORE `radialMesh.select()`. The aim rAF loop is unchanged — it continues to drive the hover-highlight effect, while this synchronous pre-select update is the belt-and-braces fix for the click-misses-during-fast-aim case. Reuses hoisted scratch refs (`vrRadialAim*Ref`) so no new allocations per click; idempotent via `_tmp_vr_re_aim_in_trigger.py`.
+- **Companion change:** `src/engine/VRRadialMenuMesh.ts` `select()` now logs ONE `[vr-radial]` line per press, gated by `(window as any).__vrRadialDebug === true`. Lines distinguish `hub => onNextTab`, `silent bail; hoveredSlice=N`, and `slice=<id>`. Run `window.__vrRadialDebug = true` in the browser console BEFORE pressing a slice to get the next-press diagnostic. Idempotent via `_tmp_vr_select_debug_log.py`.
+- **Goal:** make slice clicks fire callback actions in pure immersive WebXR regardless of controller motion in the same frame as the trigger press, and give a concrete diagnostic if the symptom still recurs.
+- **Files touched:** `src/App.tsx` (+1), `src/engine/VRRadialMenuMesh.ts` (+1); 2 new idempotent apply scripts at repo root.
+- **Carries for the next pass:** (1) extract the duplicated ray-build logic to a shared `aimRadialAtController(side)` helper so the aim rAF loop and PRIORITY 1 cannot drift; (2) extend the telemetry to log which path (`raf` | `priority1`) last set `hoveredSlice` so the next press prints `(slice=X, source=...)` instead of just `(slice=X)`.
+- **Outcome:** succeeded. `npx tsc -b` green; `code-reviewer-minimax-m3` returned clean pass modulo the two carries above.
+
+### 2026-07-05 — VR radial menu: revert to single-hand aim
+
+- **Asked by:** user ("Make the aim controller follow the opening controller (single-hand UX): revert the always-right aim change so opening-with-Y aims with the left controller and opening-with-B aims with the right. Touch only the aim rAF loop and the Resonite-citation comment.")
+- **What I tried to do:** revert the always-right aim introduced two days ago ("aim loop now always uses getController('right') for raycasting"). The aim rAF loop now reads `aimSide = vrRadialActiveSideRef.current ?? 'right'`, so opening-with-Y aims with the left controller and opening-with-B aims with the right. The `?? 'right'` fallback keeps the B-open path covered in the edge case where the ref is briefly null between renders. Two comment blocks in the same loop were rewritten: one describing the now-correct aim-controller mapping, one explaining why the panel is not re-placed every frame. The PRIORITY-1 trigger handler's stale phrase ("the menu opens near the left wrist; the right laser aims") was intentionally NOT touched per the strict scope; that needs a future pass.
+- **Bug surface:** when the user opened with Y (left hand) the panel was placed near the left wrist, but the aim loop's right-controller ray was aimed forward from the right side of the body. The two never crossed, so `intersectObject` returned no hits, `hoveredSlice` stayed at `-999`, and `select()` silently bailed without firing callbacks. User-visible: visuals rendered, but clicking slices (e.g. switching walk → flight) did nothing.
+- **Goal:** make slice clicks fire slice actions regardless of which controller opened the menu.
+- **Files touched:** `src/App.tsx` (+1 count); `_tmp_apply_single_hand_aim.py` (new, idempotent apply script).
+- **Outcome:** succeeded. Code-reviewer-minimax-m3 returned clean pass. Typecheck via `npx tsc -b` returns green.
+
 ### 2026-07-05 — VR radial menu: three deeper bugs (side-mismatch, isHeld, aim direction)
 
 - **Asked by:** user ("context menu still isn't interactive in VR — doesn't register trigger clicks and doesn't recognize when I'm holding an object")
@@ -61,6 +81,20 @@
 ---
 
 ## Chronological log
+
+### 2026-07-05 — VR radial context menu: trigger detection and slice click fixes
+
+- **Asked by:** user ("the context menu doesn't work as an interactive menu in VR ... buttons aren't clickable")
+- **What I tried to do:** diagnose why VR radial menu slices couldn't be clicked despite the `updateAim` hover highlight working, then fix the underlying timer-loop architecture bug.
+- **Root cause:** `VRInputManager.update()` (called inside `SceneEngine.animate`, which uses `renderer.setAnimationLoop` — the WebXR-synchronous frame loop) sets `pressedThisFrame.trigger` for exactly **one XR frame**. The existing code read this edge flag inside a *separate* `requestAnimationFrame` aim loop that runs independently of the XR frame loop. By the time the rAF tick fired, the XR loop had already advanced and cleared the flag on its next frame — so every trigger press was silently missed.
+- **Fix applied:**
+  1. Removed the `pressedThisFrame.trigger` check from the aim rAF loop entirely. The loop now only does hover tracking (`placeNearController` + `updateAim`) — no select.
+  2. Added a **PRIORITY 1** check at the top of the `onPressed('trigger')` handler (which fires synchronously inside the XR frame that detected the edge). When the VR radial menu is open and the pressing controller matches the side that opened the menu, `mesh.select()` is called immediately — guaranteed to land on the edge frame.
+  3. Added left-trigger support: the menu can be opened with Y (left controller), and the trigger on the same controller now correctly dispatches `select()`. Previously only `side === 'right'` was handled for HUD clicks; the radial case now handles both sides.
+  4. Structured the trigger handler into three explicit priority tiers (PRIORITY 1: radial select → PRIORITY 2: two-handed scale grab → PRIORITY 3: HUD click) with early `return` after the radial path so selecting a slice cannot accidentally also fire a HUD click on the same frame.
+- **Goal:** make VR radial menu slices clickable via controller trigger; achieve desktop/VR parity on the context menu.
+- **Files touched:** `src/App.tsx` (+1 count)
+- **Outcome:** succeeded. Anchored by `tmp_apply_video_app.py` (idempotent).
 
 ### 2026-07-05 — Video-controls wiring (React layer)
 
@@ -273,7 +307,7 @@
 
 | File | Times edited | Last touched | What lives there |
 | --- | --- | --- | --- |
-| `src/App.tsx` | many+1 | 2026-07-05 | orchestration; hooks handlers; networking wiring |
+| `src/App.tsx` | many+2 | 2026-07-05 | orchestration; hooks handlers; networking wiring |
 | `src/engine/SceneEngine.ts` | 3 | 2026-07-04 | viewport, WebXR, locomotion |
 | `src/engine/VRHUDManager.ts` | 6 | 2026-07-05 | 3D dashboard, inspector panel, video card |
 | `src/engine/ManipulationManager.ts` | 2 | 2026-07-03 | gizmos, RMB-grab, E+drag rotate skip |

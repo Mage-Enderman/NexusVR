@@ -263,15 +263,27 @@ export class VRRadialMenuMesh {
   /**
    * Fire the action for the currently hovered slice.
    * Call when the controller trigger is pressed.
+   *
+   * Diag: when (window as any).__vrRadialDebug === true, every press
+   * logs ONE `[vr-radial]` line with the resolved hoveredSlice and
+   * which branch dispatched. Enable in the browser console with:
+   *     window.__vrRadialDebug = true
+   * to break the guess-and-fix loop if a press fails to fire.
    */
   public select(): void {
     const cb = this._callbacks;
+    const debug = (window as any).__vrRadialDebug === true;
     if (this.hoveredSlice === -1) {
+      if (debug) console.log('[vr-radial] select fired (hub => onNextTab)');
       // Hub: cycle tab
       cb.onNextTab();
       return;
     }
-    if (this.hoveredSlice < 0 || this.hoveredSlice >= this._slices.length) return;
+    if (this.hoveredSlice < 0 || this.hoveredSlice >= this._slices.length) {
+      if (debug) console.log('[vr-radial] select fired (silent bail; hoveredSlice=' + this.hoveredSlice + ')');
+      return;
+    }
+    if (debug) console.log('[vr-radial] select fired (slice=' + this._slices[this.hoveredSlice].id + ')');
     const slice = this._slices[this.hoveredSlice];
     switch (slice.id) {
       case 'undo':   cb.onUndo(); cb.onClose(); break;
