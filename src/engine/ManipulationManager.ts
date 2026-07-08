@@ -238,6 +238,9 @@ export class ManipulationManager {
   // single-handed grab first so we don't have conflicting grab
   // ownership on the same object.
   public get isTwoHandedGrabbing(): boolean { return this._twoHandedAsset !== null; }
+  public getHandGrabAsset(side: 'left' | 'right'): LoadedAsset | null {
+    return this._vrHandGrabs[side]?.asset ?? null;
+  }
   private _twoHandedAsset: LoadedAsset | null = null;
   // Distance between the two grip spaces at the moment the two-handed
   // grab began. Reference for the scale factor: ratio of current
@@ -252,17 +255,12 @@ export class ManipulationManager {
   // it to (no snap-back). Without this, releasing a 2×-grown asset
   // would collapse it back to its pre-grab size — surprising.
   private readonly _twoHandedInitialScale: THREE.Vector3 = new THREE.Vector3(1, 1, 1);
+  private readonly _twoHandedInitialMidpoint: THREE.Vector3 = new THREE.Vector3();
+  private readonly _twoHandedInitialPosition: THREE.Vector3 = new THREE.Vector3();
   // Floor / ceiling on the per-frame scale factor relative to the
-  // captured initial scale. 0.1× is "shrunk to a small prop" (an
-  // object 10cm wide becomes 1cm wide, fine for tiny details), 10×
-  // is "ballooned to room-filling" (a 1m cube becomes 10m, fills a
-  // large room). Going beyond these would either be invisible
-  // (sub-millimeter) or catastrophically expensive (clipping
-  // through the floor) and is almost always accidental. The user
-  // can press grip+trigger re-grab to start a fresh 1× reference
-  // if they need to push past these limits.
-  private static readonly TWO_HANDED_MIN_SCALE = 0.1;
-  private static readonly TWO_HANDED_MAX_SCALE = 10.0;
+  // captured initial scale.
+  private static readonly TWO_HANDED_MIN_SCALE = 0.02;
+  private static readonly TWO_HANDED_MAX_SCALE = 50.0;
 
   constructor(
     scene: THREE.Scene,
@@ -456,7 +454,14 @@ export class ManipulationManager {
   ): void {
     if (this._vrHandGrabs[side] !== null) return;
     const otherSide = side === 'left' ? 'right' : 'left';
-    if (this._vrHandGrabs[otherSide]?.asset === asset) return;
+    if (this._vrHandGrabs[otherSide]?.asset === asset) {
+      const leftGrip = this._vrInput?.getGrip('left');
+      const rightGrip = this._vrInput?.getGrip('right');
+      const posL = leftGrip ? leftGrip.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3();
+      const posR = rightGrip ? rightGrip.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3();
+      this.beginTwoHandedGrab(asset, posL, posR);
+      return;
+    }
 
     this._vrHandGrabs[side] = {
       asset,
@@ -635,13 +640,10 @@ export class ManipulationManager {
     }
     this._twoHandedAsset = asset;
     const dist = gripLeftPos.distanceTo(gripRightPos);
-    // Floor the initial distance to avoid a div-by-zero on the
-    // first update() frame if both hands are coincident at grab.
-    // 1mm is small enough to never be visible at the scale the
-    // user is working at, large enough to never trigger an
-    // overflow on the scale factor.
-    this._twoHandedInitialDistance = dist < 1e-3 ? 1.0 : dist;
+    this._twoHandedInitialDistance = Math.max(0.05, dist);
     this._twoHandedInitialScale.copy(asset.object3d.scale);
+    this._twoHandedInitialMidpoint.copy(gripLeftPos).add(gripRightPos).multiplyScalar(0.5);
+    this._twoHandedInitialPosition.copy(asset.object3d.position);
     // Hide the gizmo during two-handed scale — the gizmo's
     // scale handles overlap the held object and confuse the
     // read of the actual mesh size.
@@ -982,6 +984,9 @@ export class ManipulationManager {
           this._twoHandedInitialScale.y * factor,
           this._twoHandedInitialScale.z * factor
         );
+        const curMidpoint = this._tmpForward.clone().add(this._tmpRight).multiplyScalar(0.5);
+        const translationDelta = curMidpoint.sub(this._twoHandedInitialMidpoint);
+        this._twoHandedAsset.object3d.position.copy(this._twoHandedInitialPosition).add(translationDelta);
         this.broadcastCurrentTransform(this._twoHandedAsset);
       }
       return;

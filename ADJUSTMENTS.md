@@ -20,6 +20,19 @@
 
 <!-- Copy the next block into here, then update -->
 
+### 2026-07-08 — VR two-handed scaling grab: grab one object with both hands to scale and translate
+
+- **Asked by:** user ("In VR the user should be able to grab one object with both hands to scale it. While grabbed with both hands if the use moves their hands further apart/outward from eachother the object should get bigger. And inversely it should get smaller if they move their hands closer together")
+- **What I tried to do:** allow grabbing a single object with both hands simultaneously (via either grip button or trigger, or bringing the second hand near an object held by the first hand) to enter a two-handed scale + translate grab mode. Moving hands further apart scales the object up, moving hands closer together scales it down, and moving both hands in space translates the object with the hands' midpoint.
+- **Root causes & fixes applied:**
+  1. **Automatic transition from single-hand grab to two-handed scale grab (`ManipulationManager.vrGrabWithController`):** Previously, when one hand grabbed an object and the second hand attempted to grab the same object, `vrGrabWithController` returned early without doing anything. Updated `vrGrabWithController` so that if `otherSide` is already holding `asset`, it immediately starts `beginTwoHandedGrab(asset, posL, posR)`.
+  2. **Proximity grab for second hand (`App.tsx.tryVrGrab`):** Added a proximity check (`< 0.75m`) so when one hand is holding an object, squeezing Grip with the second hand near the held object effortlessly initiates a two-handed scale grab without requiring pin-point raycast aim.
+  3. **Scale factor and midpoint translation (`ManipulationManager.update` & `beginTwoHandedGrab`):** Updated `beginTwoHandedGrab` to capture initial scale, initial hand distance, initial midpoint between grips, and initial object position. In `update()`, the per-frame distance ratio scales the object smoothly (between `0.02×` and `50.0×`), while the delta of the midpoint translates the object so it stays centered between the user's hands.
+  4. **Clean release & commit (`App.tsx.onReleased`):** Updated `onReleased` so releasing any grip or trigger while in `isTwoHandedGrabbing` ends the two-handed grab and commits the object at its new scaled size and position.
+- **Goal:** Enable intuitive two-handed scaling and positioning of objects in VR.
+- **Files touched:** `src/engine/ManipulationManager.ts` (+1), `src/App.tsx` (+1).
+- **Outcome:** succeeded. Clean build verified with `npm run build`.
+
 ### 2026-07-08 — VR dual-handed grabbing: independent left and right hand object interaction
 
 - **Asked by:** user ("In VR the user should be able to grab one object with the left controller and another object with the right controller")

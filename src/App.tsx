@@ -1294,6 +1294,18 @@ const vrHud = new VRHUDManager(
                   mm.vrGrabWithController(found, grip, grabSide, ctr);
                   return true;
                 }
+              } else {
+                const otherSide = grabSide === 'left' ? 'right' : 'left';
+                const otherAsset = mm.getHandGrabAsset(otherSide);
+                if (otherAsset) {
+                  const gripPos = new THREE.Vector3().setFromMatrixPosition(grip.matrixWorld);
+                  const assetPos = new THREE.Vector3();
+                  otherAsset.object3d.getWorldPosition(assetPos);
+                  if (gripPos.distanceTo(assetPos) < 0.75) {
+                    mm.vrGrabWithController(otherAsset, grip, grabSide, ctr);
+                    return true;
+                  }
+                }
               }
               return false;
             };
@@ -1411,6 +1423,10 @@ const vrHud = new VRHUDManager(
         onReleased: (button, side) => {
           const mm = manipulationManagerRef.current;
           if (!mm) return;
+          if (mm.isTwoHandedGrabbing) {
+            mm.endTwoHandedGrab();
+            return;
+          }
           // Distinguish sides so a brief left-grip tap doesn't drop a
           // right-grip-held object. vrReleaseControllerGrab itself
           // no-ops when not mid-grab (`_isVRGrabbing === false`), so
