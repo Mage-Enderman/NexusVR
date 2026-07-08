@@ -20,6 +20,43 @@
 
 <!-- Copy the next block into here, then update -->
 
+### 2026-07-08 — VR dual-handed grabbing: independent left and right hand object interaction
+
+- **Asked by:** user ("In VR the user should be able to grab one object with the left controller and another object with the right controller")
+- **What I tried to do:** enable grabbing one object with the left controller grip (`side = 'left'`) and simultaneously grabbing a *different* object with the right controller grip (`side = 'right'`), allowing independent manipulation, dolly along each controller's laser beam, and side-aware context menu actions.
+- **Root causes & fixes applied:**
+  1. **Per-hand VR grab tracking in `ManipulationManager`:** Replaced the single `_isVRGrabbing` early-return and scalar properties (`_vrGrabOriginalParent`, `_vrTargetRaySpace`, etc.) with a per-hand map `_vrHandGrabs: { left: VRHandGrabState | null; right: VRHandGrabState | null }`. Grabbing with one controller records state for that `side` (`asset`, `originalParent`, `targetRaySpace`, `holdLocalOffset`) without blocking the other hand from grabbing a second object.
+  2. **Side-aware grip release (`vrReleaseControllerGrab`):** Updated `vrReleaseControllerGrab(side)` so releasing the left grip only detaches and restores the left hand's object, leaving any object held in the right hand actively grabbed (and vice-versa).
+  3. **Independent per-hand thumbstick dolly (`update`):** Updated the VR grab update loop so each hand independently dollies its held asset along its own controller's laser ray (`targetRaySpace`) using its own thumbstick (`stick.y`).
+  4. **Per-hand held asset tracking in `App.tsx`:** Added `heldAssetsBySideRef` (`{ left, right }`) so `App.tsx` tracks which asset each hand is holding. Updated context menu slice actions (`Save to Inventory`, `Duplicate` / `Download`, `Destroy`) to act on the specific asset held by that menu's side (`menuSide`).
+- **Goal:** Allow the user in VR to grab, hold, dolly, and act upon one object in the left hand and another object in the right hand independently.
+- **Files touched:** `src/engine/ManipulationManager.ts` (+1), `src/App.tsx` (+1).
+- **Outcome:** succeeded. Verified clean build with `npm run build` (`tsc -b && vite build`).
+
+### 2026-07-08 — VR radial menu: two independent context menus & side-aware held object tracking
+
+- **Asked by:** user ("In VR you should be able to have 2 independent context menus though and currently you can only have 1 (Also the 'isHeld' thing should also have something to tell WHICH controller is holding it so that when you have the right context menu open and are holding something in the left the right context menu doesn't change)")
+- **What I tried to do:** enable independent left (`Y` button) and right (`B` button) VR radial context menus that can both be open simultaneously, and ensure grabbing an object with one hand only puts *that* hand's context menu into the `'held'` state.
+- **Root causes & fixes applied:**
+  1. **Two independent VR radial menus:** Replaced the single `vrRadialMenuRef` and `vrRadialOpen` state with independent `vrRadialMenuLeftRef` / `vrRadialLeftOpen` and `vrRadialMenuRightRef` / `vrRadialRightOpen`. Pressing `Y` on the left controller toggles the left menu near the left wrist; pressing `B` on the right controller toggles the right menu near the right wrist. Both can be open simultaneously.
+  2. **Side-aware `isHeld` tracking:** Extended `ManipulationManager.onGrabBeginCallbacks` and `onGrabEndCallbacks` to pass the grabbing controller side (`side: 'left' | 'right'`). `App.tsx` now stores `heldSideRef.current = side ?? null`. When an object is grabbed by the left hand (`side = 'left'`), only `vrRadialMenuLeftRef` switches to `isHeld: true` and `setActiveTab('held')`; the right context menu remains unaffected on `'general'` (and vice-versa).
+  3. **Dual-menu aim & trigger selection:** Updated the aim rAF loop (`tick`) and `onPressed('trigger', side)` handler to check rays against both open menus (`vrRadialMenuLeftRef` and `vrRadialMenuRightRef`), so either controller can aim at and click slices on either open menu.
+- **Goal:** Allow two independent VR context menus and side-isolated held-object menu behavior.
+- **Files touched:** `src/App.tsx` (+1), `src/engine/ManipulationManager.ts` (+1).
+- **Outcome:** succeeded. Verified clean build with `npm run build` (`tsc -b && vite build`).
+
+### 2026-07-08 — VR radial menu: trigger side raycasting, dual-hand hover aim, and instant 'held' tab sync
+
+- **Asked by:** user ("The context menu still doesn't support trigger input in VR so right now in VR there's no way to switch to the flight locomotion... And when I grab an object the only thing that changes in the context menu is the center changes from blue to orange. It should pop up with the duplicate, save to inventory, destroy, options like it does on desktop. I want feature parity.")
+- **What I tried to do:** resolve why trigger clicks failed to trigger slice actions in VR and why grabbing an object updated `_state.isHeld` (changing center stroke color) without automatically switching `activeTab` to `'held'`.
+- **Root causes & fixes applied:**
+  1. **Trigger raycast side mismatch:** In `onPressed('trigger')`, the pre-select aim ray was hardcoded to use `vrRadialActiveSideRef.current ?? 'right'`. If the user opened with `Y` (`'left'`) but aimed and pulled the trigger with `side`, or if the ref didn't match the aiming hand, `updateAim` missed the menu and set `hoveredSlice = -999`, causing `select()` to silently bail. **Fix:** `onPressed('trigger', side)` now gets the controller for `side` (the exact controller whose trigger was pressed), computes its ray, and calls `if (radialMesh.updateAim(ray)) { radialMesh.select(); return; }`.
+  2. **Dual-hand hover aim in rAF loop:** The continuous aim rAF loop previously only checked one controller side (`vrRadialActiveSideRef.current ?? 'right'`). **Fix:** Updated the loop to check `aimSidePrimary` (`vrRadialActiveSideRef.current ?? 'right'`) first, and if that controller doesn't intersect the menu, fallback to `aimSideSecondary`. This ensures hover highlights follow whichever hand points at the menu.
+  3. **Instant 'held' tab activation on grab:** Grabbing an object updated React state `isHeld` via callback, but `VRRadialMenuMesh` needed both `setState({ isHeld: true })` and `setActiveTab('held')` to switch to the held tab (`Save`, `Duplicate`/`Download`, `Destroy`). **Fix:** Synchronously set `isHeldRef.current` and update `vrRadialMenuRef.current.setState({ isHeld })` + `setActiveTab('held' / 'general')` immediately inside `manipulationManager.registerOnGrabBegin` and `registerOnGrabEnd`, and mirrored the tab sync in the `useEffect([isHeld])` hook.
+- **Goal:** Feature parity with desktop context menu in VR: trigger input reliably activates hovered slices, and grabbing an object automatically displays the held object options (`Save to Inventory`, `Duplicate` / `Download`, `Destroy`).
+- **Files touched:** `src/App.tsx` (+1 count).
+- **Outcome:** succeeded. Verified with clean `npm run build` (`tsc -b && vite build`).
+
 ### 2026-07-05 — VR radial menu: synchronous re-aim in PRIORITY 1 + telemetry
 
 - **Asked by:** user, third report ("Context menu is still not selectable/interactable I can't choose to switch to flight in VR or destroy a held object etc"). Previous fix (single-hand-aim) didn't resolve the symptom.

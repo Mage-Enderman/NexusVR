@@ -285,13 +285,12 @@ export const App: React.FC = () => {
   // html2canvas path, so any radial menu mounted into SpatialPanelManager
   // came out blank. The desktop <RadialContextMenu> overlay path
   // (`setShowRadialMenu`) is unchanged.
-  const [vrRadialOpen, setVrRadialOpen] = useState(false);
-  const vrRadialMenuRef = useRef<VRRadialMenuMesh | null>(null);
-  // Which controller the menu was placed near. Cached so the per-frame
-  // aim loop can build its ray from the same controller that placed it
-  // (rather than whichever one is being waved at any given moment).
-  // `null` while the menu is closed.
-  const vrRadialActiveSideRef = useRef<'left' | 'right' | null>(null);
+  const [vrRadialLeftOpen, setVrRadialLeftOpen] = useState(false);
+  const [vrRadialRightOpen, setVrRadialRightOpen] = useState(false);
+  const vrRadialMenuLeftRef = useRef<VRRadialMenuMesh | null>(null);
+  const vrRadialMenuRightRef = useRef<VRRadialMenuMesh | null>(null);
+  const heldSideRef = useRef<'left' | 'right' | null>(null);
+  const heldAssetsBySideRef = useRef<{ left: LoadedAsset | null; right: LoadedAsset | null }>({ left: null, right: null });
   const [scalingEnabled, setScalingEnabled] = useState<boolean>(true);
   const [laserEnabled, setLaserEnabled] = useState<boolean>(true);
   const [grabMode, setGrabMode] = useState<'auto' | 'precision' | 'palm' | 'laser'>('auto');
@@ -431,75 +430,58 @@ export const App: React.FC = () => {
   // effect runs the returned cleanup exactly once when the App unmounts.
   useEffect(() => {
     return () => {
-      const m = vrRadialMenuRef.current;
-      if (m) {
-        if (m.group.parent) m.group.parent.remove(m.group);
-        m.dispose();
-        vrRadialMenuRef.current = null;
+      const mL = vrRadialMenuLeftRef.current;
+      if (mL) {
+        if (mL.group.parent) mL.group.parent.remove(mL.group);
+        mL.dispose();
+        vrRadialMenuLeftRef.current = null;
+      }
+      const mR = vrRadialMenuRightRef.current;
+      if (mR) {
+        if (mR.group.parent) mR.group.parent.remove(mR.group);
+        mR.dispose();
+        vrRadialMenuRightRef.current = null;
       }
     };
   }, []);
 
     useEffect(() => {
-    if (!vrRadialOpen) return;
+    if (!vrRadialLeftOpen && !vrRadialRightOpen) return;
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      const mesh = vrRadialMenuRef.current;
       const se = sceneEngineRef.current;
-      if (!mesh || mesh.disposed || !se || !se.renderer.xr.isPresenting || !mesh.isVisible) return;
-      // Aim with the opening controller (single-hand / wrist-remote UX).
-      // vrRadialActiveSideRef.current is set by the B/Y press handler
-      // to 'right' on B-press or 'left' on Y-press when the menu was
-      // opened. The panel is placed near that hand's wrist once at
-      // open time, so reading the ray from the SAME controller gives
-      // the user a natural cross-axis hover + select: opening with Y
-      // -> placed at left wrist -> aiming with the left hand; opening
-      // with B -> placed at right wrist -> aiming with the right hand.
-      // The previous always-right behavior produced a panel whose
-      // placement was unreachable by the aiming ray in the Y case
-      // (panel at left wrist, ray from right side of body), so the
-      // ray never intersected the mesh and hoveredSlice stayed at
-      // -999, which made select() silently bail without firing any
-      // slice callbacks. Single-hand aim keeps the two aligned.
-      // Fall back to 'right' only in the edge case where the menu is
-      // visible but activeSide hasn't been written yet (shouldn't
-      // happen in normal flow -- isVisible is only true while
-      // activeSide is non-null because both are flipped together
-      // in the B/Y handlers).
-      const aimSide = vrRadialActiveSideRef.current ?? 'right';
-      const ctr = se.vrInput?.getController(aimSide);
-      if (!ctr) return;
-      ctr.updateWorldMatrix(true, false);
-      // Allocation-free: hoisted scratch refs (vrRadialAim*Ref) reused
-      // across frames. .copy / .setFrom* mutate in place.
-      vrRadialAimOriginRef.current.setFromMatrixPosition(ctr.matrixWorld);
-      vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctr.matrixWorld);
-      vrRadialAimDirRef.current
-        .set(0, 0, -1)
-        .applyQuaternion(vrRadialAimDirQuatRef.current)
-        .normalize();
-      // The panel is placed near the OPENING controller once (on B/Y press),
-      // then stays world-anchored. We do NOT re-place every frame because
-      // re-placing would chase whichever controller the user is currently
-      // waving around and make consistent aim impossible. Leave position
-      // static after open so the panel sits where the user's wrist was at
-      // the moment of opening -- the natural anchor for single-hand aim.
-      vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
-      mesh.updateAim(vrRadialAimRayRef.current);
-      // NOTE: mesh.select() is intentionally NOT called here.
-      // `pressedThisFrame` is an edge flag set for exactly ONE XR
-      // frame by VRInputManager.update() inside SceneEngine.animate().
-      // This aim rAF loop is a SEPARATE requestAnimationFrame that
-      // ticks independently, so by the time it reads pressedThisFrame
-      // the XR loop has already cleared the edge on its next tick —
-      // resulting in the trigger presses being silently missed.
-      // The fix is in the onPressed('trigger') handler below, which
-      // runs synchronously inside the XR frame where the edge fires.
+      if (!se || !se.renderer.xr.isPresenting) return;
+      const ctrRight = se.vrInput?.getController('right');
+      const ctrLeft = se.vrInput?.getController('left');
+
+      const checkAimOnMesh = (mesh: VRRadialMenuMesh) => {
+        if (!mesh || mesh.disposed || !mesh.isVisible) return false;
+        if (ctrRight) {
+          ctrRight.updateWorldMatrix(true, false);
+          vrRadialAimOriginRef.current.setFromMatrixPosition(ctrRight.matrixWorld);
+          vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctrRight.matrixWorld);
+          vrRadialAimDirRef.current.set(0, 0, -1).applyQuaternion(vrRadialAimDirQuatRef.current).normalize();
+          vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
+          if (mesh.updateAim(vrRadialAimRayRef.current)) return true;
+        }
+        if (ctrLeft) {
+          ctrLeft.updateWorldMatrix(true, false);
+          vrRadialAimOriginRef.current.setFromMatrixPosition(ctrLeft.matrixWorld);
+          vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctrLeft.matrixWorld);
+          vrRadialAimDirRef.current.set(0, 0, -1).applyQuaternion(vrRadialAimDirQuatRef.current).normalize();
+          vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
+          return mesh.updateAim(vrRadialAimRayRef.current);
+        }
+        return false;
+      };
+
+      if (vrRadialMenuLeftRef.current) checkAimOnMesh(vrRadialMenuLeftRef.current);
+      if (vrRadialMenuRightRef.current) checkAimOnMesh(vrRadialMenuRightRef.current);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [vrRadialOpen]);
+  }, [vrRadialLeftOpen, vrRadialRightOpen]);
 
   // Push React state into the lazy VRRadialMenuMesh so slice labels
   // recolour on toggle (e.g. SCALE goes from red to green when
@@ -508,14 +490,25 @@ export const App: React.FC = () => {
   // tracked inputs actually change. Each tick = one setState call,
   // cheap.
   useEffect(() => {
-    vrRadialMenuRef.current?.setState({
-      locomotionMode,
-      scalingEnabled,
-      laserEnabled,
-      grabMode,
-      isHeld,
-      heldAssetType: heldAssetType === null ? null : String(heldAssetType),
-    });
+    const updateMeshState = (mesh: VRRadialMenuMesh | null, menuSide: 'left' | 'right') => {
+      if (!mesh) return;
+      const sideIsHolding = isHeld && (heldSideRef.current === menuSide || heldSideRef.current === null);
+      mesh.setState({
+        locomotionMode,
+        scalingEnabled,
+        laserEnabled,
+        grabMode,
+        isHeld: sideIsHolding,
+        heldAssetType: sideIsHolding && heldAssetType !== null ? String(heldAssetType) : null,
+      });
+      if (sideIsHolding) {
+        mesh.setActiveTab('held');
+      } else if (mesh.activeTab === 'held') {
+        mesh.setActiveTab('general');
+      }
+    };
+    updateMeshState(vrRadialMenuLeftRef.current, 'left');
+    updateMeshState(vrRadialMenuRightRef.current, 'right');
   }, [locomotionMode, scalingEnabled, laserEnabled, grabMode, isHeld, heldAssetType]);
 
   // Initialize 3D Viewport & Engines
@@ -1136,45 +1129,39 @@ const vrHud = new VRHUDManager(
               // SVG is invisible through HTMLMesh's html2canvas path, the
               // menu came out blank. Plus _buildHTMLMesh reparents the XR
               // controllers under the moving panel — now anchored to scene.
-              setVrRadialOpen((prev) => {
+              setVrRadialRightOpen((prev) => {
                 const next = !prev;
                 const ctr = se.vrInput?.getController('right');
                 if (next) {
-                  if (vrRadialMenuRef.current === null) {
-                    vrRadialMenuRef.current = new VRRadialMenuMesh(
-                      buildVrRadialCallbacks(),
-                      buildVrRadialInitialState()
+                  if (vrRadialMenuRightRef.current === null) {
+                    vrRadialMenuRightRef.current = new VRRadialMenuMesh(
+                      buildVrRadialCallbacks('right'),
+                      buildVrRadialInitialState('right')
                     );
-                    se.scene.add(vrRadialMenuRef.current.group);
+                    se.scene.add(vrRadialMenuRightRef.current.group);
                   }
-                  vrRadialActiveSideRef.current = 'right';
                   if (ctr) {
                     ctr.updateWorldMatrix(true, false);
                     const origin = new THREE.Vector3().setFromMatrixPosition(ctr.matrixWorld);
                     const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctr.matrixWorld);
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
-                    vrRadialMenuRef.current.placeNearController(origin, laserDir);
+                    vrRadialMenuRightRef.current.placeNearController(origin, laserDir);
                   }
-                  // Push fresh state from refs immediately — bypasses the
-                  // async useEffect ref-sync lag so isHeld / heldAssetType
-                  // are correct at open-time even on the first grab+open.
-                  vrRadialMenuRef.current.setState({
+                  const rightHolding = heldSideRef.current === 'right' || (isHeldRef.current && heldSideRef.current === null);
+                  vrRadialMenuRightRef.current.setState({
                     locomotionMode: locomotionModeRef.current,
                     scalingEnabled: scalingEnabledRef.current,
                     laserEnabled: laserEnabledRef.current,
                     grabMode: grabModeRef.current,
-                    isHeld: isHeldRef.current,
-                    heldAssetType: heldAssetTypeRef.current,
+                    isHeld: rightHolding,
+                    heldAssetType: rightHolding ? heldAssetTypeRef.current : null,
                   });
-                  // Auto-switch to 'held' tab if carrying an object,
-                  // mirrors the desktop RadialContextMenu behavior.
-                  vrRadialMenuRef.current.setActiveTab(
-                    isHeldRef.current ? 'held' : 'general'
+                  vrRadialMenuRightRef.current.setActiveTab(
+                    rightHolding ? 'held' : 'general'
                   );
-                  vrRadialMenuRef.current.setVisible(true);
+                  vrRadialMenuRightRef.current.setVisible(true);
                 } else {
-                  vrRadialMenuRef.current?.setVisible(false);
-                  vrRadialActiveSideRef.current = null;
+                  vrRadialMenuRightRef.current?.setVisible(false);
                 }
                 return next;
               });
@@ -1194,49 +1181,39 @@ const vrHud = new VRHUDManager(
               // rationale (canvas texture to bypass SVG/HTMLMesh
               // invisibility, scene-root mesh to avoid the XR-controller
               // reparenting feedback loop).
-              setVrRadialOpen((prev) => {
+              setVrRadialLeftOpen((prev) => {
                 const next = !prev;
-                // Y button opens near the LEFT controller (the holding hand),
-                // but the RIGHT controller is always the aiming hand.
-                // Place the panel near the left wrist for ergonomics;
-                // the aim rAF loop will ray-cast from the right controller.
                 const ctrLeft = se.vrInput?.getController('left');
                 if (next) {
-                  if (vrRadialMenuRef.current === null) {
-                    vrRadialMenuRef.current = new VRRadialMenuMesh(
-                      buildVrRadialCallbacks(),
-                      buildVrRadialInitialState()
+                  if (vrRadialMenuLeftRef.current === null) {
+                    vrRadialMenuLeftRef.current = new VRRadialMenuMesh(
+                      buildVrRadialCallbacks('left'),
+                      buildVrRadialInitialState('left')
                     );
-                    se.scene.add(vrRadialMenuRef.current.group);
+                    se.scene.add(vrRadialMenuLeftRef.current.group);
                   }
-                  vrRadialActiveSideRef.current = 'left';
                   if (ctrLeft) {
                     ctrLeft.updateWorldMatrix(true, false);
                     const origin = new THREE.Vector3().setFromMatrixPosition(ctrLeft.matrixWorld);
                     const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctrLeft.matrixWorld);
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
-                    vrRadialMenuRef.current.placeNearController(origin, laserDir);
+                    vrRadialMenuLeftRef.current.placeNearController(origin, laserDir);
                   }
-                  // Push fresh state from refs immediately — bypasses the
-                  // async useEffect ref-sync lag so isHeld / heldAssetType
-                  // are correct at open-time even on the first grab+open.
-                  vrRadialMenuRef.current.setState({
+                  const leftHolding = heldSideRef.current === 'left' || (isHeldRef.current && heldSideRef.current === null);
+                  vrRadialMenuLeftRef.current.setState({
                     locomotionMode: locomotionModeRef.current,
                     scalingEnabled: scalingEnabledRef.current,
                     laserEnabled: laserEnabledRef.current,
                     grabMode: grabModeRef.current,
-                    isHeld: isHeldRef.current,
-                    heldAssetType: heldAssetTypeRef.current,
+                    isHeld: leftHolding,
+                    heldAssetType: leftHolding ? heldAssetTypeRef.current : null,
                   });
-                  // Auto-switch to 'held' tab if carrying an object,
-                  // mirrors the desktop RadialContextMenu behavior.
-                  vrRadialMenuRef.current.setActiveTab(
-                    isHeldRef.current ? 'held' : 'general'
+                  vrRadialMenuLeftRef.current.setActiveTab(
+                    leftHolding ? 'held' : 'general'
                   );
-                  vrRadialMenuRef.current.setVisible(true);
+                  vrRadialMenuLeftRef.current.setVisible(true);
                 } else {
-                  vrRadialMenuRef.current?.setVisible(false);
-                  vrRadialActiveSideRef.current = null;
+                  vrRadialMenuLeftRef.current?.setVisible(false);
                 }
                 return next;
               });
@@ -1314,7 +1291,7 @@ const vrHud = new VRHUDManager(
               if (cur) {
                 const found = objToAsset.get(cur);
                 if (found) {
-                  mm.vrGrabWithController(found, grip, grabSide);
+                  mm.vrGrabWithController(found, grip, grabSide, ctr);
                   return true;
                 }
               }
@@ -1340,33 +1317,14 @@ const vrHud = new VRHUDManager(
             // Handling it here — which fires synchronously inside the
             // same XR frame that detected the edge — guarantees the
             // select() call is never dropped.
-            const radialMesh = vrRadialMenuRef.current;
-            if (radialMesh && radialMesh.isVisible && !radialMesh.disposed) {
+            const leftMesh = vrRadialMenuLeftRef.current;
+            const rightMesh = vrRadialMenuRightRef.current;
+            if ((leftMesh && leftMesh.isVisible && !leftMesh.disposed) ||
+                (rightMesh && rightMesh.isVisible && !rightMesh.disposed)) {
               // PRIORITY 1 must re-aim BEFORE select().
-              // The per-frame aim rAF useEffect (around line 432) ticks on
-              // its OWN requestAnimationFrame schedule, which runs
-              // independently of WebXR's setAnimationLoop. When the user
-              // moves their controller and pulls the trigger within the
-              // same frame, the aim rAF's last tick could land BEFORE the
-              // user's movement, leaving hoveredSlice from the previous
-              // pose. select() then reads a stale hoveredSlice: if it
-              // resolves to <0 (sentinel -999 from setVisible, or any
-              // off-by-one slice number), select() exits silently without
-              // firing any callback and the user reads it as "the slice
-              // click does nothing".
-              //
-              // Rebuild the aim ray from the XR-frame-synchronous
-              // matrixWorld that VRInputManager.update() just used (it ran
-              // inside the XR loop on this same frame and is guaranteed
-              // current), then call mesh.updateAim() so hoveredSlice is
-              // authoritative for this press. The aim rAF loop still
-              // runs for the continuous hover-highlight effect — this
-              // synchronous pre-select update is the belt-and-braces
-              // fix for the click-misses-during-fast-aim case.
               const se1 = sceneEngineRef.current;
               if (se1?.vrInput) {
-                const aimSide1 = vrRadialActiveSideRef.current ?? 'right';
-                const ctr1 = se1.vrInput.getController(aimSide1);
+                const ctr1 = se1.vrInput.getController(side);
                 if (ctr1) {
                   ctr1.updateWorldMatrix(true, false);
                   vrRadialAimOriginRef.current.setFromMatrixPosition(ctr1.matrixWorld);
@@ -1379,16 +1337,16 @@ const vrHud = new VRHUDManager(
                     vrRadialAimOriginRef.current,
                     vrRadialAimDirRef.current
                   );
-                  radialMesh.updateAim(vrRadialAimRayRef.current);
+                  if (leftMesh && leftMesh.isVisible && !leftMesh.disposed && leftMesh.updateAim(vrRadialAimRayRef.current)) {
+                    leftMesh.select();
+                    return;
+                  }
+                  if (rightMesh && rightMesh.isVisible && !rightMesh.disposed && rightMesh.updateAim(vrRadialAimRayRef.current)) {
+                    rightMesh.select();
+                    return;
+                  }
                 }
               }
-              // The menu was opened with the active side controller; either
-              // trigger press dispatches a select(). Left-handed users who
-              // opened with B can aim with the left trigger; right-handed
-              // users who opened with Y can aim with the right. The mesh's
-              // hoveredSlice takes care of WHICH slice is fired.
-              radialMesh.select();
-              return;
             }
 
             // PRIORITY 2: Two-handed scale grab.
@@ -1460,14 +1418,7 @@ const vrHud = new VRHUDManager(
           // side-aware also avoids spurious log lines in unknown grab
           // states.
           if (button === 'grip' && (side === 'left' || side === 'right')) {
-            // Release the held asset on EITHER grip release — both
-            // grips can now grab per VRControls.txt. vrReleaseControllerGrab
-            // is side-agnostic (checks _isVRGrabbing), so calling it
-            // on either side release is safe even if the other side
-            // never grabbed. HUD detach below also covers both sides
-            // because it checks currentGrip / panelCurrentGrip
-            // regardless of which controller was carrying.
-            mm.vrReleaseControllerGrab();
+            mm.vrReleaseControllerGrab(side);
             const hud = vrHudRef.current;
             if (hud && hud.currentGrip) hud.detach();
             if (hud && hud.panelCurrentGrip) hud.detachPanel();
@@ -1522,15 +1473,65 @@ const vrHud = new VRHUDManager(
     // chip UI. RMB still opens the misc preview; LMB/R-toggle selection
     // continues to do the same, but without the brief selection state-
     // flip in between.
-    disposers.push(manipulationManager.registerOnGrabBegin((asset) => {
-      // isHeld is true the moment any grab begins (RMB-grab, VR grip, or
-      // two-handed scale). Drives the radial menu's 'held' tab.
-      setIsHeld(true);
+    disposers.push(manipulationManager.registerOnGrabBegin((asset, side) => {
+      if (side === 'left' || side === 'right') {
+        heldAssetsBySideRef.current[side] = asset ?? null;
+      } else {
+        heldAssetsBySideRef.current.left = asset ?? null;
+        heldAssetsBySideRef.current.right = asset ?? null;
+      }
+      isHeldRef.current = heldAssetsBySideRef.current.left !== null || heldAssetsBySideRef.current.right !== null;
+      heldAssetTypeRef.current = asset?.type ?? null;
+      heldSideRef.current = side ?? null;
+      setIsHeld(isHeldRef.current);
       setHeldAssetType(asset?.type ?? null);
+      const updateHoldingMenu = (mesh: VRRadialMenuMesh | null, heldAsset: LoadedAsset | null) => {
+        if (!mesh || !heldAsset) return;
+        mesh.setState({
+          isHeld: true,
+          heldAssetType: heldAsset.type ? String(heldAsset.type) : null,
+        });
+        mesh.setActiveTab('held');
+      };
+      if (side === 'left') {
+        updateHoldingMenu(vrRadialMenuLeftRef.current, asset ?? null);
+      } else if (side === 'right') {
+        updateHoldingMenu(vrRadialMenuRightRef.current, asset ?? null);
+      } else {
+        updateHoldingMenu(vrRadialMenuLeftRef.current, asset ?? null);
+        updateHoldingMenu(vrRadialMenuRightRef.current, asset ?? null);
+      }
     }));
-    disposers.push(manipulationManager.registerOnGrabEnd(() => {
-      setIsHeld(false);
-      setHeldAssetType(null);
+    disposers.push(manipulationManager.registerOnGrabEnd((side) => {
+      if (side === 'left' || side === 'right') {
+        heldAssetsBySideRef.current[side] = null;
+      } else {
+        heldAssetsBySideRef.current.left = null;
+        heldAssetsBySideRef.current.right = null;
+      }
+      const anyHeld = heldAssetsBySideRef.current.left !== null || heldAssetsBySideRef.current.right !== null;
+      isHeldRef.current = anyHeld;
+      if (!anyHeld) {
+        heldAssetTypeRef.current = null;
+        heldSideRef.current = null;
+        setIsHeld(false);
+        setHeldAssetType(null);
+      }
+      const updateReleasedMenu = (mesh: VRRadialMenuMesh | null) => {
+        if (!mesh) return;
+        mesh.setState({ isHeld: false, heldAssetType: null });
+        if (mesh.activeTab === 'held') {
+          mesh.setActiveTab('general');
+        }
+      };
+      if (side === 'left') {
+        updateReleasedMenu(vrRadialMenuLeftRef.current);
+      } else if (side === 'right') {
+        updateReleasedMenu(vrRadialMenuRightRef.current);
+      } else {
+        updateReleasedMenu(vrRadialMenuLeftRef.current);
+        updateReleasedMenu(vrRadialMenuRightRef.current);
+      }
     }));
 
     // Connect transform change -> network broadcast.
@@ -2823,9 +2824,15 @@ const vrHud = new VRHUDManager(
   // SELECTED-target handlers do nothing for a held-but-not-selected asset.
   // These are the missing "act on the held object" entry points.
   // =========================================================================
-  const handleSaveHeldToInventory = useCallback(() => {
+  const getHeldAssetForSide = useCallback((side?: 'left' | 'right'): LoadedAsset | null => {
     const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    if (side === 'left' && heldAssetsBySideRef.current.left) return heldAssetsBySideRef.current.left;
+    if (side === 'right' && heldAssetsBySideRef.current.right) return heldAssetsBySideRef.current.right;
+    return mm?.grabbedAsset ?? heldAssetsBySideRef.current.right ?? heldAssetsBySideRef.current.left ?? (mm as any)?._twoHandedAsset ?? null;
+  }, []);
+
+  const handleSaveHeldToInventory = useCallback((side?: 'left' | 'right') => {
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     const asset = held;
     const item: InventoryItem = {
@@ -2842,31 +2849,18 @@ const vrHud = new VRHUDManager(
     inventoryServiceRef.current.saveItem(item).then(() => {
       console.log('[Inventory] Saved held "' + asset.name + '" to inventory');
     });
-  }, []);
+  }, [getHeldAssetForSide]);
 
-  // Download the held asset to the user's device. Currently only
-  // meaningful for misc files (which carry raw fileData) — the radial
-  // menu shows this action only when the held asset's type is
-  // 'misc', so for other types this callback is never wired to a
-  // slice. AssetManager.downloadAsset already no-ops on assets that
-  // lack fileData / url, so this is safe to call defensively.
-  const handleDownloadHeld = useCallback(() => {
-    const mm = manipulationManagerRef.current;
+  const handleDownloadHeld = useCallback((side?: 'left' | 'right') => {
     const am = assetManagerRef.current;
     if (!am) return;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     am.downloadAsset(held);
-  }, []);
+  }, [getHeldAssetForSide]);
 
-  const handleDuplicateHeld = useCallback(async () => {
-    // Fall back to the two-handed asset if no single-grip grab is in
-    // flight. Two-handed mode doesn't set grabbedAsset but DOES fire
-    // onGrabBegin (which we use to set isHeld), so without this
-    // fallback the user would see the held tab in two-handed mode but
-    // nothing would happen when they click Duplicate / Save / Destroy.
-    const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+  const handleDuplicateHeld = useCallback(async (side?: 'left' | 'right') => {
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     const asset = held;
     const am = assetManagerRef.current;
@@ -2978,24 +2972,17 @@ const vrHud = new VRHUDManager(
     }
   }, []);
 
-  const handleDestroyHeld = useCallback(() => {
-    // Fall back to the two-handed asset (see handleDuplicateHeld for
-    // the same pattern + reason). Two-handed mode doesn't set
-    // grabbedAsset, so without this fallback the user would see the
-    // held tab in two-handed mode but Destroy would be a no-op.
+  const handleDestroyHeld = useCallback((side?: 'left' | 'right') => {
     const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     const asset = held;
     const obj = asset.object3d;
-    // CRITICAL: end the grab BEFORE removing the asset. Otherwise the
-    // manipulation manager would briefly hold a dangling grabbedAsset
-    // reference to a removed Object3D, and the per-frame update() path
-    // would either crash or broadcast stale transforms for a non-existent
-    // asset. endGrab handles single-grip (RMB + VR grip); endTwoHandedGrab
-    // handles the two-handed case. We always call both — each is a
-    // no-op when the corresponding state is inactive, so it's safe.
-    mm?.endGrab();
+    if (side === 'left' || side === 'right') {
+      mm?.vrReleaseControllerGrab(side);
+    } else {
+      mm?.endGrab();
+    }
     mm?.endTwoHandedGrab();
     // Use WORLD position for the undo snapshot. A VR-grip-held asset's
     // obj.position is the local grip offset, NOT the world position;
@@ -3243,14 +3230,19 @@ const vrHud = new VRHUDManager(
   // this object once at construction; the closures stay valid for the lifetime
   // of the mesh. Functional setters are stable in React so re-creating this
   // on every render would be wasteful — build once at mount via useCallback.
-  const closeVrRadial = useCallback(() => {
-    vrRadialMenuRef.current?.setVisible(false);
-    vrRadialActiveSideRef.current = null;
-    setVrRadialOpen(false);
+  const closeVrRadial = useCallback((menuSide?: 'left' | 'right') => {
+    if (!menuSide || menuSide === 'left') {
+      vrRadialMenuLeftRef.current?.setVisible(false);
+      setVrRadialLeftOpen(false);
+    }
+    if (!menuSide || menuSide === 'right') {
+      vrRadialMenuRightRef.current?.setVisible(false);
+      setVrRadialRightOpen(false);
+    }
   }, []);
-  const buildVrRadialCallbacks = useCallback((): VRRadialMenuCallbacks => ({
-    onUndo: () => { undoRedoManagerRef.current?.undo(); closeVrRadial(); },
-    onRedo: () => { undoRedoManagerRef.current?.redo(); closeVrRadial(); },
+  const buildVrRadialCallbacks = useCallback((menuSide: 'left' | 'right'): VRRadialMenuCallbacks => ({
+    onUndo: () => { undoRedoManagerRef.current?.undo(); closeVrRadial(menuSide); },
+    onRedo: () => { undoRedoManagerRef.current?.redo(); closeVrRadial(menuSide); },
     onToggleScaling: () => setScalingEnabled((v) => !v),
     onToggleLaser: () => setLaserEnabled((v) => !v),
     onNextLocomotion: () => {
@@ -3262,31 +3254,35 @@ const vrHud = new VRHUDManager(
       const cur = grabModeRef.current;
       setGrabMode(cur === 'auto' ? 'precision' : cur === 'precision' ? 'palm' : cur === 'palm' ? 'laser' : 'auto');
     },
-    onDestroy: handleDestroyHeld,
-    onDuplicate: handleDuplicateHeld,
-    onSaveHeld: handleSaveHeldToInventory,
-    onDownloadHeld: () => { handleDownloadHeld?.(); },
-    onClose: closeVrRadial,
+    onDestroy: () => handleDestroyHeld(menuSide),
+    onDuplicate: () => handleDuplicateHeld(menuSide),
+    onSaveHeld: () => handleSaveHeldToInventory(menuSide),
+    onDownloadHeld: () => { handleDownloadHeld?.(menuSide); },
+    onClose: () => closeVrRadial(menuSide),
     onNextTab: () => {
-      const mesh = vrRadialMenuRef.current;
+      const mesh = menuSide === 'left' ? vrRadialMenuLeftRef.current : vrRadialMenuRightRef.current;
       if (!mesh) return;
       const cur = mesh.activeTab;
-      const isHeld = isHeldRef.current;
-      const next: 'general' | 'grab' | 'held' = isHeld
+      const sideIsHolding = heldAssetsBySideRef.current[menuSide] !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
+      const next: 'general' | 'grab' | 'held' = sideIsHolding
         ? (cur === 'general' ? 'grab' : cur === 'grab' ? 'held' : 'general')
         : (cur === 'general' ? 'grab' : 'general');
       mesh.setActiveTab(next);
     },
   }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld]);
-  const buildVrRadialInitialState = useCallback((): VRRadialMenuState => ({
-    locomotionMode: locomotionModeRef.current,
-    scalingEnabled: scalingEnabledRef.current,
-    laserEnabled: laserEnabledRef.current,
-    grabMode: grabModeRef.current,
-    isHeld: isHeldRef.current,
-    heldAssetType: heldAssetTypeRef.current,
-    activeTab: 'general',
-  }), []);
+  const buildVrRadialInitialState = useCallback((menuSide: 'left' | 'right'): VRRadialMenuState => {
+    const sideHeldAsset = heldAssetsBySideRef.current[menuSide];
+    const sideIsHolding = sideHeldAsset !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
+    return {
+      locomotionMode: locomotionModeRef.current,
+      scalingEnabled: scalingEnabledRef.current,
+      laserEnabled: laserEnabledRef.current,
+      grabMode: grabModeRef.current,
+      isHeld: sideIsHolding,
+      heldAssetType: sideHeldAsset?.type ? String(sideHeldAsset.type) : sideIsHolding ? heldAssetTypeRef.current : null,
+      activeTab: sideIsHolding ? 'held' : 'general',
+    };
+  }, []);
 
   const handleFocusSelected = () => {
     if (selectedAsset && sceneEngineRef.current) {

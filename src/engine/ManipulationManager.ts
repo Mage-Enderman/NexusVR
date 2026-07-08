@@ -22,6 +22,13 @@ export interface TransformUpdate {
   isPersistent?: boolean;
 }
 
+interface VRHandGrabState {
+  asset: LoadedAsset;
+  originalParent: THREE.Object3D;
+  targetRaySpace: THREE.Object3D | null;
+  holdLocalOffset: THREE.Vector3;
+}
+
 export class ManipulationManager {
   private scene: THREE.Scene;
   private camera: THREE.Camera;
@@ -62,8 +69,8 @@ export class ManipulationManager {
   // used to piggy-back on `selectAsset`/`onSelectionChange`) can fire
   // without us having to flip selection state from inside `beginGrab`
   // (which would re-introduce the RMB-mirrors-press-R symptom).
-  private onGrabBeginCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
-  private onGrabEndCallbacks: Set<() => void> = new Set();
+  private onGrabBeginCallbacks: Set<(asset: LoadedAsset, side?: 'left' | 'right') => void> = new Set();
+  private onGrabEndCallbacks: Set<(side?: 'left' | 'right') => void> = new Set();
   // Camera-anchored carry-mode state. The only state we capture at
   // grab-time is `_grabDepth` (Euclidean camera-to-anchor distance).
   // Each subsequent mousemove rebuilds the asset's world position from
@@ -146,10 +153,6 @@ export class ManipulationManager {
   // broadcast the resulting world transform every frame so peers see
   // the asset move with the local user's controller.
   private _isVRGrabbing = false;
-  // Pre-grab parent cached at grab-time so release snaps the asset
-  // back EXACTLY where it was originally nested (not blindly to the
-  // scene root, which would break future world-container features).
-  private _vrGrabOriginalParent: THREE.Object3D | null = null;
   // ====== VR dolly (thumbstick push/pull on the holding controller) ======
   // When `_isVRGrabbing === true`, the holding controller's thumbstick
   // Y axis is reinterpreted as a distance dolly: push forward to push
@@ -189,14 +192,11 @@ export class ManipulationManager {
   // controller, not whichever stick the user happens to deflect.
   // Currently always 'right' (the only grab path wires right-grip),
   // but generalized so a left-hand grab path is a one-liner.
-  private _vrHoldingSide: 'left' | 'right' = 'right';
-  // The TARGET RAY controller space (distinct from the grip space) of the
-  // holding hand. The laser shoots from this object's -Z world direction,
-  // which is the axis we want for push/pull dolly. The grip space is tilted
-  // relative to the target ray on most headsets (Quest grip faces ~30° down
-  // vs the ray), so modifying grip-local Z moves the object at that tilt
-  // rather than along the laser. Stored at grab-time; cleared on release.
-  private _vrTargetRaySpace: THREE.Object3D | null = null;
+  private _vrHandGrabs: {
+    left: VRHandGrabState | null;
+    right: VRHandGrabState | null;
+  } = { left: null, right: null };
+  private _vrHoldingSide: 'left' | 'right' | null = null;
   // Injected from App.tsx after construction via `setVRInput()`. Null
   // is safe — the dolly path early-returns and the held asset just
   // follows the controller without any push/pull affordance (matches
@@ -454,44 +454,69 @@ export class ManipulationManager {
     side: 'left' | 'right' = 'right',
     targetRaySpace?: THREE.Object3D
   ): void {
-    if (this._isVRGrabbing) return;
-    this._vrHoldingSide = side;
-    this._vrTargetRaySpace = targetRaySpace ?? null;
-    this._vrGrabOriginalParent = asset.object3d.parent ?? this.scene;
+    if (this._vrHandGrabs[side] !== null) return;
+    const otherSide = side === 'left' ? 'right' : 'left';
+    if (this._vrHandGrabs[otherSide]?.asset === asset) return;
+
+    this._vrHandGrabs[side] = {
+      asset,
+      originalParent: asset.object3d.parent ?? this.scene,
+      targetRaySpace: targetRaySpace ?? null,
+      holdLocalOffset: asset.object3d.position.clone(),
+    };
+
     gripSpace.attach(asset.object3d);
-    // Mirror the bookkeeping that desktop `beginGrab` performs so undo
-    // listeners and the `onGrabBegin` / `onDragChange(true)` fan-out fire
-    // exactly once per grab regardless of input source.
+
     this.grabbedAsset = asset;
     this.isGrabDragging = true;
     this._isVRGrabbing = true;
+    this._vrHoldingSide = side;
+
     this.transformControls.detach();
-    if (this.orbitControls) {
+    if (this.orbitControls && this.orbitControls.enabled) {
       this.orbitWasEnabledBeforeDrag = this.orbitControls.enabled;
       this.orbitControls.enabled = false;
     }
-    for (const cb of this.onGrabBeginCallbacks) cb(asset);
+    for (const cb of this.onGrabBeginCallbacks) cb(asset, side);
     this.isDragging = true;
     for (const cb of this.onDragCallbacks) cb(true);
-    // Capture the asset's local position inside the grip space at
-    // grab-time. `gripSpace.attach(asset)` preserves world transform,
-    // so `asset.object3d.position` is the world-space offset between
-    // the grip origin and the asset at the moment of grab — typically
-    // ~2m of -Z when the user raycasts an object 2m ahead. The dolly
-    // path in `update()` modifies the asset's world position, so only
-    // the initial reference is captured here.
     this._vrHoldLocalOffset.copy(asset.object3d.position);
   }
 
-  /**
-   * Release the controller-held asset. Safe to call when not grabbing —
-   * returns early without firing any callbacks. The actual scene-graph
-   * re-parenting and bookkeeping happen inside `endGrab()` so the
-   * release path is shared between RMB and VR sources.
-   */
-  public vrReleaseControllerGrab(): void {
+  public vrReleaseControllerGrab(side?: 'left' | 'right'): void {
     if (!this._isVRGrabbing) return;
-    this.endGrab();
+    if (side === 'left' || side === 'right') {
+      const grab = this._vrHandGrabs[side];
+      if (!grab) return;
+      const releaseParent = grab.originalParent ?? this.scene;
+      releaseParent.attach(grab.asset.object3d);
+      this._vrHandGrabs[side] = null;
+      for (const cb of this.onGrabEndCallbacks) cb(side);
+
+      const remainingSide = this._vrHandGrabs.left ? 'left' : this._vrHandGrabs.right ? 'right' : null;
+      if (remainingSide) {
+        const remainingGrab = this._vrHandGrabs[remainingSide]!;
+        this.grabbedAsset = remainingGrab.asset;
+        this._vrHoldingSide = remainingSide;
+      } else {
+        this._isVRGrabbing = false;
+        this.isGrabDragging = false;
+        this.grabbedAsset = null;
+        this._vrHoldingSide = null;
+        if (this.orbitControls) {
+          this.orbitControls.enabled = this.orbitWasEnabledBeforeDrag;
+        }
+        if (this.selectedAsset) {
+          this.transformControls.attach(this.selectedAsset.object3d);
+        }
+        this.isDragging = false;
+        for (const cb of this.onDragCallbacks) cb(false);
+      }
+      return;
+    }
+    if (this._vrHandGrabs.left) this.vrReleaseControllerGrab('left');
+    if (this._vrHandGrabs.right) this.vrReleaseControllerGrab('right');
+    if (this._isVRGrabbing) this.endGrab();
   }
 
   public endGrab(): void {
@@ -501,36 +526,34 @@ export class ManipulationManager {
       );
     }
     if (!this.isGrabDragging) return;
-    // VR-grab cleanup: re-attach the asset to its ORIGINAL parent so the
-    // scene-graph state the next raycast/physics tick sees is the same as
-    // pre-grab. Calling `attach` (not `add`) preserves the asset's current
-    // WORLD pose, so the object visually stays put where the hand left it.
-    if (this._isVRGrabbing && this.grabbedAsset) {
-      const releaseParent = this._vrGrabOriginalParent ?? this.scene;
-      releaseParent.attach(this.grabbedAsset.object3d);
+    if (this._isVRGrabbing) {
+      if (this._vrHandGrabs.left) {
+        const grabL = this._vrHandGrabs.left;
+        (grabL.originalParent ?? this.scene).attach(grabL.asset.object3d);
+        this._vrHandGrabs.left = null;
+        for (const cb of this.onGrabEndCallbacks) cb('left');
+      }
+      if (this._vrHandGrabs.right) {
+        const grabR = this._vrHandGrabs.right;
+        (grabR.originalParent ?? this.scene).attach(grabR.asset.object3d);
+        this._vrHandGrabs.right = null;
+        for (const cb of this.onGrabEndCallbacks) cb('right');
+      }
       this._isVRGrabbing = false;
-      this._vrGrabOriginalParent = null;
-      this._vrTargetRaySpace = null;
+      this._vrHoldingSide = null;
     }
     if (this.orbitControls) {
       this.orbitControls.enabled = this.orbitWasEnabledBeforeDrag;
     }
-    // Re-attach the gizmo to the currently-selected asset (TC.attach
-    // is idempotent; safe even if nothing changed).
     if (this.selectedAsset) {
       this.transformControls.attach(this.selectedAsset.object3d);
     }
     this.isGrabDragging = false;
     this.grabbedAsset = null;
     this.domElement.style.cursor = '';
-    // Mirror TC's release path — flip isDragging off and notify subscribers
-    // so the App.tsx undo listener records the after snapshot.
     this.isDragging = false;
     for (const cb of this.onDragCallbacks) cb(false);
-    // Notify grab-end listeners (the counterpart to onGrabBegin fired
-    // above). Most consumers only need this for state reset; the undo
-    // snapshot listener above already handles bookkeeping.
-    for (const cb of this.onGrabEndCallbacks) cb();
+    for (const cb of this.onGrabEndCallbacks) cb(undefined);
   }
 
   /**
@@ -585,7 +608,7 @@ export class ManipulationManager {
   public swapGrabbedAsset(newAsset: LoadedAsset): void {
     if (!this.isGrabDragging || !this.grabbedAsset) return;
     if (this._isVRGrabbing) {
-      const side = this._vrHoldingSide;
+      const side = this._vrHoldingSide ?? 'right';
       const gripSpace = this.grabbedAsset.object3d.parent as THREE.Object3D | null;
       this.endGrab();
       if (gripSpace) {
@@ -605,6 +628,8 @@ export class ManipulationManager {
     gripRightPos: THREE.Vector3
   ): void {
     if (this._twoHandedAsset) return;
+    if (this._vrHandGrabs.left?.asset === asset) this.vrReleaseControllerGrab('left');
+    if (this._vrHandGrabs.right?.asset === asset) this.vrReleaseControllerGrab('right');
     if (this._isVRGrabbing && this.grabbedAsset === asset) {
       this.endGrab();
     }
@@ -883,78 +908,53 @@ export class ManipulationManager {
   };
 
   public update(_delta?: number): void {
-    if (this._isVRGrabbing && this.grabbedAsset) {
-      // VR grab: the controllerGrip's matrixWorld (XR-updated every
-      // frame from the user's hand pose) drives the asset. The physical
-      // follow is automatic via Three.js' parent propagation. On top
-      // of that, the holding controller's thumbstick Y axis dollies
-      // the asset along the LASER direction (target ray space -Z),
-      // NOT grip-local Z — the grip is tilted ~30° relative to the
-      // target ray on most headsets, causing the old grip-Z path to
-      // push/pull at an upward/downward tilt instead of straight along
-      // the beam.
+    if (this._isVRGrabbing) {
       const delta = _delta ?? 0;
-      if (this._vrInput && delta > 0) {
-        const stickY = this._vrInput[this._vrHoldingSide].stick.y;
-        if (Math.abs(stickY) > 1e-3) {
-          const trs = this._vrTargetRaySpace;
-          if (trs) {
-            // Get the target ray's world-space forward direction (-Z in
-            // Three.js convention). This is exactly the laser direction,
-            // so stick-forward pushes the object deeper along the beam
-            // and stick-back pulls it toward the hand along the beam.
-            trs.updateWorldMatrix(true, false);
-            // laserDir = target ray world -Z (pointing away from controller)
-            const laserDir = new THREE.Vector3(0, 0, -1)
-              .applyQuaternion(
-                new THREE.Quaternion().setFromRotationMatrix(trs.matrixWorld)
-              )
-              .normalize();
-
-            // Move the asset's world position along the laser direction.
-            // stickY < 0 = forward push → add laserDir (push away)
-            // stickY > 0 = back pull  → subtract laserDir (pull closer)
-            // Negate stickY so forward push → object moves away from hand.
-            const moveAmt = -stickY * ManipulationManager.VR_HOLD_DOLLY_SPEED * delta;
-
-            // Compute current world distance from controller tip to asset
-            const assetWorldPos = new THREE.Vector3();
-            this.grabbedAsset.object3d.getWorldPosition(assetWorldPos);
-            const ctrlWorldPos = new THREE.Vector3();
-            trs.getWorldPosition(ctrlWorldPos);
-            const currentDist = assetWorldPos.distanceTo(ctrlWorldPos);
-
-            // Clamp so asset stays within [MIN_DIST, MAX_DIST] of the controller
-            const newDist = Math.max(
-              ManipulationManager.VR_HOLD_MIN_DIST,
-              Math.min(ManipulationManager.VR_HOLD_MAX_DIST, currentDist + moveAmt)
-            );
-            const distDelta = newDist - currentDist;
-
-            if (Math.abs(distDelta) > 1e-6) {
-              // Translate the asset in world space along the laser
-              assetWorldPos.addScaledVector(laserDir, distDelta);
-              // Write back into the parent (grip) local space so the
-              // asset keeps following the hand correctly
-              const gripParent = this.grabbedAsset.object3d.parent;
-              if (gripParent) {
-                gripParent.worldToLocal(assetWorldPos);
-                this.grabbedAsset.object3d.position.copy(assetWorldPos);
+      const updateHandGrab = (side: 'left' | 'right') => {
+        const grab = this._vrHandGrabs[side];
+        if (!grab) return;
+        if (this._vrInput && delta > 0) {
+          const stickY = this._vrInput[side].stick.y;
+          if (Math.abs(stickY) > 1e-3) {
+            const trs = grab.targetRaySpace;
+            if (trs) {
+              trs.updateWorldMatrix(true, false);
+              const laserDir = new THREE.Vector3(0, 0, -1)
+                .applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(trs.matrixWorld))
+                .normalize();
+              const moveAmt = -stickY * ManipulationManager.VR_HOLD_DOLLY_SPEED * delta;
+              const assetWorldPos = new THREE.Vector3();
+              grab.asset.object3d.getWorldPosition(assetWorldPos);
+              const ctrlWorldPos = new THREE.Vector3();
+              trs.getWorldPosition(ctrlWorldPos);
+              const currentDist = assetWorldPos.distanceTo(ctrlWorldPos);
+              const newDist = Math.max(
+                ManipulationManager.VR_HOLD_MIN_DIST,
+                Math.min(ManipulationManager.VR_HOLD_MAX_DIST, currentDist + moveAmt)
+              );
+              const distDelta = newDist - currentDist;
+              if (Math.abs(distDelta) > 1e-6) {
+                assetWorldPos.addScaledVector(laserDir, distDelta);
+                const gripParent = grab.asset.object3d.parent;
+                if (gripParent) {
+                  gripParent.worldToLocal(assetWorldPos);
+                  grab.asset.object3d.position.copy(assetWorldPos);
+                }
               }
+            } else {
+              grab.holdLocalOffset.z += stickY * ManipulationManager.VR_HOLD_DOLLY_SPEED * delta;
+              grab.holdLocalOffset.z = Math.max(
+                -ManipulationManager.VR_HOLD_MAX_DIST,
+                Math.min(-ManipulationManager.VR_HOLD_MIN_DIST, grab.holdLocalOffset.z)
+              );
+              grab.asset.object3d.position.copy(grab.holdLocalOffset);
             }
-          } else {
-            // Fallback (no target ray stored): dolly along grip local -Z
-            // This is the old behaviour, kept as a safe fallback.
-            this._vrHoldLocalOffset.z += stickY * ManipulationManager.VR_HOLD_DOLLY_SPEED * delta;
-            this._vrHoldLocalOffset.z = Math.max(
-              -ManipulationManager.VR_HOLD_MAX_DIST,
-              Math.min(-ManipulationManager.VR_HOLD_MIN_DIST, this._vrHoldLocalOffset.z)
-            );
-            this.grabbedAsset.object3d.position.copy(this._vrHoldLocalOffset);
           }
         }
-      }
-      this.broadcastCurrentTransform(this.grabbedAsset);
+        this.broadcastCurrentTransform(grab.asset);
+      };
+      updateHandGrab('left');
+      updateHandGrab('right');
       return;
     }
     // Two-handed grab: scale the held asset by the current distance
@@ -1280,12 +1280,12 @@ export class ManipulationManager {
     return () => this.onDragCallbacks.delete(cb);
   }
 
-  public registerOnGrabBegin(cb: (asset: LoadedAsset) => void): () => void {
+  public registerOnGrabBegin(cb: (asset: LoadedAsset, side?: 'left' | 'right') => void): () => void {
     this.onGrabBeginCallbacks.add(cb);
     return () => this.onGrabBeginCallbacks.delete(cb);
   }
 
-  public registerOnGrabEnd(cb: () => void): () => void {
+  public registerOnGrabEnd(cb: (side?: 'left' | 'right') => void): () => void {
     this.onGrabEndCallbacks.add(cb);
     return () => this.onGrabEndCallbacks.delete(cb);
   }
