@@ -85,10 +85,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               ? 'bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-[0_0_15px_rgba(16,185,129,0.3)]' 
               : 'btn-glass text-slate-300'
           }`}
-          title="Toggle between First-Person Walk [V] and Orbit Focus Mode"
+          title="Toggle between First-Person Walk and Orbit Focus Mode"
         >
           {cameraMode === 'first-person' ? <Footprints className="w-4 h-4" /> : <Orbit className="w-4 h-4 text-cyan-400" />}
-          <span>{cameraMode === 'first-person' ? '1st Person [V]' : 'Orbit Mode [V]'}</span>
+          <span>{cameraMode === 'first-person' ? '1st Person Mode' : 'Orbit Mode'}</span>
         </button>
 
         <button

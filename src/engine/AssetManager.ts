@@ -699,14 +699,22 @@ export class AssetManager {
     }
     if (partial.globalVolume !== undefined && partial.globalVolume !== state.globalVolume) {
       state.globalVolume = Math.max(0, Math.min(1, partial.globalVolume));
-      if (state.volumeMode === 'global' && !state.muted) {
+      if (state.muted) {
+        state.muted = false;
+        v.muted = false;
+      }
+      if (state.volumeMode === 'global') {
         v.volume = state.globalVolume;
       }
       changed = true;
     }
     if (partial.localVolume !== undefined && partial.localVolume !== state.localVolume) {
       state.localVolume = Math.max(0, Math.min(1, partial.localVolume));
-      if (state.volumeMode === 'local' && !state.muted) {
+      if (state.muted) {
+        state.muted = false;
+        v.muted = false;
+      }
+      if (state.volumeMode === 'local') {
         v.volume = state.localVolume;
       }
       changed = true;

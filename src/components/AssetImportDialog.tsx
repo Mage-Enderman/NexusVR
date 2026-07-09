@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
 import type { AssetManager } from '../engine/AssetManager.ts';
@@ -71,6 +71,7 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const [selectedFile, setSelectedFile] = useState<File | null>(initialFile || null);
   const [urlInput, setUrlInput] = useState<string>('');
   const [activeTab, setActiveTab] = useState<'file' | 'url'>(initialFile ? 'file' : 'file');
+  const submittingRef = useRef(false);
 
   // General settings
   const [saveToInventory, setSaveToInventory] = useState<boolean>(false);
@@ -144,6 +145,8 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     // is a no-op for them.
     if (!interactive) return;
     if (!selectedFile && !urlInput.trim()) return;
+    if (submittingRef.current || isSubmitting) return;
+    submittingRef.current = true;
     setIsSubmitting(true);
 
     const config: ImportConfig = {

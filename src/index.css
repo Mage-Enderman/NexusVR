@@ -675,6 +675,11 @@ button {
   height: 3.5rem;
 }
 
+.btn-dark-slate svg,
+.btn-dark-slate-lg svg {
+  pointer-events: none !important;
+}
+
 .btn-dark-slate-lg:hover:not(:disabled) {
   background-color: #242833 !important;
   box-shadow: 0 0 24px rgba(251, 191, 36, 0.55) !important;

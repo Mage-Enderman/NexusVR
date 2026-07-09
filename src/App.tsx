@@ -1782,21 +1782,6 @@ const vrHud = new VRHUDManager(
       }
 
       // Auto-open the inspector when a freshly-imported video lands.
-      // Per the feature request, videos start PAUSED + MUTED so the
-      // user isn't audio-blasted on landing. Pop the scene inspector
-      // open pointing at the new asset so the play/mute/volume
-      // controls are exactly one click away. Skipped when something
-      // is already selected so we don't steal focus. queueMicrotask
-      // defers past this callback so setState doesn't fire inside
-      // the importer's synchronous callback dispatch.
-      if (asset.type === 'video') {
-        queueMicrotask(() => {
-          if (selectedAssetRef.current == null) {
-            setSelectedAsset(asset);
-            setShowSceneInspector(true);
-          }
-        });
-      }
     }));
 
     // Network listeners
@@ -2251,9 +2236,12 @@ const vrHud = new VRHUDManager(
       // While locked, if the crosshair is over a panel route the click there
       // instead of doing world raycasting.
       const spm = sceneEngine.spatialPanelManager;
-      if (document.pointerLockElement && spm?.isOverPanel) {
-        spm.handleLockedClick();
-        return;
+      if (document.pointerLockElement && spm) {
+        spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+        if (spm.isOverPanel) {
+          spm.handleLockedClick();
+          return;
+        }
       }
 
       const rect = sceneEngine.renderer.domElement.getBoundingClientRect();
@@ -2840,8 +2828,6 @@ const vrHud = new VRHUDManager(
           setShowSceneInspector((prev) => !prev);
           return;
         }
-      } else if (e.key === 'v' || e.key === 'V') {
-        handleToggleCameraMode();
       } else if (e.key === 'f' || e.key === 'F') {
         handleFocusSelected();
       } else if (e.key === 'i' || e.key === 'I') {
@@ -3299,10 +3285,10 @@ const vrHud = new VRHUDManager(
       case 'volume':
         if (typeof payload === 'number') {
           if (state.volumeMode === 'global') {
-            am.applyVideoState(assetId, { globalVolume: payload });
+            am.applyVideoState(assetId, { globalVolume: payload, muted: false });
             net?.broadcastVideoState({ assetId, playing: state.playing, currentTime: state.currentTime, globalVolume: payload });
           } else {
-            am.applyVideoState(assetId, { localVolume: payload });
+            am.applyVideoState(assetId, { localVolume: payload, muted: false });
           }
         }
         break;
@@ -3687,7 +3673,12 @@ const vrHud = new VRHUDManager(
     try {
       const asset = await assetManager.importFile(file, pos, undefined, placeholderId);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder automatically when this asset lands.
@@ -3774,7 +3765,12 @@ const vrHud = new VRHUDManager(
       }
 
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder when this asset lands. No explicit local
@@ -3830,7 +3826,12 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
       }
     } else if (item.url) {
@@ -3840,7 +3841,12 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
       }
     }

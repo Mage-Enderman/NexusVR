@@ -13,7 +13,6 @@ import {
   Trash2,
   Square,
   Repeat,
-  Link as LinkIcon,
 } from 'lucide-react';
 
 export interface VideoObjectControlsProps {
@@ -109,14 +108,18 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
     if (!timelineRef.current || !(state.duration > 0)) return;
     const track = timelineRef.current;
     try { track.setPointerCapture(e.pointerId); } catch { /* noop */ }
-    const update = (clientX: number) => {
+    const getRatio = (clientX: number, offsetX?: number, target?: any) => {
+      if (typeof offsetX === 'number' && track.clientWidth > 0 && target === track) {
+        return Math.max(0, Math.min(1, offsetX / track.clientWidth));
+      }
       const rect = track.getBoundingClientRect();
       const cx = Math.max(rect.left, Math.min(rect.right, clientX));
-      const ratio = (cx - rect.left) / Math.max(1, rect.width);
-      onSeek(ratio * state.duration);
+      return (cx - rect.left) / Math.max(1, rect.width);
     };
-    update(e.clientX);
-    const move = (ev: PointerEvent) => update(ev.clientX);
+    onSeek(getRatio(e.clientX, e.nativeEvent?.offsetX, e.target) * state.duration);
+    const move = (ev: PointerEvent) => {
+      onSeek(getRatio(ev.clientX, ev.offsetX, ev.target) * state.duration);
+    };
     const up = (ev: PointerEvent) => {
       try { track.releasePointerCapture(ev.pointerId); } catch { /* noop */ }
       track.removeEventListener('pointermove', move);
@@ -131,14 +134,18 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
     if (!volumeTrackRef.current) return;
     const track = volumeTrackRef.current;
     try { track.setPointerCapture(e.pointerId); } catch { /* noop */ }
-    const update = (clientY: number) => {
+    const getRatio = (clientY: number, offsetY?: number, target?: any) => {
+      if (typeof offsetY === 'number' && track.clientHeight > 0 && target === track) {
+        return Math.max(0, Math.min(1, 1 - offsetY / track.clientHeight));
+      }
       const rect = track.getBoundingClientRect();
       const cy = Math.max(rect.top, Math.min(rect.bottom, clientY));
-      const ratio = 1 - (cy - rect.top) / Math.max(1, rect.height);
-      onVolumeChange(Math.max(0, Math.min(1, ratio)));
+      return 1 - (cy - rect.top) / Math.max(1, rect.height);
     };
-    update(e.clientY);
-    const move = (ev: PointerEvent) => update(ev.clientY);
+    onVolumeChange(getRatio(e.clientY, e.nativeEvent?.offsetY, e.target));
+    const move = (ev: PointerEvent) => {
+      onVolumeChange(getRatio(ev.clientY, ev.offsetY, ev.target));
+    };
     const up = (ev: PointerEvent) => {
       try { track.releasePointerCapture(ev.pointerId); } catch { /* noop */ }
       track.removeEventListener('pointermove', move);
@@ -187,12 +194,19 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
         )}
       </div>
 
-      {/* Middle Row Overlay: Empty center clicks close UI, Right-side Audio Controls don't */}
-      <div className="w-full flex-1 flex items-center justify-end px-6 pointer-events-none">
+      {/* Middle Row Overlay: Empty center clicks close UI; Right-side Vertical Volume Slider */}
+      <div className="w-full flex-1 flex items-center justify-end px-8 pointer-events-none">
         <div
           onClick={(e) => e.stopPropagation()}
-          className="pointer-events-auto flex flex-col items-center gap-3 py-4 px-3 rounded-full bg-[#181a20]/95 backdrop-blur-md border border-slate-700/80 shadow-2xl cursor-default"
+          className="pointer-events-auto flex flex-col items-center gap-3.5 py-6 px-4 rounded-3xl shadow-2xl cursor-default"
+          style={{
+            backgroundColor: 'rgba(24, 26, 32, 0.96)',
+            backdropFilter: 'blur(12px)',
+            border: '1px solid rgba(100, 116, 139, 0.8)',
+            minWidth: '68px'
+          }}
         >
+          {/* Mute Button */}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -200,32 +214,90 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             }}
             title={state.muted ? 'Unmute audio' : 'Mute audio'}
             className="btn-dark-slate"
+            style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            {state.muted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5 text-amber-400" />}
+            {state.muted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-amber-400" />}
           </button>
 
-          {/* Vertical Volume Slider Track */}
+          {/* Vertical Volume Slider Track (EXPLICIT INLINE STYLES FOR ZERO-TAILWIND FAILURE RISK) */}
           <div
             ref={volumeTrackRef}
             onPointerDown={beginVolumeScrub}
-            className="h-32 w-4 rounded-full bg-[#0a0d14] border border-slate-700 overflow-hidden relative cursor-pointer shadow-inner"
-            title={`Volume: ${Math.round(displayedVolume * 100)}%`}
+            onMouseDown={beginVolumeScrub as any}
+            onWheel={(e) => {
+              e.stopPropagation();
+              const delta = e.deltaY < 0 ? 0.06 : -0.06;
+              onVolumeChange(Math.max(0, Math.min(1, displayedVolume + delta)));
+            }}
+            style={{
+              width: '28px',
+              height: '210px',
+              borderRadius: '9999px',
+              backgroundColor: '#0a0d14',
+              border: '2px solid rgba(148, 163, 184, 0.55)',
+              position: 'relative',
+              cursor: 'pointer',
+              overflow: 'hidden',
+              boxShadow: 'inset 0 2px 8px rgba(0,0,0,0.8)'
+            }}
+            title={`Volume: ${Math.round(displayedVolume * 100)}% (Click or drag up/down)`}
           >
+            {/* Filled Level Bar */}
             <div
-              className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-amber-500 via-amber-400 to-yellow-300 transition-[height] duration-75 ease-linear rounded-full"
-              style={{ height: `${displayedVolume * 100}%` }}
+              style={{
+                position: 'absolute',
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: `${displayedVolume * 100}%`,
+                background: 'linear-gradient(0deg, #9333ea, #a855f7, #f59e0b)',
+                borderRadius: '9999px',
+                transition: 'height 75ms linear'
+              }}
+            />
+            {/* Circular Glowing Thumb Handle */}
+            <div
+              style={{
+                position: 'absolute',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                bottom: `calc(${Math.max(3, Math.min(97, displayedVolume * 100))}% - 10px)`,
+                width: '20px',
+                height: '20px',
+                backgroundColor: '#ffffff',
+                border: '3px solid #f59e0b',
+                borderRadius: '50%',
+                boxShadow: '0 0 10px rgba(245, 158, 11, 0.9)',
+                pointerEvents: 'none',
+                transition: 'bottom 75ms linear'
+              }}
             />
           </div>
 
+          {/* Volume Percentage Readout */}
+          <span
+            style={{
+              fontSize: '13px',
+              fontFamily: 'monospace',
+              fontWeight: 800,
+              color: '#fde047',
+              textAlign: 'center'
+            }}
+          >
+            {Math.round(displayedVolume * 100)}%
+          </span>
+
+          {/* Global / Local Mode Switcher Button */}
           <button
             onClick={(e) => {
               e.stopPropagation();
               onVolumeModeToggle(state.volumeMode === 'global' ? 'local' : 'global');
             }}
-            title={`Audio Mode: ${state.volumeMode === 'global' ? 'Global (broadcast)' : 'Local (headset only)'}`}
+            title={`Audio Mode: ${state.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
             className="btn-dark-slate"
+            style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            {state.volumeMode === 'global' ? <Globe2 className="w-5 h-5" /> : <User className="w-5 h-5" />}
+            {state.volumeMode === 'global' ? <Globe2 className="w-5 h-5 text-cyan-400" /> : <User className="w-5 h-5 text-emerald-400" />}
           </button>
         </div>
       </div>
@@ -244,6 +316,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
           <div
             ref={timelineRef}
             onPointerDown={beginScrub}
+            onMouseDown={beginScrub as any}
             className="flex-1 relative cursor-pointer"
             style={{
               backgroundColor: '#0a0d14',
@@ -299,11 +372,16 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                 e.stopPropagation();
                 state.playing ? onPause() : onPlay();
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               disabled={state.duration <= 0}
               title={state.playing ? 'Pause' : 'Play'}
               className="btn-dark-slate-lg"
             >
-              {state.playing ? <Pause className="w-6 h-6 fill-amber-300" /> : <Play className="w-6 h-6 fill-amber-300 ml-0.5" />}
+              {state.playing ? (
+                <Pause className="w-6 h-6 fill-amber-300 pointer-events-none" />
+              ) : (
+                <Play className="w-6 h-6 fill-amber-300 ml-0.5 pointer-events-none" />
+              )}
             </button>
 
             <button
@@ -315,7 +393,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Rewind 5 seconds"
               className="btn-dark-slate"
             >
-              <SkipBack className="w-5 h-5" />
+              <SkipBack className="w-5 h-5 pointer-events-none" />
             </button>
 
             <button
@@ -328,7 +406,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Stop playback"
               className="btn-dark-slate"
             >
-              <Square className="w-5 h-5" />
+              <Square className="w-5 h-5 pointer-events-none" />
             </button>
 
             <button
@@ -340,7 +418,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Fast forward 5 seconds"
               className="btn-dark-slate"
             >
-              <SkipForward className="w-5 h-5" />
+              <SkipForward className="w-5 h-5 pointer-events-none" />
             </button>
 
             <button
@@ -351,20 +429,32 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Restart video"
               className="btn-dark-slate"
             >
-              <Repeat className="w-5 h-5" />
+              <Repeat className="w-5 h-5 pointer-events-none" />
             </button>
           </div>
 
-          {/* Right Controls */}
+          {/* Right Controls: Audio Mode Indicator & Switcher */}
           <div className="flex items-center gap-3">
+            {/* Global / Local Mode Switcher Pill Button */}
             <button
               onClick={(e) => {
                 e.stopPropagation();
+                onVolumeModeToggle(state.volumeMode === 'global' ? 'local' : 'global');
               }}
-              title="Video Source"
-              className="btn-dark-slate"
+              title={`Switch Audio Mode. Currently: ${state.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
+              className="px-4 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-amber-500/60 text-slate-200 hover:text-white flex items-center gap-2.5 text-xs font-bold transition-all cursor-pointer shadow-sm"
             >
-              <LinkIcon className="w-5 h-5" />
+              {state.volumeMode === 'global' ? (
+                <>
+                  <Globe2 className="w-4 h-4 text-cyan-400 pointer-events-none" />
+                  <span>Global Volume Mode</span>
+                </>
+              ) : (
+                <>
+                  <User className="w-4 h-4 text-emerald-400 pointer-events-none" />
+                  <span>Local Volume Mode</span>
+                </>
+              )}
             </button>
           </div>
         </div>

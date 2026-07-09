@@ -16,10 +16,13 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
   const [isUploading, setIsUploading] = useState(false);
   const [statusText, setStatusText] = useState('');
   
+  const uploadingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (uploadingRef.current || isUploading) return;
+    uploadingRef.current = true;
     setIsUploading(true);
 
     for (let i = 0; i < files.length; i++) {

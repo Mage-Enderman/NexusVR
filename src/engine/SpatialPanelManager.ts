@@ -441,10 +441,11 @@ export class SpatialPanelManager {
     }
 
     // Always fire mousemove/pointermove so hover CSS states (e.g. :hover) update
+    // Always fire mousemove/pointermove so hover CSS states (e.g. :hover) and sliders update
     if (found) {
-      found.dispatchEvent(
-        new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: cx, clientY: cy })
-      );
+      const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true };
+      found.dispatchEvent(new PointerEvent('pointermove', opts));
+      found.dispatchEvent(new MouseEvent('mousemove', opts));
     }
 
     return isNowOver;
@@ -456,11 +457,22 @@ export class SpatialPanelManager {
    * `isOverPanel` is true.
    */
   public handleLockedClick(): boolean {
-    const el = this.hoveredElement;
-    if (!el) return false;
-    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
-    el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, cancelable: true, button: 0 }));
-    el.dispatchEvent(new MouseEvent('click',     { bubbles: true, cancelable: true, button: 0 }));
+    const rawEl = this.hoveredElement;
+    if (!rawEl) return false;
+    const el = rawEl.closest('button, a, input, select, textarea, [role="button"]') || rawEl;
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+    const opts = { bubbles: true, cancelable: true, button: 0, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true };
+    const isButtonOrInput = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT';
+    el.dispatchEvent(new PointerEvent('pointerdown', opts));
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new PointerEvent('pointerup', opts));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    if (isButtonOrInput && el instanceof HTMLElement && typeof el.click === 'function') {
+      el.click();
+    } else {
+      el.dispatchEvent(new MouseEvent('click', opts));
+    }
     // Focus text inputs / selects so keyboard events flow into them
     if (el instanceof HTMLElement && typeof el.focus === 'function') {
       el.focus();
