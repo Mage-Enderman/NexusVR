@@ -13,7 +13,7 @@ Drop into rooms with friends over peer-to-peer WebRTC, import 3D models and vide
 
 ### 🎮 Core & Locomotion
 - **Browser-based 3D / WebXR Sandbox**: Desktop first-person camera with orbit, WASD walking, flight, and noclip locomotion modes. WebXR VR support for compatible headsets.
-- **Peer-to-Peer Multiplayer**: Powered by [Trystero](https://github.com/dmotz/trystero) over WebRTC + Nostr relay signaling. No centralized servers or installations required.
+- **Peer-to-Peer Multiplayer**: Powered by [PeerJS](https://peerjs.com/) over WebRTC. Direct peer-to-peer data and media streaming without centralized game servers.
 - **Room System**: Deterministic host migration, automatic scene synchronization for late joiners, and shareable room links / QR codes.
 - **Spatial Voice & Text Chat**: Real-time positional 3D audio per peer with push-to-talk friendliness, mute, silence, and room-level mic controls.
 
