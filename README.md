@@ -5,7 +5,7 @@
 > This project is an open-source, Resonite-inspired **social VR / metaverse web application** built with React, Three.js, and WebXR.
 > We welcome forks, pull requests, and community contributions!
 
-Drop into rooms with friends over peer-to-peer WebRTC, import 3D models and videos, build worlds with primitives and lights, and customize materials together in real-time — **no central server required**.
+Drop into rooms with friends over peer-to-peer WebRTC, import 3D models and videos, build worlds with primitive objects, and customize materials together in real-time — **no central server required**.
 
 ---
 
@@ -20,17 +20,14 @@ Drop into rooms with friends over peer-to-peer WebRTC, import 3D models and vide
 ### 🛠️ World Building & Asset Manipulation
 - **3D Asset & Video Import**:
   - Import `.glb`, `.gltf`, `.obj`, `.fbx`, images, and videos (`.mp4`, `.webm`, `.mov`).
-  - **Compact Import Modal**: All customization options fit cleanly on one window without scrolling, allowing instant scale, collision, and persistence configuration.
-  - Spawning items from inventory or primitives places them **directly in front of your current orientation** at comfortable eye/chest level.
 - **In-World Interactive Video Players**:
   - Fully synchronized multiplayer playback with a **sleek dark-slate UI overlay**.
   - Interactive **golden timeline progress bar** with circular scrubber handle, play/pause, 5-second step rewind/forward, and stop controls.
   - Switchable **Audio Mode**: Global (synchronized broadcast to all players in the room) vs. Local (private headset-only listening).
-  - Destroy Video button to cleanly remove the asset from the room.
 - **Resonite-Inspired PBS Material Inspector**:
   - Edit material properties in real-time with clear, readable labels (**Albedo**, **Normal**, **Roughness**, **Metalness**, **Emissive**, **Opacity**).
   - Includes a dedicated **Normal Map Intensity slider** and texture upload/filtering controls.
-- **Sleek Dark Resonite-Style Dash Menu & UI**:
+- **Sleek Dark Dash Menu & UI**:
   - High-contrast dark slate styling across tabs (`Session & Roles`, `Quick Inventory`, `Controls Guide`, `World Settings`) and pill buttons.
   - Undo / redo system tracking transform, spawn, and delete operations.
 - **Transform Gizmos**: Desktop toolbar and 3D gizmos for Move, Rotate, and Scale operations.
