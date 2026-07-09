@@ -72,36 +72,30 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
       {/* Main Bar */}
       <div className="glass-panel p-2 flex items-center gap-2 pointer-events-auto shadow-2xl">
-        {/* Transform Tools */}
-        <div className="flex items-center gap-1 bg-slate-900/60 p-1 rounded-xl border border-white/5">
+        {/* Transform Tools matching reference style */}
+        <div className="flex items-center gap-1.5 bg-[#0a0d14] p-1.5 rounded-2xl border border-cyan-500/35 shadow-inner">
           <button
             onClick={() => onSetMode('translate')}
-            className={`btn-icon text-sm rounded-lg transition-all ${
-              currentMode === 'translate' ? 'bg-[#00f0ff] text-black shadow-[0_0_12px_rgba(0,240,255,0.5)] font-bold' : 'text-slate-300 hover:bg-white/10'
-            }`}
+            className={currentMode === 'translate' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
             title="Move (Translate) Mode [G / W]"
           >
-            <Move className="w-4 h-4" />
+            <Move className="w-5 h-5" />
           </button>
 
           <button
             onClick={() => onSetMode('rotate')}
-            className={`btn-icon text-sm rounded-lg transition-all ${
-              currentMode === 'rotate' ? 'bg-[#a855f7] text-white shadow-[0_0_12px_rgba(168,85,247,0.5)] font-bold' : 'text-slate-300 hover:bg-white/10'
-            }`}
+            className={currentMode === 'rotate' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
             title="Rotate Mode [R / E]"
           >
-            <RotateCw className="w-4 h-4" />
+            <RotateCw className="w-5 h-5" />
           </button>
 
           <button
             onClick={() => onSetMode('scale')}
-            className={`btn-icon text-sm rounded-lg transition-all ${
-              currentMode === 'scale' ? 'bg-[#ec4899] text-white shadow-[0_0_12px_rgba(236,72,153,0.5)] font-bold' : 'text-slate-300 hover:bg-white/10'
-            }`}
+            className={currentMode === 'scale' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
             title="Scale Mode [S / R]"
           >
-            <Maximize2 className="w-4 h-4" />
+            <Maximize2 className="w-5 h-5" />
           </button>
         </div>
 

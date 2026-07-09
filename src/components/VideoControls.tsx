@@ -93,13 +93,16 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
   const durationRef = useRef<HTMLSpanElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
 
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
   useEffect(() => {
     let raf = 0;
     let cancelled = false;
     const tick = () => {
       if (cancelled) return;
-      const dur = state.duration || 0;
-      const cur = state.currentTime || 0;
+      const dur = stateRef.current.duration || 0;
+      const cur = stateRef.current.currentTime || 0;
       const ratio = dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
       if (fillRef.current) fillRef.current.style.width = `${ratio * 100}%`;
       if (thumbRef.current) thumbRef.current.style.left = `${ratio * 100}%`;
@@ -116,7 +119,7 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [state.duration, state.currentTime]);
+  }, []);
 
   // Derive active volume for the slider from whichever mode the
   // user picked. Mute is a separate, orthogonal boolean that
@@ -222,18 +225,42 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
           <div
             ref={trackRef}
             onPointerDown={beginScrub}
-            className="relative h-2.5 bg-slate-800/80 rounded-full cursor-pointer overflow-hidden border border-slate-700 hover:border-fuchsia-500/40 transition select-none touch-none"
+            className="relative cursor-pointer select-none touch-none"
+            style={{
+              backgroundColor: '#0a0d14',
+              height: '10px',
+              borderRadius: '9999px',
+              border: '1px solid #334155'
+            }}
             title="Click or drag to seek"
           >
             <div
               ref={fillRef}
-              className="absolute inset-y-0 left-0 bg-gradient-to-r from-fuchsia-500 to-cyan-400 rounded-full transition-[width] duration-100 ease-linear"
-              style={{ width: '0%' }}
+              style={{
+                width: '0%',
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: 0,
+                background: 'linear-gradient(90deg, #f59e0b, #fbbf24)',
+                borderRadius: '9999px',
+                transition: 'width 100ms linear'
+              }}
             />
             <div
               ref={thumbRef}
-              className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow-md shadow-fuchsia-500/40 transition-[left] duration-100 ease-linear pointer-events-none"
-              style={{ left: '0%' }}
+              style={{
+                left: '0%',
+                position: 'absolute',
+                top: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: '14px',
+                height: '14px',
+                backgroundColor: '#ffffff',
+                border: '2px solid #fbbf24',
+                borderRadius: '50%',
+                pointerEvents: 'none'
+              }}
             />
           </div>
           <div className="flex justify-between items-center text-[10px] font-mono">

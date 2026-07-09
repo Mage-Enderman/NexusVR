@@ -98,7 +98,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-2 rounded-xl bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700 transition"
+            className="btn-dash-close"
           >
             <X className="w-5 h-5" />
           </button>
@@ -111,11 +111,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
           <div className="w-60 border-r border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-1.5">
             <button
               onClick={() => setActiveTab('session')}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition text-left ${
-                activeTab === 'session' 
-                  ? 'bg-gradient-to-r from-cyan-500/20 to-blue-500/10 text-cyan-300 border border-cyan-500/30 shadow-md' 
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
+              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'session' ? 'dash-tab-active-cyan' : 'dash-tab'}`}
             >
               <Users className="w-5 h-5 text-cyan-400" />
               <div className="flex-1">
@@ -126,11 +122,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
             <button
               onClick={() => setActiveTab('inventory')}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition text-left ${
-                activeTab === 'inventory' 
-                  ? 'bg-gradient-to-r from-emerald-500/20 to-teal-500/10 text-emerald-300 border border-emerald-500/30 shadow-md' 
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
+              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'inventory' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
             >
               <Package className="w-5 h-5 text-emerald-400" />
               <div className="flex-1">
@@ -141,11 +133,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
             <button
               onClick={() => setActiveTab('controls')}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition text-left ${
-                activeTab === 'controls' 
-                  ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/10 text-purple-300 border border-purple-500/30 shadow-md' 
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
+              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'controls' ? 'dash-tab-active-purple' : 'dash-tab'}`}
             >
               <HelpCircle className="w-5 h-5 text-purple-400" />
               <div className="flex-1">
@@ -156,11 +144,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
             <button
               onClick={() => { setActiveTab('settings'); onOpenFullSettings(); }}
-              className={`flex items-center gap-3 px-4 py-3 rounded-xl font-medium text-sm transition text-left ${
-                activeTab === 'settings' 
-                  ? 'bg-gradient-to-r from-amber-500/20 to-orange-500/10 text-amber-300 border border-amber-500/30 shadow-md' 
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
-              }`}
+              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'settings' ? 'dash-tab-active-amber' : 'dash-tab'}`}
             >
               <SettingsIcon className="w-5 h-5 text-amber-400" />
               <div className="flex-1">
@@ -193,17 +177,13 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                 <div className="flex gap-2 p-1 bg-slate-950/60 rounded-xl border border-slate-800 w-fit">
                   <button
                     onClick={() => setSessionSubTab('users')}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-                      sessionSubTab === 'users' ? 'bg-cyan-500 text-white shadow-md' : 'text-slate-400 hover:text-white'
-                    }`}
+                    className={sessionSubTab === 'users' ? 'dash-pill-active' : 'dash-pill'}
                   >
                     Active Users ({allUsers.length})
                   </button>
                   <button
                     onClick={() => setSessionSubTab('permissions')}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition ${
-                      sessionSubTab === 'permissions' ? 'bg-cyan-500 text-white shadow-md' : 'text-slate-400 hover:text-white'
-                    }`}
+                    className={sessionSubTab === 'permissions' ? 'dash-pill-active' : 'dash-pill'}
                   >
                     Default Permissions
                   </button>

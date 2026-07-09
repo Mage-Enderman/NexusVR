@@ -2278,7 +2278,7 @@ const vrHud = new VRHUDManager(
         if (cur && objToAsset.has(cur)) {
           const found = objToAsset.get(cur);
           if (found && found.type === 'video') {
-            setActiveVideoAssetId(found.id);
+            setActiveVideoAssetId((prev) => (prev === found.id ? null : found.id));
             resetVideoInactivityTimer();
           }
         }
@@ -3607,16 +3607,25 @@ const vrHud = new VRHUDManager(
     }
   };
 
+  const getSpawnPositionInFrontOfUser = (distance = 2.0): THREE.Vector3 => {
+    const se = sceneEngineRef.current;
+    if (!se?.camera) return new THREE.Vector3(0, 1.5, -distance);
+    const cam = se.camera;
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
+    forward.normalize().multiplyScalar(distance);
+    const pos = cam.position.clone().add(forward);
+    pos.y = Math.max(0.6, cam.position.y - 0.15);
+    return pos;
+  };
+
   const handleSpawnPrimitive = (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => {
     if (!ROLE_PERMISSIONS[localRole]?.canSpawnItems && !ROLE_PERMISSIONS[localRole]?.canEditWorld) {
       alert('Your current role does not have permission to spawn items.');
       return;
     }
-    const pos = new THREE.Vector3(
-      (Math.random() - 0.5) * 3,
-      1.5,
-      -2 + (Math.random() - 0.5) * 2
-    );
+    const pos = getSpawnPositionInFrontOfUser(2.0);
     const prim = assetManagerRef.current?.spawnPrimitive(type, pos);
     if (prim) {
       manipulationManagerRef.current?.selectAsset(prim);
@@ -3649,11 +3658,7 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3(
-      (Math.random() - 0.5) * 2,
-      1.5,
-      -2.5 + (Math.random() - 0.5) * 1.5
-    );
+    const pos = getSpawnPositionInFrontOfUser(2.0);
 
     // Mint a stable id BEFORE awaiting so peers + the local user see
     // a 'Loading' placeholder from the moment the click lands, and the
@@ -3734,11 +3739,7 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3(0, 1.5, -2.5);
-    if (sceneEngineRef.current) {
-      const forward = new THREE.Vector3(0, 0, -2.5).applyQuaternion(sceneEngineRef.current.camera.quaternion);
-      pos.copy(sceneEngineRef.current.camera.position).add(forward);
-    }
+    const pos = getSpawnPositionInFrontOfUser(2.2);
 
     // Mint a stable id BEFORE the await (see comment in handleImportFile).
     const placeholderId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -3818,7 +3819,7 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3((Math.random() - 0.5) * 2, 1.5, -2);
+    const pos = getSpawnPositionInFrontOfUser(2.0);
     
     if (item.type === 'primitive' && item.primitiveType) {
       const prim = assetManager.spawnPrimitive(item.primitiveType, pos);
@@ -4318,6 +4319,15 @@ const vrHud = new VRHUDManager(
                   resetVideoInactivityTimer();
                 }}
                 onClose={() => setActiveVideoAssetId(null)}
+                onRemoveVideo={() => {
+                  assetManagerRef.current?.removeAsset(activeVideoAsset.id);
+                  networkServiceRef.current.broadcastRemove(activeVideoAsset.id);
+                  if (manipulationManagerRef.current?.selectedAsset?.id === activeVideoAsset.id) {
+                    manipulationManagerRef.current.selectAsset(null);
+                    setSelectedAsset(null);
+                  }
+                  setActiveVideoAssetId(null);
+                }}
               />
             </div>
           </SpatialPopUpWrapper>
