@@ -163,7 +163,8 @@ export class SpatialPanelManager {
     cssWidth = 520,
     cssHeight = 640,
     parent?: THREE.Object3D,
-    anchorOffset?: THREE.Vector3
+    anchorOffset?: THREE.Vector3,
+    dockToParent = false
   ): THREE.Group {
     // Destroy any existing entry with the same id
     if (this.panels.has(id)) this.destroyPanel(id);
@@ -227,33 +228,40 @@ export class SpatialPanelManager {
     group.userData.spatialPanelParent = parent ?? null;
 
     // ---- Initial placement --------------------------------------------------
-    scene.add(group);
-    if (parent) {
-      // Separate though linked object: placed near the inspected object in world space,
-      // never parented to it so transformations/scaling don't affect the inspector.
-      const parentPos = new THREE.Vector3();
-      parent.getWorldPosition(parentPos);
-      const camPos = new THREE.Vector3();
-      camera.getWorldPosition(camPos);
-
-      const dirToCam = new THREE.Vector3().subVectors(camPos, parentPos);
-      dirToCam.y = 0;
-      if (dirToCam.lengthSq() > 0.0001) dirToCam.normalize();
-      else dirToCam.set(0, 0, 1);
-
-      group.position.copy(parentPos).addScaledVector(dirToCam, 0.95);
-      group.position.y = Math.max(1.0, parentPos.y);
-
-      // Orient to face camera horizontally
-      const yaw = Math.atan2(dirToCam.x, dirToCam.z);
-      group.rotation.set(0, yaw, 0);
+    if (dockToParent && parent) {
+      // Direct child of the target object — rotates, scales, and moves as part of the asset
+      parent.add(group);
+      group.position.copy(anchorOffset ?? new THREE.Vector3(0, 0, 0.048));
+      group.rotation.set(0, 0, 0);
     } else {
-      // Floating case — use camera-relative placement as before.
-      this._placeInFrontOfCamera(group, camera);
-    }
+      scene.add(group);
+      if (parent) {
+        // Separate though linked object: placed near the inspected object in world space,
+        // never parented to it so transformations/scaling don't affect the inspector.
+        const parentPos = new THREE.Vector3();
+        parent.getWorldPosition(parentPos);
+        const camPos = new THREE.Vector3();
+        camera.getWorldPosition(camPos);
 
-    if (anchorOffset) {
-      group.position.add(anchorOffset);
+        const dirToCam = new THREE.Vector3().subVectors(camPos, parentPos);
+        dirToCam.y = 0;
+        if (dirToCam.lengthSq() > 0.0001) dirToCam.normalize();
+        else dirToCam.set(0, 0, 1);
+
+        group.position.copy(parentPos).addScaledVector(dirToCam, 0.95);
+        group.position.y = Math.max(1.0, parentPos.y);
+
+        // Orient to face camera horizontally
+        const yaw = Math.atan2(dirToCam.x, dirToCam.z);
+        group.rotation.set(0, yaw, 0);
+      } else {
+        // Floating case — use camera-relative placement as before.
+        this._placeInFrontOfCamera(group, camera);
+      }
+
+      if (anchorOffset) {
+        group.position.add(anchorOffset);
+      }
     }
 
     const entry: SpatialPanelEntry = {

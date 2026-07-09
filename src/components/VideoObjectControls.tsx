@@ -7,11 +7,20 @@ import {
   VolumeX,
   Globe2,
   User,
+  SkipBack,
+  SkipForward,
+  Film,
+  X,
+  Square,
+  Repeat,
+  Link as LinkIcon,
 } from 'lucide-react';
 
 export interface VideoObjectControlsProps {
   /** Live playback state mirror. Read-only — the parent drives mutations via callbacks. */
   state: VideoPlaybackState;
+  /** Optional asset name displayed in the top bar */
+  assetName?: string;
   onPlay: () => void;
   onPause: () => void;
   /** Seek to a specific time (seconds). Clamped to [0, duration]. */
@@ -24,6 +33,8 @@ export interface VideoObjectControlsProps {
   onVolumeModeToggle: (mode: 'global' | 'local') => void;
   /** Personal mute toggle. NEVER broadcasts. */
   onMuteToggle: () => void;
+  /** Optional close overlay handler */
+  onClose?: () => void;
 }
 
 /**
@@ -38,56 +49,28 @@ function formatTime(seconds: number): string {
 }
 
 /**
- * Compact in-world video controls rendered as a 3D panel attached to the
- * video object itself. Layout (per user request):
- *   • timeline strip on the BOtTOM edge
- *   • play/pause button at the bottom-LEFT corner
- *   • vertical volume bar on the RIGHT
- *   • Global / Local toggle beneath the volume bar (right-bottom corner)
- *
- * Same callback contract as `VideoControls.tsx` so App.tsx can wire this
- * through the existing `handleVideoAction` / `handleVideoClose`
- * pipeline. Reads `state.playing / state.currentTime / state.duration /
- * state.globalVolume / state.localVolume / state.volumeMode / state.muted`
- * directly. Timeline progress is animated imperatively via a rAF loop
- * reading the currentTime so the bar moves smoothly without React
- * re-renders 4x/sec.
+ * Polished, accessible overlay UI for video playback.
+ * Renders directly over the video player screen as a frameless spatial overlay.
  */
 export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   state,
+  assetName,
   onPlay,
   onPause,
   onSeek,
-  // onStep kept in the prop surface for parity with VideoControls but
-  // unused at the moment — the in-world UI exposes Play/Pause + Scrub
-  // + Volume + Mode which cover the common cases without a skip control.
-  onStep: _onStep,
+  onStep,
   onVolumeChange,
   onVolumeModeToggle,
   onMuteToggle,
+  onClose,
 }) => {
-  // Refs for live timeline sync (the only animating element on the panel).
   const fillRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
   const timeRef = useRef<HTMLSpanElement | null>(null);
   const durationRef = useRef<HTMLSpanElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const volumeTrackRef = useRef<HTMLDivElement | null>(null);
 
-  // Drive the timeline-track imperatively so scrubbing + timeupdate produce
-  // smooth motion without React thrash. Reads `state` directly via the
-  // captured object reference (the live VideoPlaybackState object is
-  // MUTATED in place by AssetManager's timeupdate listener — not
-  // re-assigned — so .currentTime reads back the live value every
-  // animation frame).
-  // CRITICAL: dependency array deliberately omits `state.currentTime`.
-  // Including it would re-run this effect and restart the rAF every
-  // time `timeupdate` fires (~4 Hz in browsers), tearing down + re-
-  // creating the animation loop ~4 times per second. The result is
-  // a choppy timeline rather than the smooth rAF-driven progress this
-  // effect is meant to provide. `state.duration` is included because
-  // a new asset's duration can flip 0 → real after `loadedmetadata`
-  // fires, and a fresh tick setup ensures the imperative render of
-  // the 0/0 → X/Y progress starts on the right foot.
   useEffect(() => {
     let raf = 0;
     let cancelled = false;
@@ -113,12 +96,8 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- currentTime is read live
   }, [state.duration]);
 
-  // Timeline-scrub drag handler. Clicking or dragging anywhere on the
-  // strip seeks to that time. Pointer capture keeps the drag alive
-  // even if the cursor leaves the strip.
   const beginScrub = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!timelineRef.current || !(state.duration > 0)) return;
     const track = timelineRef.current;
@@ -140,143 +119,188 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
     track.addEventListener('pointerup', up);
   };
 
-  // Vertical volume-slider renderer. Reads/writes via spread onChange
-  // (range input is 0..100 mapped to 0..1).
+  const beginVolumeScrub = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!volumeTrackRef.current) return;
+    const track = volumeTrackRef.current;
+    try { track.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    const update = (clientY: number) => {
+      const rect = track.getBoundingClientRect();
+      const cy = Math.max(rect.top, Math.min(rect.bottom, clientY));
+      const ratio = 1 - (cy - rect.top) / Math.max(1, rect.height);
+      onVolumeChange(Math.max(0, Math.min(1, ratio)));
+    };
+    update(e.clientY);
+    const move = (ev: PointerEvent) => update(ev.clientY);
+    const up = (ev: PointerEvent) => {
+      try { track.releasePointerCapture(ev.pointerId); } catch { /* noop */ }
+      track.removeEventListener('pointermove', move);
+      track.removeEventListener('pointerup', up);
+    };
+    track.addEventListener('pointermove', move);
+    track.addEventListener('pointerup', up);
+  };
+
   const activeVolume = state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
   const displayedVolume = state.muted ? 0 : activeVolume;
 
   return (
-    /* Outer panel — relative positioning contains the absolute-positioned
-       child controls. pointer-events-auto so the in-world panel DOM
-       receives clicks (combo'd with the SpatialPanelManager's
-       domContainer pointer-events fix, this routes clicks to the
-       buttons / sliders whereas empty panel space falls through). */
-    <div
-      className="relative w-full h-full bg-gradient-to-br from-slate-900/85 via-slate-950/85 to-slate-900/85 rounded-lg border border-fuchsia-500/40 shadow-[0_0_18px_rgba(236,72,153,0.25)] overflow-hidden select-none touch-none"
-      style={{ pointerEvents: 'auto' }}
-    >
-      {/* Mute toggle — top-LEFT corner so it doesn't conflict with
-          play/pause-bottom-left and volume-vertical-right. */}
-      <button
-        onClick={onMuteToggle}
-        title={state.muted ? 'Unmute audio' : 'Mute audio'}
-        className={`absolute top-1.5 left-1.5 p-1 rounded-md transition border text-[10px] ${
-          state.muted
-            ? 'bg-rose-500/30 text-rose-200 border-rose-500/50 hover:bg-rose-500/40'
-            : 'bg-slate-800/80 text-slate-200 border-slate-700 hover:bg-cyan-500/20 hover:text-cyan-200 hover:border-cyan-500/40'
-        }`}
-      >
-        {state.muted ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-      </button>
+    <div className="w-full h-full flex flex-col justify-between bg-transparent text-white font-sans select-none overflow-hidden pointer-events-none">
+      {/* Top Bar Overlay */}
+      <div className="w-full flex items-start justify-between p-6 bg-gradient-to-b from-slate-950/95 via-slate-950/70 to-transparent pointer-events-auto">
+        <div className="flex flex-col">
+          <h1 className="text-3xl font-extrabold tracking-tight text-white drop-shadow-md flex items-center gap-2.5">
+            <span>VideoPlayer</span>
+          </h1>
+          <div className="mt-2.5 px-4 py-1.5 rounded-xl bg-slate-900/85 border border-slate-800/80 text-slate-300 text-sm italic inline-flex items-center gap-2 shadow-inner w-fit">
+            <Film className="w-4 h-4 text-purple-400 shrink-0" />
+            <span className="truncate max-w-[400px]">{assetName || 'Enter URL Here'}</span>
+          </div>
+        </div>
 
-      {/* Play/Pause — bottom-LEFT corner per the user's spec. */}
-      <button
-        onClick={() => (state.playing ? onPause() : onPlay())}
-        disabled={state.duration <= 0}
-        title={state.playing ? 'Pause' : 'Play'}
-        className={`absolute bottom-2 left-2 p-2 rounded-lg transition border shadow-md ${
-          state.playing
-            ? 'bg-amber-500/25 hover:bg-amber-500/40 text-amber-200 border-amber-500/50 hover:border-amber-500/70'
-            : 'bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-200 border-emerald-500/50 hover:border-emerald-500/70'
-        } disabled:opacity-30 disabled:cursor-not-allowed`}
-      >
-        {state.playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-      </button>
-
-      {/* Timeline strip — bottom edge spanning from play/pause to volume.
-          Uses pointer capture so drag-outside the strip still tracks.
-          Imperative rAF fills progress without React render churn. */}
-      <div
-        ref={timelineRef}
-        onPointerDown={beginScrub}
-        className="absolute bottom-2 left-12 right-12 h-2.5 bg-slate-800/80 rounded-full border border-slate-700 cursor-pointer hover:border-fuchsia-500/50 transition overflow-hidden"
-        title="Click or drag to seek"
-        style={{ pointerEvents: 'auto' }}
-      >
-        <div
-          ref={fillRef}
-          className="absolute inset-y-0 left-0 bg-gradient-to-r from-fuchsia-500 to-cyan-400 rounded-full transition-[width] duration-100 ease-linear"
-          style={{ width: '0%' }}
-        />
-        <div
-          ref={thumbRef}
-          className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-white rounded-full shadow shadow-fuchsia-500/50 transition-[left] duration-100 ease-linear pointer-events-none"
-          style={{ left: '0%' }}
-        />
+        {onClose && (
+          <button
+            onClick={onClose}
+            title="Close Overlay"
+            className="w-11 h-11 rounded-full bg-rose-500/25 hover:bg-rose-500/40 border border-rose-500/50 text-rose-300 hover:text-white flex items-center justify-center transition-all cursor-pointer shadow-lg"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        )}
       </div>
 
-      {/* Timeline labels (current / duration) — bottom row under the strip.
-          They visually show M:SS / M:SS. `flex justify-between` keeps them
-          pinned to the same x-extent as the strip above. */}
-      <div className="absolute bottom-0 left-12 right-12 flex justify-between items-center text-[8px] font-mono text-slate-300 pointer-events-none">
-        <span ref={timeRef} className="text-cyan-300 font-bold">{formatTime(state.currentTime)}</span>
-        <span ref={durationRef} className="text-slate-400">{formatTime(state.duration)}</span>
+      {/* Middle Row Overlay: Transparent center with Right-side Vertical Audio Controls */}
+      <div className="w-full flex-1 flex items-center justify-end px-6 pointer-events-none">
+        <div className="pointer-events-auto flex flex-col items-center gap-3 py-4 px-3 rounded-full bg-slate-950/85 backdrop-blur-md border border-slate-800/80 shadow-2xl">
+          <button
+            onClick={onMuteToggle}
+            title={state.muted ? 'Unmute audio' : 'Mute audio'}
+            className={`w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+              state.muted
+                ? 'bg-rose-500/30 text-rose-300 border border-rose-500/50'
+                : 'text-slate-300 hover:text-white hover:bg-slate-800'
+            }`}
+          >
+            {state.muted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-purple-400" />}
+          </button>
+
+          {/* Vertical Volume Slider Track */}
+          <div
+            ref={volumeTrackRef}
+            onPointerDown={beginVolumeScrub}
+            className="h-32 w-4 rounded-full bg-slate-900/95 border border-slate-800 overflow-hidden relative cursor-pointer shadow-inner"
+            title={`Volume: ${Math.round(displayedVolume * 100)}%`}
+          >
+            <div
+              className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-purple-600 via-fuchsia-500 to-pink-400 transition-[height] duration-75 ease-linear rounded-full"
+              style={{ height: `${displayedVolume * 100}%` }}
+            />
+          </div>
+
+          <button
+            onClick={() => onVolumeModeToggle(state.volumeMode === 'global' ? 'local' : 'global')}
+            title={`Audio Mode: ${state.volumeMode === 'global' ? 'Global (broadcast)' : 'Local (headset only)'}`}
+            className="w-9 h-9 rounded-full bg-purple-500/20 hover:bg-purple-500/40 border border-purple-500/40 text-purple-300 hover:text-white flex items-center justify-center transition-all cursor-pointer"
+          >
+            {state.volumeMode === 'global' ? <Globe2 className="w-4 h-4" /> : <User className="w-4 h-4" />}
+          </button>
+        </div>
       </div>
 
-      {/* Vertical volume slider — right edge, full inner height. Custom
-          writing-mode + appearance slider so a standard <input type=range>
-          renders vertically. Easier to maintain than a custom grabber
-          surface, and we already lean on `accent-fuchsia-400` for the
-          other inline players' styling. */}
-      <div
-        className="absolute top-2 right-1.5 bottom-10 w-3 flex items-center justify-center"
-        title={`${state.volumeMode === 'global' ? 'Global' : 'Local'} volume`}
-      >
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={Math.round(displayedVolume * 100)}
-          onChange={(e) => {
-            const next = parseInt(e.target.value, 10) / 100;
-            if (Number.isFinite(next)) onVolumeChange(next);
-          }}
-          disabled={state.duration <= 0}
-          aria-label={`${state.volumeMode === 'global' ? 'Global' : 'Local'} volume`}
-          className="accent-fuchsia-400 cursor-pointer disabled:opacity-30"
-          style={{
-            writingMode: 'vertical-lr' as any,
-            WebkitAppearance: 'slider-vertical' as any,
-            width: '14px',
-            height: '100%',
-            minHeight: '60px',
-          } as React.CSSProperties}
-        />
-      </div>
+      {/* Bottom Bar Overlay: Timeline Row & Playback Controls Row */}
+      <div className="w-full flex flex-col gap-4 p-6 bg-gradient-to-t from-slate-950/95 via-slate-950/80 to-transparent pointer-events-auto">
+        {/* Row 1: Scrub Timeline */}
+        <div className="flex items-center gap-4">
+          <span ref={timeRef} className="text-base font-mono font-medium text-slate-200 min-w-[52px]">
+            {formatTime(state.currentTime)}
+          </span>
 
-      {/* Volume percentage readout — pinched into the top-right so the
-          vertical slider label is readable even when the panel is small. */}
-      <div className="absolute top-1.5 right-7 text-[8px] font-mono font-bold text-fuchsia-300 pointer-events-none">
-        {Math.round(displayedVolume * 100)}%
-      </div>
+          <div
+            ref={timelineRef}
+            onPointerDown={beginScrub}
+            className="flex-1 h-3.5 bg-slate-900/90 rounded-full border border-slate-800 relative cursor-pointer group shadow-inner"
+            title="Click or drag to seek"
+          >
+            <div
+              ref={fillRef}
+              className="absolute inset-y-0 left-0 bg-gradient-to-r from-purple-600 via-fuchsia-500 to-pink-400 rounded-full transition-[width] duration-75 ease-linear"
+              style={{ width: '0%' }}
+            />
+            <div
+              ref={thumbRef}
+              className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-5 h-5 bg-white rounded-full border-2 border-purple-400 shadow-[0_0_12px_rgba(192,132,252,0.8)] opacity-95 group-hover:opacity-100 transition-opacity pointer-events-none"
+              style={{ left: '0%' }}
+            />
+          </div>
 
-      {/* Global / Local toggle — beneath the volume bar at the bottom-right
-          corner per the user's spec. Two stacked mini-buttons; the active
-          mode is highlighted. */}
-      <div className="absolute bottom-1.5 right-1.5 flex flex-col gap-1">
-        <button
-          onClick={() => onVolumeModeToggle('global')}
-          title="Volume changes broadcast to all peers (shared volume)"
-          className={`p-0.5 rounded-sm transition border text-[8px] font-bold flex items-center justify-center ${
-            state.volumeMode === 'global'
-              ? 'bg-cyan-500/30 text-cyan-200 border-cyan-500/50'
-              : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-cyan-300 hover:border-cyan-500/40'
-          }`}
-        >
-          <Globe2 className="w-2.5 h-2.5" />
-        </button>
-        <button
-          onClick={() => onVolumeModeToggle('local')}
-          title="Volume changes only affect your playback (per-user)"
-          className={`p-0.5 rounded-sm transition border text-[8px] font-bold flex items-center justify-center ${
-            state.volumeMode === 'local'
-              ? 'bg-fuchsia-500/30 text-fuchsia-200 border-fuchsia-500/50'
-              : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-fuchsia-300 hover:border-fuchsia-500/40'
-          }`}
-        >
-          <User className="w-2.5 h-2.5" />
-        </button>
+          <span ref={durationRef} className="text-base font-mono font-medium text-slate-300 min-w-[52px] text-right">
+            {formatTime(state.duration)}
+          </span>
+        </div>
+
+        {/* Row 2: Playback Controls Row */}
+        <div className="flex items-center justify-between pt-1">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => (state.playing ? onPause() : onPlay())}
+              disabled={state.duration <= 0}
+              title={state.playing ? 'Pause' : 'Play'}
+              className="w-13 h-13 px-4 py-3 rounded-2xl bg-gradient-to-br from-purple-600 to-purple-700 hover:from-purple-500 hover:to-purple-600 text-white flex items-center justify-center shadow-[0_0_25px_rgba(168,85,247,0.5)] transition-all cursor-pointer disabled:opacity-30"
+            >
+              {state.playing ? <Pause className="w-6 h-6 fill-white" /> : <Play className="w-6 h-6 fill-white ml-0.5" />}
+            </button>
+
+            <button
+              onClick={() => onStep(-5)}
+              disabled={state.duration <= 0}
+              title="Rewind 5 seconds"
+              className="w-11 h-11 rounded-xl bg-slate-900/85 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition-all cursor-pointer disabled:opacity-30"
+            >
+              <SkipBack className="w-5 h-5" />
+            </button>
+
+            <button
+              onClick={() => {
+                onSeek(0);
+                onPause();
+              }}
+              disabled={state.duration <= 0}
+              title="Stop playback"
+              className="w-11 h-11 rounded-xl bg-slate-900/85 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition-all cursor-pointer disabled:opacity-30"
+            >
+              <Square className="w-5 h-5" />
+            </button>
+
+            <button
+              onClick={() => onStep(5)}
+              disabled={state.duration <= 0}
+              title="Fast forward 5 seconds"
+              className="w-11 h-11 rounded-xl bg-slate-900/85 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition-all cursor-pointer disabled:opacity-30"
+            >
+              <SkipForward className="w-5 h-5" />
+            </button>
+
+            <button
+              onClick={() => onSeek(0)}
+              title="Restart video"
+              className="w-11 h-11 rounded-xl bg-slate-900/85 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition-all cursor-pointer"
+            >
+              <Repeat className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Right Controls */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                // Future copy link or open URL modal
+              }}
+              title="Video Source"
+              className="w-11 h-11 rounded-xl bg-slate-900/85 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center transition-all cursor-pointer"
+            >
+              <LinkIcon className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

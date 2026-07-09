@@ -36,6 +36,8 @@ import { BrushManager } from './engine/BrushManager.ts';
 import { WorldToolsPanel } from './components/WorldToolsPanel.tsx';
 import type { ToolType } from './components/WorldToolsPanel.tsx';
 import { SceneInspectorWindow } from './components/SceneInspectorWindow.tsx';
+import { SpatialPopUpWrapper } from './components/SpatialPopUpWrapper.tsx';
+import { VideoObjectControls } from './components/VideoObjectControls.tsx';
 import { RadialContextMenu } from './components/RadialContextMenu.tsx';
 import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
 import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
@@ -211,6 +213,17 @@ export const App: React.FC = () => {
   const [isHost, setIsHost] = useState<boolean>(true);
   const [currentTransformMode, setCurrentTransformMode] = useState<TransformMode>('translate');
   const [selectedAsset, setSelectedAsset] = useState<LoadedAsset | null>(null);
+  const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
+  const videoInactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetVideoInactivityTimer = useCallback(() => {
+    if (videoInactivityTimerRef.current) {
+      clearTimeout(videoInactivityTimerRef.current);
+    }
+    videoInactivityTimerRef.current = setTimeout(() => {
+      setActiveVideoAssetId(null);
+    }, 6000);
+  }, []);
   const [cameraMode, setCameraMode] = useState<'orbit' | 'first-person'>('first-person');
   const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(true);
   const [locomotionMode, setLocomotionMode] = useState<'walk' | 'flight' | 'noclip'>('walk');
@@ -1566,6 +1579,10 @@ const vrHud = new VRHUDManager(
     // Connect selection events
     disposers.push(manipulationManager.registerOnSelectionChange((asset) => {
       setSelectedAsset(asset);
+      if (asset?.type === 'video') {
+        setActiveVideoAssetId(asset.id);
+        resetVideoInactivityTimer();
+      }
     }));
 
     // Preserve the misc-file auto-inspect convenience that USED TO ride
@@ -2240,10 +2257,13 @@ const vrHud = new VRHUDManager(
       }
 
       const rect = sceneEngine.renderer.domElement.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      const isLocked = document.pointerLockElement === sceneEngine.renderer.domElement || cameraModeRef.current === 'first-person';
+      const ndc = isLocked ? new THREE.Vector2(0, 0) : new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      sceneEngine.raycaster.setFromCamera(ndc, sceneEngine.camera);
 
-      sceneEngine.raycaster.setFromCamera(new THREE.Vector2(x, y), sceneEngine.camera);
       const targets: THREE.Object3D[] = [];
       const objToAsset = new Map<THREE.Object3D, LoadedAsset>();
       assetManager.assets.forEach((asset) => {
@@ -2256,11 +2276,11 @@ const vrHud = new VRHUDManager(
         let cur: THREE.Object3D | null = hits[0].object;
         while (cur && !objToAsset.has(cur)) cur = cur.parent;
         if (cur && objToAsset.has(cur)) {
-          // Misc files no longer auto-open an inspection modal on
-          // canvas click; their context-menu entry points (Download /
-          // Save to Inventory) are reachable from the radial menu when
-          // the asset is held. Visual file info is baked into the
-          // misc-file canvas texture in AssetManager.createMiscFileObject.
+          const found = objToAsset.get(cur);
+          if (found && found.type === 'video') {
+            setActiveVideoAssetId(found.id);
+            resetVideoInactivityTimer();
+          }
         }
       }
     };
@@ -2541,6 +2561,10 @@ const vrHud = new VRHUDManager(
       mm.selectAsset(null);
     } else {
       mm.selectAsset(found);
+    }
+    if (found.type === 'video') {
+      setActiveVideoAssetId(found.id);
+      resetVideoInactivityTimer();
     }
   }, []);
 
@@ -4232,6 +4256,73 @@ const vrHud = new VRHUDManager(
           onClose: () => handleVideoClose(selectedAsset.id)
         } : null}
       />
+
+      {/* In-World / In-Object Video Playback Controls */}
+      {(() => {
+        const activeVideoAsset = activeVideoAssetId ? assetManagerRef.current?.assets.get(activeVideoAssetId) : null;
+        const activeVideoState = activeVideoAsset?.type === 'video' ? assetManagerRef.current?.getVideoState(activeVideoAsset.id) : null;
+        if (!activeVideoAsset || !activeVideoState) return null;
+
+        return (
+          <SpatialPopUpWrapper
+            key={`video-inworld-${activeVideoAsset.id}`}
+            isOpen={true}
+            onClose={() => setActiveVideoAssetId(null)}
+            title={activeVideoAsset.name || 'VideoPlayer'}
+            scene={sceneEngineRef.current?.scene}
+            camera={sceneEngineRef.current?.camera}
+            assetManager={assetManagerRef.current || undefined}
+            spatialPanelManager={sceneEngineRef.current?.spatialPanelManager}
+            defaultWidth={1000}
+            defaultHeight={562}
+            parentObject={activeVideoAsset.object3d}
+            anchorOffset={new THREE.Vector3(0, 0, 0.048)}
+            frameless={true}
+            dockToParent={true}
+            panelId={`video-controls-${activeVideoAsset.id}`}
+          >
+            <div
+              onPointerMove={resetVideoInactivityTimer}
+              onPointerDown={resetVideoInactivityTimer}
+              className="w-full h-full"
+            >
+              <VideoObjectControls
+                state={activeVideoState}
+                assetName={activeVideoAsset.name}
+                onPlay={() => {
+                  handleVideoAction(activeVideoAsset.id, 'play');
+                  resetVideoInactivityTimer();
+                }}
+                onPause={() => {
+                  handleVideoAction(activeVideoAsset.id, 'pause');
+                  resetVideoInactivityTimer();
+                }}
+                onSeek={(time) => {
+                  handleVideoAction(activeVideoAsset.id, 'seek', time);
+                  resetVideoInactivityTimer();
+                }}
+                onStep={(delta) => {
+                  handleVideoAction(activeVideoAsset.id, 'step', delta);
+                  resetVideoInactivityTimer();
+                }}
+                onVolumeChange={(vol) => {
+                  handleVideoAction(activeVideoAsset.id, 'volume', vol);
+                  resetVideoInactivityTimer();
+                }}
+                onVolumeModeToggle={(mode) => {
+                  handleVideoAction(activeVideoAsset.id, 'volumeMode', mode);
+                  resetVideoInactivityTimer();
+                }}
+                onMuteToggle={() => {
+                  handleVideoAction(activeVideoAsset.id, 'mute');
+                  resetVideoInactivityTimer();
+                }}
+                onClose={() => setActiveVideoAssetId(null)}
+              />
+            </div>
+          </SpatialPopUpWrapper>
+        );
+      })()}
 
       {/* Text & Voice Chat Sidebar */}
       <ChatPanel

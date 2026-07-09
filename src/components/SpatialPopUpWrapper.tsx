@@ -37,6 +37,9 @@ export interface SpatialPopUpWrapperProps {
    * that mutates every frame.
    */
   parentObject?: THREE.Object3D;
+  anchorOffset?: THREE.Vector3;
+  frameless?: boolean;
+  dockToParent?: boolean;
 }
 
 /**
@@ -72,6 +75,9 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   initialPinned = true,
   panelId,
   parentObject,
+  anchorOffset,
+  frameless = false,
+  dockToParent = false,
 }) => {
   const id = panelId ?? `spatial_${title.replace(/\s+/g, '_').toLowerCase()}`;
   const [isPinned, setIsPinned] = useState<boolean>(initialPinned);
@@ -114,17 +120,22 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
       camera,
       defaultWidth,
       defaultHeight,
-      parentObject,        // optional — see SpatialPanelManager.createPanel
-      undefined            // anchorOffset — use default for now
+      parentObject,
+      anchorOffset,
+      dockToParent
     );
 
-    // Register the frame group as a custom asset so ManipulationManager can
-    // select/grab it via RMB (same as any 3D object)
+    // Only register floating/standalone spatial windows as separate selectable assets.
+    // Docked overlays (like video controls) become part of the parent asset itself.
     const assetIdKey = `spatial_window_${id}`;
-    assetManager?.registerCustomAsset(assetIdKey, title, group, 'primitive');
+    if (!dockToParent) {
+      assetManager?.registerCustomAsset(assetIdKey, title, group, 'primitive');
+    }
 
     return () => {
-      assetManager?.unregisterCustomAsset(assetIdKey);
+      if (!dockToParent) {
+        assetManager?.unregisterCustomAsset(assetIdKey);
+      }
       spatialPanelManager.destroyPanel(id);
     };
     // NB: parentObject is intentionally NOT a dep — re-creating the
@@ -198,7 +209,14 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
 
   // ---- Panel UI (rendered into either CSS3DObject or 2D HUD) ---------------
 
-  const panelUI = (
+  const panelUI = frameless ? (
+    <div
+      className="w-full h-full bg-transparent overflow-hidden select-none pointer-events-none"
+      style={{ width: defaultWidth, height: defaultHeight }}
+    >
+      {children}
+    </div>
+  ) : (
     <div
       className={`flex flex-col rounded-2xl overflow-hidden bg-[#0a0f18] border border-cyan-500/40 shadow-[0_0_30px_rgba(0,240,255,0.2)]`}
       style={{ width: defaultWidth, height: defaultHeight, userSelect: 'none' }}
