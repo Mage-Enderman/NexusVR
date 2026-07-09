@@ -201,7 +201,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   const panelUI = (
     <div
       className={`flex flex-col rounded-2xl overflow-hidden bg-[#0a0f18] border border-cyan-500/40 shadow-[0_0_30px_rgba(0,240,255,0.2)]`}
-      style={{ width: defaultWidth, minHeight: 180, maxHeight: defaultHeight, userSelect: 'none' }}
+      style={{ width: defaultWidth, height: defaultHeight, userSelect: 'none' }}
     >
       {/* Header */}
       <div
@@ -319,7 +319,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
       />
 
       {/* Content */}
-      <div className={`flex-1 overflow-y-auto p-4 text-slate-200 custom-scrollbar`}>
+      <div className={`flex-1 min-h-0 overflow-y-auto p-4 text-slate-200 custom-scrollbar`}>
         {children}
       </div>
     </div>
