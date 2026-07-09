@@ -229,7 +229,7 @@ export const App: React.FC = () => {
   // hooks that mirror the values are placed immediately after the
   // matching useState further down so the const state has already been
   // declared by the time we read it (TS2454 otherwise).
-  const activeToolRef = useRef<ToolType | null>('dev');
+  const activeToolRef = useRef<ToolType | null>(null);
   const cameraModeRef = useRef<'orbit' | 'first-person'>('first-person');
   // Mirror of `locomotionMode` state so the engine-init useEffect's
   // onPanelAction dispatcher (captured with `[]` deps) can read the
@@ -338,7 +338,7 @@ export const App: React.FC = () => {
   // mirror useEffect further below.
   const selectedAssetRef = useRef<LoadedAsset | null>(null);
   const [showToolsPanel, setShowToolsPanel] = useState<boolean>(false);
-  const [activeTool, setActiveTool] = useState<ToolType | null>('dev');
+  const [activeTool, setActiveTool] = useState<ToolType | null>(null);
   const [brushWidth, setBrushWidth] = useState<number>(0.05);
 
   // Stats & Settings state triggers for reactive UI
@@ -541,6 +541,7 @@ export const App: React.FC = () => {
     // time the engine-init useEffect wires it. Null safety
     // guaranteed — the dolly path early-returns without input.
     manipulationManager.setVRInput(sceneEngine.vrInput);
+    sceneEngine.isVRHandGrabbing = (side) => manipulationManager.isVRHandGrabbing(side);
 
     const avatarManager = new AvatarManager(sceneEngine.scene, sceneEngine.camera, sceneEngine.worldRoot);
     avatarManagerRef.current = avatarManager;
@@ -940,6 +941,84 @@ const vrHud = new VRHUDManager(
                   return;
                 }
 
+                // ---- Texture Map Slot Actions ----
+                if (actionId.startsWith('inspect.material.slot:')) {
+                  const slotName = actionId.substring('inspect.material.slot:'.length);
+                  const mm = manipulationManagerRef.current;
+                  const heldImg =
+                    mm?.getHandGrabAsset('right')?.type === 'image'
+                      ? mm.getHandGrabAsset('right')
+                      : mm?.getHandGrabAsset('left')?.type === 'image'
+                        ? mm.getHandGrabAsset('left')
+                        : null;
+                  const applyTextureUrl = (url: string | null) => {
+                    if (!url) {
+                      for (const m of mats) {
+                        (m as any)[slotName] = null;
+                        m.needsUpdate = true;
+                      }
+                      dirty();
+                      return;
+                    }
+                    new THREE.TextureLoader().load(url, (tex) => {
+                      tex.wrapS = THREE.RepeatWrapping;
+                      tex.wrapT = THREE.RepeatWrapping;
+                      if (slotName === 'map' || slotName === 'emissiveMap') {
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                      }
+                      for (const m of mats) {
+                        (m as any)[slotName] = tex;
+                        m.needsUpdate = true;
+                      }
+                      dirty();
+                    });
+                  };
+
+                  if (heldImg && heldImg.url) {
+                    applyTextureUrl(heldImg.url);
+                    return;
+                  }
+                  const am = assetManagerRef.current;
+                  const imgAssets = am
+                    ? Array.from(am.assets.values()).filter(
+                        (a): a is LoadedAsset & { url: string } => a.type === 'image' && typeof a.url === 'string' && a.url.length > 0
+                      )
+                    : [];
+                  if (imgAssets.length > 0) {
+                    const curTex = (mats[0] as any)?.[slotName] as THREE.Texture | null;
+                    const curUrl =
+                      (curTex?.image as any)?.src || (curTex?.source as any)?.data?.src || '';
+                    let nextIdx = 0;
+                    if (curUrl) {
+                      const idx = imgAssets.findIndex((a) => curUrl.includes(a.url) || a.url.includes(curUrl));
+                      nextIdx = (idx + 1) % (imgAssets.length + 1);
+                    }
+                    if (nextIdx === imgAssets.length) {
+                      applyTextureUrl(null);
+                    } else {
+                      applyTextureUrl(imgAssets[nextIdx].url || null);
+                    }
+                  } else {
+                    applyTextureUrl(null);
+                  }
+                  return;
+                }
+
+                if (actionId.startsWith('inspect.material.slotClear:')) {
+                  const slotName = actionId.substring('inspect.material.slotClear:'.length);
+                  for (const m of mats) {
+                    (m as any)[slotName] = null;
+                    m.needsUpdate = true;
+                  }
+                  dirty();
+                  return;
+                }
+
+                if (actionId === 'inspect.openMaterialEditor') {
+                  vrHudRef.current?.openPanel('sys-material');
+                  return;
+                }
+
                 // ---- Slot actions ----
                 if (actionId === 'inspect.destroy:selected') {
                   // handleDeleteSelected already does the right thing
@@ -1317,6 +1396,13 @@ const vrHud = new VRHUDManager(
           // Trigger — handles VR radial menu select (both sides),
           // two-handed scale grab detection, and HUD click (right side).
           if (button === 'trigger') {
+            if (side === 'left' || side === 'right') {
+              if (mm && mm.getHandGrabAsset(side)) {
+                if (mm.handleVRTriggerPress(side)) {
+                  return;
+                }
+              }
+            }
             // PRIORITY 1: VR radial menu select.
             // This MUST happen in onPressed (the XR-frame-synchronous
             // edge callback) rather than in the aim rAF loop.
@@ -2624,6 +2710,64 @@ const vrHud = new VRHUDManager(
         return;
       }
 
+      // Resonite Desktop Tool Bindings (Keys 1..8)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (e.key === '1') {
+          // 1 - Dequip
+          e.preventDefault();
+          setActiveTool(null);
+          return;
+        } else if (e.key === '2') {
+          // 2 - Developer Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'dev' ? null : 'dev'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '3') {
+          // 3 - ProtoFlux Tool (mapped to Brush tool in Nexus)
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'brush' ? null : 'brush'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '4') {
+          // 4 - Material Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'material' ? null : 'material'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '5') {
+          // 5 - Shape Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'shape' ? null : 'shape'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '6') {
+          // 6 - Light Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'light' ? null : 'light'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '7') {
+          // 7 - Grabbable Setter Tool
+          e.preventDefault();
+          if (selectedAsset) {
+            const currentGrabbable = selectedAsset.object3d.userData.grabbable !== false;
+            selectedAsset.object3d.userData.grabbable = !currentGrabbable;
+            console.log(`[Grabbable Setter Tool] "${selectedAsset.name}" grabbable set to ${!currentGrabbable}`);
+          }
+          return;
+        } else if (e.key === '8') {
+          // 8 - Character Collider Setter Tool
+          e.preventDefault();
+          if (selectedAsset) {
+            const currentCollider = !!selectedAsset.object3d.userData.characterCollider;
+            selectedAsset.object3d.userData.characterCollider = !currentCollider;
+            console.log(`[Character Collider Setter Tool] "${selectedAsset.name}" characterCollider set to ${!currentCollider}`);
+          }
+          return;
+        }
+      }
+
       // Dev tool's secondary action (R) — center-of-screen raycast
       // select. Gated on: dev tool active, first-person mode, NOT in
       // VR. Plain R only — Shift+E is rotate-around-Y-axis (managed
@@ -3781,22 +3925,22 @@ const vrHud = new VRHUDManager(
             // the offset Z input (further right) still works. Setting
             // the attribute directly on the SVG element forces every
             // painting descendant into the same pass-through state.
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" className="pointer-events-none">
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
               {/* Outer ring — larger and coloured when over panel */}
-              <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" />
+              <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
               {/* Crosshair lines — gap widens on panel hover to look like a hand cursor */}
-              <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
+              <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
               {/* Centre dot — square on panel hover to echo a pointer/cursor icon */}
               {overPanel
-                ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" />
-                : <circle cx="14" cy="14" r="1" fill={fillDot} />
+                ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
+                : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
               }
               {/* Subtle pulse ring on panel hover */}
               {overPanel && (
-                <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" />
+                <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
               )}
             </svg>
           );

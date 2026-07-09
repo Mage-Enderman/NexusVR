@@ -20,6 +20,84 @@
 
 <!-- Copy the next block into here, then update -->
 
+### 2026-07-08 — Inspector Separate-Linked Object placement & Resonite Desktop Tool Bindings (1..8)
+
+- **Asked by:** user ("The inspector should not be parented to the object it's inspecting they are separate though linked objects" and "Here are some Resonite desktop bindings If you could apply what's relevant to Nexus that'd be great: 1 - Dequip, 2 - Developer Tool, 3 - ProtoFlux Tool, 4 - Material Tool, 5 - Shape Tool, 6 - Light Tool, 7 - Grabbable Setter Tool, 8 - Character Collider Setter Tool")
+- **What I tried to do:**
+  1. Ensure the Scene Inspector spatial pop-up window is **never parented** as a child of the inspected `THREE.Object3D`. When inspecting an object, the window is added directly to `scene.add(group)` as a separate scene object, placed near the linked object facing the camera.
+  2. Implement Resonite desktop hotkeys `1` through `8` for equipping/unequipping tools and toggling object properties.
+- **Root causes & fixes applied:**
+  1. **Separate Though Linked Inspector Window (`SpatialPanelManager.ts`):**
+     - Previously, when `parent` was passed to `createPanel`, `parent.add(group)` added the inspector window inside `parent.children`. This caused the window to scale, rotate, and skew whenever the inspected object was transformed, and polluted its hierarchy tree.
+     - Updated `createPanel` so that `scene.add(group)` is always used. When linked to a `parent`, the window is positioned near `parent` in world space and rotated to face the camera horizontally, while remaining a separate root object in the scene.
+  2. **Resonite Desktop Tool Bindings (`App.tsx`):**
+     - Added desktop number-key listeners (keys `1`..`8` when not typing in input fields):
+       - `1`: Dequip (`setActiveTool(null)`)
+       - `2`: Developer Tool (`setActiveTool('dev')`)
+       - `3`: ProtoFlux Tool (mapped to Nexus Brush tool `setActiveTool('brush')`)
+       - `4`: Material Tool (`setActiveTool('material')`)
+       - `5`: Shape Tool (`setActiveTool('shape')`)
+       - `6`: Light Tool (`setActiveTool('light')`)
+       - `7`: Grabbable Setter Tool (toggles `selectedAsset.object3d.userData.grabbable`)
+       - `8`: Character Collider Setter Tool (toggles `selectedAsset.object3d.userData.characterCollider`)
+- **Goal:** Keep inspected objects and spatial inspector panels separate in the scene hierarchy and provide Resonite desktop number-key tool bindings.
+- **Files touched:** `src/engine/SpatialPanelManager.ts`, `src/App.tsx`.
+- **Outcome:** succeeded. Verified clean production build with `npm run build`.
+
+### 2026-07-08 — Vertical Resonite-style Scene Inspector layout & Dev Tool unequipped by default
+
+- **Asked by:** user ("Where is the option to open the material editor? The components all are ..empty for lack of a better word First screenshot is Nexus, 2nd is cropped and zoomed in on an example Resonite inspector Which is also vertical which I prefer Also the dev tool shouldn't be equipped by default In Resonite it's a 3D tool that the user can grab then equip and unequip")
+- **What I tried to do:**
+  1. Switch the Scene Inspector Window layout from a wide horizontal split to a clean vertical aspect ratio (`defaultWidth=500, defaultHeight=740`), matching Resonite's inspector style.
+  2. Eliminate the cramped horizontal side-by-side tree that caused component cards to look empty or get cut off at the bottom of a short 460px window.
+  3. Ensure the option to open the Material Editor is super prominent and accessible directly from the top header bar of the Scene Inspector window (`Open Material Editor`), as well as inside `MeshRenderer & Materials`.
+  4. Ensure the Dev Tool is NOT equipped by default when launching or resetting the application (`activeTool = null` initially instead of `'dev'`).
+- **Root causes & fixes applied:**
+  1. **Vertical Resonite-style Layout (`SceneInspectorWindow.tsx`):**
+     - Updated default window dimensions to `500x740`.
+     - Replaced the side-by-side hierarchy column with a compact collapsible hierarchy header (`Show Hierarchy Tree` toggle) at the top of the vertical stack.
+     - Increased the vertical component scroll area to `620px` height so `SkinnedMeshRenderer & Armature` and `MeshRenderer & Materials` are fully visible, spacious, and never cut off.
+     - Added a prominent `✨ Open Material Editor` button in the top header bar of the Scene Inspector window so it is visible immediately without scrolling.
+  2. **Unequip Dev Tool by Default (`App.tsx`):**
+     - Changed `activeToolRef` initial value from `'dev'` to `null` and `useState<ToolType | null>('dev')` to `null`.
+- **Goal:** Provide a Resonite-style vertical inspector experience and prevent the Dev Tool from equipping automatically at startup.
+- **Files touched:** `src/App.tsx`, `src/components/SceneInspectorWindow.tsx`.
+- **Outcome:** succeeded. Verified clean build with `npm run build`.
+
+### 2026-07-08 — PBR Texture Map slots & Dedicated Material Inspector Window (VR & Desktop)
+
+- **Asked by:** user ("Right now if a user imports a 3D model that doesn't have a texture embedded there's no way to apply a texture... I want to be able to apply and change textures for Albedo, Normal, Emission, etc general PBR things like roughness/smoothness or metallic... open the material properties in a new window/inspector then grab an image they've imported and apply it to the relevant texture slot")
+- **What I tried to do:**
+  1. Support assigning textures to all 6 core PBR map slots (`map` / Albedo, `normalMap`, `roughnessMap`, `metalnessMap`, `emissiveMap`, `aoMap`) on any selected 3D object.
+  2. In VR, support applying an imported image asset held in hand directly to a material slot by pointing the laser at the slot on the inspector, or cycling imported images when not holding an image.
+  3. Create a dedicated Material & PBR Texture Inspector window/panel accessible from both Desktop and VR (`sys-material` panel in VR HUD, floating modal window in Desktop Scene Inspector).
+- **Root causes & fixes applied:**
+  1. **VR PBR Texture Slots & Dedicated Material Panel (`VRHUDManager.ts` & `App.tsx`):**
+     - Registered `sys-material` (`drawMaterialPanel`) as a built-in 1024×768 VR panel displaying all 6 PBR texture slots (`APPLY HELD / CYCLE IMAGE`, `CLEAR`) and PBR scalar tuning steppers.
+     - Added an `OPEN MATERIAL & TEXTURES EDITOR` button (`inspect.openMaterialEditor`) on the main `sys-inspector` panel.
+     - In `App.tsx`, added handlers for `inspect.material.slot:<slotName>` and `inspect.material.slotClear:<slotName>`. If the user is holding an image asset (`type === 'image'`) in their left or right hand, clicking a slot immediately loads and applies that held image to the target mesh's material (`THREE.TextureLoader`). If they aren't holding an image, clicking cycles through imported image assets in the scene.
+  2. **Desktop PBR Texture Slots & Separate Material Modal (`SceneInspectorWindow.tsx`):**
+     - Added PBR Texture Map Slots directly inside the `MeshRenderer & Materials` card, featuring an imported image selector (`<select>`), direct desktop file upload (`<input type="file" />`), and a clear button (`✕`).
+     - Added an `Open Material Editor` button and a dedicated floating modal overlay (`showMaterialModal`) that opens a separate window with full PBR properties and texture slot editors.
+- **Goal:** Enable users to texture untextured models and edit PBR material maps seamlessly in both VR and Desktop.
+- **Files touched:** `src/App.tsx`, `src/components/SceneInspectorWindow.tsx`, `src/engine/VRHUDManager.ts`.
+- **Outcome:** succeeded. Verified clean build with `npm run build`.
+
+### 2026-07-08 — VR grab enhancements: rotation locking (double-trigger toggle), joystick rotation, and hand-specific locomotion disabling
+
+- **Asked by:** user ("When in VR, an object should not be rotated by the controller rotation when grabbed unless the user pulls the trigger twice. Then it should be rotated how it currently is. While an object is grabbed via the laser, it should be rotated left and right via moving the joystick left or right. While an object is grabbed with the laser, it should disable the locomotion of the relative hand.")
+- **What I tried to do:**
+  1. Lock controller/wrist rotation by default when grabbing an object so it maintains its world orientation while still tracking controller position and laser dolly; double-pulling the trigger (< 400ms) toggles wrist rotation on/off.
+  2. Enable rotating a grabbed object left and right around the world Up axis using horizontal thumbstick deflection (`stick.x`).
+  3. Disable hand-relative locomotion while grabbing an object: holding an object with the left hand disables left-stick locomotion (forward/backward/left/right movement), holding an object with the right hand disables right-stick smooth turning.
+- **Root causes & fixes applied:**
+  1. **Controller rotation locking & double-trigger toggle (`ManipulationManager.ts` & `App.tsx`):** Added `lockControllerRotation: boolean` (default `true`) and `lockedWorldQuaternion` to each hand's `VRHandGrabState`. When `lockControllerRotation` is active, every frame sets the asset's local quaternion relative to its grip parent such that its world orientation remains `lockedWorldQuaternion`. Double-pulling the trigger (`handleVRTriggerPress`) toggles `lockControllerRotation` on/off.
+  2. **Joystick horizontal rotation (`ManipulationManager.ts`):** Added horizontal thumbstick check (`stick.x`) inside `updateHandGrab`. Deflecting horizontal stick rotates the grabbed object around world Up (`(0, 1, 0)`) at `VR_HOLD_ROTATE_SPEED = 2.5 rad/s` and updates `lockedWorldQuaternion` so the rotation persists.
+  3. **Hand-relative locomotion isolation (`SceneEngine.ts`):** Added checks to `updateVRLocomotion` (`if (this.isVRHandGrabbing('left')) return;`) and `updateVRSmoothTurn` (`if (this.isVRHandGrabbing('right')) return;`). Grabbing with the left hand disables movement; grabbing with the right hand disables turning.
+- **Goal:** Provide stable, precise object manipulation in VR without unwanted wrist rotation or accidental avatar locomotion.
+- **Files touched:** `src/engine/ManipulationManager.ts`, `src/engine/SceneEngine.ts`, `src/App.tsx`.
+- **Outcome:** succeeded. Verified clean build with `npm run build`.
+
 ### 2026-07-08 — VR two-handed scaling grab: grab one object with both hands to scale and translate
 
 - **Asked by:** user ("In VR the user should be able to grab one object with both hands to scale it. While grabbed with both hands if the use moves their hands further apart/outward from eachother the object should get bigger. And inversely it should get smaller if they move their hands closer together")

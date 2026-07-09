@@ -115,6 +115,7 @@ export class SpatialPanelManager {
     cssEl.style.left = '0';
     cssEl.style.width = '100%';
     cssEl.style.height = '100%';
+    cssEl.style.zIndex = '10'; // Ensure CSS3D panels sit above WebGL canvas
     cssEl.style.pointerEvents = 'none'; // let pointer events fall through to WebGL canvas by default
     container.style.position = 'relative'; // ensure stacking context
     container.appendChild(cssEl);
@@ -226,27 +227,33 @@ export class SpatialPanelManager {
     group.userData.spatialPanelParent = parent ?? null;
 
     // ---- Initial placement --------------------------------------------------
+    scene.add(group);
     if (parent) {
-      // Nested case — apply local-space anchorOffset relative to parent.
-      // Default offset places the panel just below the parent's local
-      // origin in Y, slightly forward in Z, so a video control HUD
-      // appears tucked under a video mesh by default. Callers can
-      // override via `anchorOffset`.
-      const offset =
-        anchorOffset ??
-        new THREE.Vector3(0, -(cssHeight * cssScale) / 2 - 0.05, 0.06);
-      parent.add(group);
-      group.position.copy(offset);
-      // Match the parent's world rotation so the panel faces the same
-      // direction the parent does. For non-rotation-sensitive parents
-      // (e.g. a video mesh whose CSS3DObject plane faces -Z) the
-      // caller can override by writing group.rotation directly after
-      // createPanel returns.
-      group.quaternion.copy(parent.quaternion);
+      // Separate though linked object: placed near the inspected object in world space,
+      // never parented to it so transformations/scaling don't affect the inspector.
+      const parentPos = new THREE.Vector3();
+      parent.getWorldPosition(parentPos);
+      const camPos = new THREE.Vector3();
+      camera.getWorldPosition(camPos);
+
+      const dirToCam = new THREE.Vector3().subVectors(camPos, parentPos);
+      dirToCam.y = 0;
+      if (dirToCam.lengthSq() > 0.0001) dirToCam.normalize();
+      else dirToCam.set(0, 0, 1);
+
+      group.position.copy(parentPos).addScaledVector(dirToCam, 0.95);
+      group.position.y = Math.max(1.0, parentPos.y);
+
+      // Orient to face camera horizontally
+      const yaw = Math.atan2(dirToCam.x, dirToCam.z);
+      group.rotation.set(0, yaw, 0);
     } else {
       // Floating case — use camera-relative placement as before.
       this._placeInFrontOfCamera(group, camera);
-      scene.add(group);
+    }
+
+    if (anchorOffset) {
+      group.position.add(anchorOffset);
     }
 
     const entry: SpatialPanelEntry = {

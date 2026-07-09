@@ -27,6 +27,8 @@ interface VRHandGrabState {
   originalParent: THREE.Object3D;
   targetRaySpace: THREE.Object3D | null;
   holdLocalOffset: THREE.Vector3;
+  lockControllerRotation: boolean;
+  lockedWorldQuaternion: THREE.Quaternion;
 }
 
 export class ManipulationManager {
@@ -187,6 +189,7 @@ export class ManipulationManager {
   private readonly _broadcastQuat: THREE.Quaternion = new THREE.Quaternion();
   private readonly _broadcastScale: THREE.Vector3 = new THREE.Vector3();
   private readonly _broadcastEuler: THREE.Euler = new THREE.Euler();
+  private readonly _vrUpVec: THREE.Vector3 = new THREE.Vector3(0, 1, 0);
   // Which hand is holding the asset — used to index the correct
   // `vrInput.{left,right}.stick` so the dolly comes from the HOLDING
   // controller, not whichever stick the user happens to deflect.
@@ -208,6 +211,7 @@ export class ManipulationManager {
   // reaches MAX_DIST in ~3 seconds, which feels responsive without
   // being twitchy. Partial deflection scales linearly.
   private static readonly VR_HOLD_DOLLY_SPEED = 1.5;
+  private static readonly VR_HOLD_ROTATE_SPEED = 2.5;
   // Closest the asset can be dollied to the controller grip origin.
   // Prevents the asset from clipping into the controller model and
   // into the user's hand. 0.2m is the natural "hold it up to inspect"
@@ -238,6 +242,11 @@ export class ManipulationManager {
   // single-handed grab first so we don't have conflicting grab
   // ownership on the same object.
   public get isTwoHandedGrabbing(): boolean { return this._twoHandedAsset !== null; }
+  private _lastTriggerPressTime: { left: number; right: number } = { left: 0, right: 0 };
+  public isVRHandGrabbing(side: 'left' | 'right'): boolean {
+    if (this.isTwoHandedGrabbing) return true;
+    return !!this._vrHandGrabs[side];
+  }
   public getHandGrabAsset(side: 'left' | 'right'): LoadedAsset | null {
     return this._vrHandGrabs[side]?.asset ?? null;
   }
@@ -463,11 +472,16 @@ export class ManipulationManager {
       return;
     }
 
+    const lockedWorldQuaternion = new THREE.Quaternion();
+    asset.object3d.getWorldQuaternion(lockedWorldQuaternion);
+
     this._vrHandGrabs[side] = {
       asset,
       originalParent: asset.object3d.parent ?? this.scene,
       targetRaySpace: targetRaySpace ?? null,
       holdLocalOffset: asset.object3d.position.clone(),
+      lockControllerRotation: true,
+      lockedWorldQuaternion,
     };
 
     gripSpace.attach(asset.object3d);
@@ -522,6 +536,22 @@ export class ManipulationManager {
     if (this._vrHandGrabs.left) this.vrReleaseControllerGrab('left');
     if (this._vrHandGrabs.right) this.vrReleaseControllerGrab('right');
     if (this._isVRGrabbing) this.endGrab();
+  }
+
+  public handleVRTriggerPress(side: 'left' | 'right'): boolean {
+    const grab = this._vrHandGrabs[side];
+    if (!grab) return false;
+    const now = performance.now();
+    const elapsed = now - this._lastTriggerPressTime[side];
+    this._lastTriggerPressTime[side] = now;
+    if (elapsed < 400) {
+      grab.lockControllerRotation = !grab.lockControllerRotation;
+      if (grab.lockControllerRotation) {
+        grab.asset.object3d.getWorldQuaternion(grab.lockedWorldQuaternion);
+      }
+      return true;
+    }
+    return false;
   }
 
   public endGrab(): void {
@@ -951,6 +981,20 @@ export class ManipulationManager {
               );
               grab.asset.object3d.position.copy(grab.holdLocalOffset);
             }
+            const stickX = this._vrInput[side].stick.x;
+            if (Math.abs(stickX) > 1e-3) {
+              const rotAngle = -stickX * ManipulationManager.VR_HOLD_ROTATE_SPEED * delta;
+              grab.asset.object3d.rotateOnWorldAxis(this._vrUpVec, rotAngle);
+              grab.asset.object3d.getWorldQuaternion(grab.lockedWorldQuaternion);
+            }
+          }
+        }
+        if (grab.lockControllerRotation) {
+          const parent = grab.asset.object3d.parent;
+          if (parent) {
+            parent.getWorldQuaternion(this._broadcastQuat);
+            this._broadcastQuat.invert().multiply(grab.lockedWorldQuaternion);
+            grab.asset.object3d.quaternion.copy(this._broadcastQuat);
           }
         }
         this.broadcastCurrentTransform(grab.asset);

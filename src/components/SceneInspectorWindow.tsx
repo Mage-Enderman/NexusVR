@@ -168,6 +168,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const toggleSection = (key: string) => {
     setCollapsedSections(prev => ({ ...prev, [key]: !prev[key] }));
   };
+  const [showMaterialModal, setShowMaterialModal] = useState(false);
+  const [openSlotDropdown, setOpenSlotDropdown] = useState<string | null>(null);
+  const [showHierarchy, setShowHierarchy] = useState(false);
+  const [selectedMaterialIndex, setSelectedMaterialIndex] = useState<number>(0);
 
   // Refs for live pos/rot/scale display. The values are updated by a rAF
   // loop (further below) that imperatively writes `el.value` from
@@ -324,6 +328,26 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAsset?.id]);
 
+  useEffect(() => {
+    const allMats = getTargetMaterials();
+    const activeMat = selectedMaterialIndex >= 0 && allMats[selectedMaterialIndex]
+      ? allMats[selectedMaterialIndex]
+      : allMats[0];
+    if (activeMat) {
+      setMatProps((prev) => ({
+        ...prev,
+        color: activeMat.color?.getHexString ? '#' + activeMat.color.getHexString() : prev.color,
+        roughness: activeMat.roughness ?? prev.roughness,
+        metalness: activeMat.metalness ?? prev.metalness,
+        opacity: activeMat.opacity ?? prev.opacity,
+        wireframe: activeMat.wireframe ?? prev.wireframe,
+        flatShading: activeMat.flatShading ?? prev.flatShading,
+        emissive: activeMat.emissive?.getHexString ? '#' + activeMat.emissive.getHexString() : prev.emissive,
+        emissiveIntensity: activeMat.emissiveIntensity ?? prev.emissiveIntensity,
+      }));
+    }
+  }, [selectedMaterialIndex, selectedAsset?.id, selectedNodeUUID]);
+
   // Live transform display: imperatively writes input.value every animation
   // frame from `selectedAsset.object3d` (the source of truth during drags).
   // Skips inputs that currently have focus so user typing into a field
@@ -427,36 +451,92 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     applyTransform(pos, rot, next);
   };
 
+  const getTargetMaterials = (): THREE.MeshStandardMaterial[] => {
+    if (!selectedAsset) return [];
+    const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
+    const mats: THREE.MeshStandardMaterial[] = [];
+    const seen = new Set<string>();
+    target.traverse((c) => {
+      const m = (c as THREE.Mesh).material;
+      if (m) {
+        const list = Array.isArray(m) ? m : [m];
+        list.forEach((mat) => {
+          const stdMat = mat as THREE.MeshStandardMaterial;
+          if (stdMat && !seen.has(stdMat.uuid)) {
+            seen.add(stdMat.uuid);
+            mats.push(stdMat);
+          }
+        });
+      }
+    });
+    return mats;
+  };
+
   const handleUpdateMaterial = (key: string, val: any) => {
     if (!interactive) return;
     const next = { ...matProps, [key]: val };
     setMatProps(next);
     if (!selectedAsset) return;
 
-    selectedAsset.object3d.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
-        const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
-        if (key === 'color') m.color.set(val);
-        if (key === 'roughness') m.roughness = val;
-        if (key === 'metalness') m.metalness = val;
-        if (key === 'emissive') {
-          m.emissive.set(val);
-          m.emissiveIntensity = next.emissiveIntensity || 1.0;
-        }
-        if (key === 'emissiveIntensity') m.emissiveIntensity = val;
-        if (key === 'opacity') {
-          m.opacity = val;
-          m.transparent = val < 1.0;
-        }
-        if (key === 'wireframe') m.wireframe = val;
-        if (key === 'flatShading') {
-          m.flatShading = val;
-          m.needsUpdate = true;
-        }
+    const allMats = getTargetMaterials();
+    const targetMats = selectedMaterialIndex >= 0 && allMats[selectedMaterialIndex]
+      ? [allMats[selectedMaterialIndex]]
+      : allMats;
+
+    targetMats.forEach((m) => {
+      if (key === 'color') m.color.set(val);
+      if (key === 'roughness') m.roughness = val;
+      if (key === 'metalness') m.metalness = val;
+      if (key === 'emissive') {
+        m.emissive.set(val);
+        m.emissiveIntensity = next.emissiveIntensity || 1.0;
+      }
+      if (key === 'emissiveIntensity') m.emissiveIntensity = val;
+      if (key === 'opacity') {
+        m.opacity = val;
+        m.transparent = val < 1.0;
+      }
+      if (key === 'wireframe') m.wireframe = val;
+      if (key === 'flatShading') {
+        m.flatShading = val;
+        m.needsUpdate = true;
       }
     });
     onUpdateAsset({ ...selectedAsset });
   };
+
+  const imageAssets = assetManager ? Array.from(assetManager.assets.values()).filter((a) => a.type === 'image') : [];
+
+  const handleApplyTextureSlot = (slotName: string, url: string | null) => {
+    if (!selectedAsset) return;
+    const allMats = getTargetMaterials();
+    const targetMats = selectedMaterialIndex >= 0 && allMats[selectedMaterialIndex]
+      ? [allMats[selectedMaterialIndex]]
+      : allMats;
+
+    if (!url) {
+      targetMats.forEach((m) => {
+        (m as any)[slotName] = null;
+        m.needsUpdate = true;
+      });
+      onUpdateAsset({ ...selectedAsset });
+      return;
+    }
+    new THREE.TextureLoader().load(url, (tex) => {
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      if (slotName === 'map' || slotName === 'emissiveMap') {
+        tex.colorSpace = THREE.SRGBColorSpace;
+      }
+      targetMats.forEach((m) => {
+        (m as any)[slotName] = tex;
+        m.needsUpdate = true;
+      });
+      onUpdateAsset({ ...selectedAsset });
+    });
+  };
+
+  const targetMaterials = getTargetMaterials();
 
   const handleAttachComponent = (compType: string) => {
     if (!interactive) return;
@@ -564,8 +644,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       assetManager={assetManager}
       spatialPanelManager={spatialPanelManager}
       panelId="inspector"
-      defaultWidth={880}
-      defaultHeight={560}
+      defaultWidth={500}
+      defaultHeight={740}
       initialPinned={true}
       parentObject={dockTarget ?? undefined}
     >
@@ -585,143 +665,151 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           </div>
         </div>
       )}
-      <div className="flex gap-2.5 font-sans text-xs select-none" style={{ height: '460px' }}>
-
-        {/* LEFT PANE: Hierarchy Tree */}
-        <div className={`w-56 bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 overflow-y-auto ${
+      <div className="flex flex-col gap-2.5 font-sans text-xs select-none" style={{ height: '620px' }}>
+        {/* COMPACT HIERARCHY / PATH BAR (Collapsible Top Section) */}
+        <div className={`bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 ${
           !interactive ? 'pointer-events-none opacity-80' : ''
         }`}>
-          <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-            <span className="font-bold text-cyan-300 uppercase font-mono tracking-wider text-[11px] truncate">
-              {inspectorRootUUID
-                ? <>View: <span className="text-amber-300 normal-case">{findObjectByUUID(selectedAsset?.object3d ?? new THREE.Object3D(), inspectorRootUUID)?.name || '...'}</span></>
-                : <>Root: {assetName}</>}
-            </span>
-            <div className="flex gap-1 shrink-0">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                onClick={() => setShowHierarchy(!showHierarchy)}
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold text-[11px] flex items-center gap-1.5 transition shrink-0"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>{showHierarchy ? 'Hide Hierarchy Tree' : 'Show Hierarchy Tree'}</span>
+              </button>
+              <span className="font-bold text-slate-300 font-mono text-[11px] truncate">
+                {inspectorRootUUID
+                  ? <>View: <span className="text-amber-300 normal-case">{findObjectByUUID(selectedAsset?.object3d ?? new THREE.Object3D(), inspectorRootUUID)?.name || '...'}</span></>
+                  : <>Root: <span className="text-amber-300 normal-case">{assetName}</span></>}
+              </span>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              <button
+                onClick={() => setShowMaterialModal(true)}
+                className="px-2.5 py-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg text-[11px] font-bold shadow transition flex items-center gap-1.5"
+                title="Open floating Material & Textures Editor window"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Open Material Editor
+              </button>
               {inspectorRootUUID && (
                 <button
                   onClick={handleResetInspectorRoot}
                   title="Back to top of hierarchy (Top)"
-                  className="p-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition"
+                  className="p-1.5 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition"
                 >
-                  <ArrowUpRight className="w-3 h-3" />
+                  <ArrowUpRight className="w-3.5 h-3.5" />
                 </button>
               )}
               <button
                 onClick={handleSetInspectorRoot}
                 disabled={!selectedNodeUUID}
                 title="Set selected as visible hierarchy root (Set Root)"
-                className="p-1 rounded bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 disabled:opacity-30 disabled:hover:bg-slate-800 disabled:hover:text-slate-300 transition"
+                className="p-1.5 rounded bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 disabled:opacity-30 disabled:hover:bg-slate-800 transition"
               >
-                <Layers className="w-3 h-3" />
+                <Layers className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
-          <div className="flex flex-col gap-1 mt-1">
-            <div
-              onClick={() => setSelectedNodeId('root')}
-              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer font-bold transition ${
-                selectedNodeId === 'root' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'text-slate-300 hover:bg-slate-900'
-              }`}
-            >
-              <Box className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span className="truncate">&bull; {assetName}</span>
-            </div>
-
-            {/* Real Object3D hierarchy. Replaces the prototype's hardcoded
-                "BoxMesh Geometry / MeshRenderer" rows with an actual
-                recursive walk of selectedAsset.object3d, so multi-level
-                GLTF / FBX trees, gizmo-added groups, and Inspector-added
-                Parent/Child containers all show. expand/collapse per
-                branch; selected row is highlighted; persistent=false
-                nodes get the orange dot per SceneInspector.txt. */}
-            {(() => {
-              if (!selectedAsset) return null;
-              const visibleRoot = inspectorRootUUID
-                ? (findObjectByUUID(selectedAsset.object3d, inspectorRootUUID) ?? selectedAsset.object3d)
-                : selectedAsset.object3d;
-              if (!visibleRoot) return null;
-              const renderNode = (node: THREE.Object3D, depth: number): React.ReactNode => {
-                const expanded = expandedNodes.has(node.uuid);
-                const highlight = selectedNodeUUID === node.uuid;
-                const isNonPersistent = node.userData?.isPersistent === false;
-                return (
-                  <div key={node.uuid}>
-                    <div
-                      onClick={() => setSelectedNodeUUID(node.uuid)}
-                      style={{ paddingLeft: `${depth * 12 + 4}px` }}
-                      className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
-                        highlight
-                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
-                          : 'text-slate-300 hover:bg-slate-900 border border-transparent'
-                      }`}
-                    >
-                      {node.children.length > 0 ? (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setExpandedNodes(prev => {
-                              const next = new Set(prev);
-                              if (next.has(node.uuid)) next.delete(node.uuid);
-                              else next.add(node.uuid);
-                              return next;
-                            });
-                          }}
-                          className="p-0.5 rounded hover:bg-slate-800 text-slate-400 transition shrink-0"
-                          title={expanded ? 'Collapse children' : 'Expand children'}
-                        >
-                          {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                        </button>
-                      ) : (
-                        <span
-                          className="inline-block w-3 h-3 shrink-0 rounded-full border border-slate-700"
-                          title="No children"
-                        />
-                      )}
-                      <Box className="w-3 h-3 text-amber-400 shrink-0" />
-                      <span className="truncate flex-1">{node.name || node.type || 'Unnamed'}</span>
-                      {isNonPersistent && (
-                        <span
-                          className="text-orange-400 text-[10px] font-black ml-0.5"
-                          title="Non-persistent (won't save with the world)"
-                        >
-                          ●
-                        </span>
-                      )}
-                    </div>
-                    {expanded && node.children.map(c => (
-                      <div key={c.uuid + '_branch'} className="border-l border-slate-800 ml-3.5">
-                        {renderNode(c, depth + 1)}
-                      </div>
-                    ))}
-                  </div>
-                );
-              };
-              return <div className="flex flex-col gap-0.5 mt-1">{renderNode(visibleRoot, 0)}</div>;
-            })()}
-
-            {/* Abstract attached-component list (separate from the
-                Object3D tree, since these aren't real Three nodes — they
-                are inspector state). Visual highlighting is preserved. */}
-            {attachedComponents.length > 0 && (
-              <div className="mt-2 pt-1.5 border-t border-slate-800">
-                <div className="text-[9px] uppercase tracking-wider text-purple-400 font-bold px-1.5 mb-1">Attached Components</div>
-                {attachedComponents.map((comp) => (
-                  <div
-                    key={comp}
-                    className="flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer bg-purple-500/10 text-purple-300 border border-purple-500/30 font-semibold"
-                  >
-                    <Activity className="w-3 h-3 text-purple-400 shrink-0" />
-                    <span className="truncate min-w-0">{comp}</span>
-                  </div>
-                ))}
+          {showHierarchy && (
+            <div className="flex flex-col gap-1 mt-1 max-h-48 overflow-y-auto border-t border-slate-800 pt-2 custom-scrollbar">
+              <div
+                onClick={() => setSelectedNodeId('root')}
+                className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer font-bold transition ${
+                  selectedNodeId === 'root' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'text-slate-300 hover:bg-slate-900'
+                }`}
+              >
+                <Box className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="truncate">&bull; {assetName}</span>
               </div>
-            )}
-          </div>
+
+              {(() => {
+                if (!selectedAsset) return null;
+                const visibleRoot = inspectorRootUUID
+                  ? (findObjectByUUID(selectedAsset.object3d, inspectorRootUUID) ?? selectedAsset.object3d)
+                  : selectedAsset.object3d;
+                if (!visibleRoot) return null;
+                const renderNode = (node: THREE.Object3D, depth: number): React.ReactNode => {
+                  const expanded = expandedNodes.has(node.uuid);
+                  const highlight = selectedNodeUUID === node.uuid;
+                  const isNonPersistent = node.userData?.isPersistent === false;
+                  return (
+                    <div key={node.uuid}>
+                      <div
+                        onClick={() => setSelectedNodeUUID(node.uuid)}
+                        style={{ paddingLeft: `${depth * 12 + 4}px` }}
+                        className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
+                          highlight
+                            ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
+                            : 'text-slate-300 hover:bg-slate-900 border border-transparent'
+                        }`}
+                      >
+                        {node.children.length > 0 ? (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedNodes(prev => {
+                                const next = new Set(prev);
+                                if (next.has(node.uuid)) next.delete(node.uuid);
+                                else next.add(node.uuid);
+                                return next;
+                              });
+                            }}
+                            className="p-0.5 rounded hover:bg-slate-800 text-slate-400 transition shrink-0"
+                            title={expanded ? 'Collapse children' : 'Expand children'}
+                          >
+                            {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                          </button>
+                        ) : (
+                          <span
+                            className="inline-block w-3 h-3 shrink-0 rounded-full border border-slate-700"
+                            title="No children"
+                          />
+                        )}
+                        <Box className="w-3 h-3 text-amber-400 shrink-0" />
+                        <span className="truncate flex-1">{node.name || node.type || 'Unnamed'}</span>
+                        {isNonPersistent && (
+                          <span
+                            className="text-orange-400 text-[10px] font-black ml-0.5"
+                            title="Non-persistent (won't save with the world)"
+                          >
+                            ●
+                          </span>
+                        )}
+                      </div>
+                      {expanded && node.children.map(c => (
+                        <div key={c.uuid + '_branch'} className="border-l border-slate-800 ml-3.5">
+                          {renderNode(c, depth + 1)}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                };
+                return <div className="flex flex-col gap-0.5 mt-1">{renderNode(visibleRoot, 0)}</div>;
+              })()}
+
+              {attachedComponents.length > 0 && (
+                <div className="mt-2 pt-1.5 border-t border-slate-800">
+                  <div className="text-[9px] uppercase tracking-wider text-purple-400 font-bold px-1.5 mb-1">Attached Components</div>
+                  {attachedComponents.map((comp) => (
+                    <div
+                      key={comp}
+                      className="flex items-center gap-2 px-2 py-1 rounded-md cursor-pointer bg-purple-500/10 text-purple-300 border border-purple-500/30 font-semibold"
+                    >
+                      <Activity className="w-3 h-3 text-purple-400 shrink-0" />
+                      <span className="truncate min-w-0">{comp}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* RIGHT PANE: Slot Inspector & Components */}
+        {/* VERTICAL SCROLLABLE SLOT & COMPONENTS STACK */}
         <div className={`flex-1 bg-slate-950/60 border border-slate-800 rounded-xl p-3 overflow-y-auto flex flex-col gap-3 custom-scrollbar ${
           !interactive ? 'pointer-events-none opacity-85' : ''
         }`}>
@@ -1032,6 +1120,38 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>
 
             {!collapsedSections['material'] && <div className="p-3 flex flex-col gap-3">
+              {targetMaterials.length > 1 && (
+                <div className="flex flex-col gap-1.5 bg-slate-950 p-2 rounded-lg border border-emerald-500/40">
+                  <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
+                    Target Material ({targetMaterials.length} found on mesh):
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {targetMaterials.map((m, idx) => (
+                      <button
+                        key={m.uuid}
+                        onClick={() => setSelectedMaterialIndex(idx)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition border ${
+                          selectedMaterialIndex === idx
+                            ? 'bg-emerald-600 text-white border-emerald-400 shadow'
+                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                        }`}
+                      >
+                        #{idx + 1}: {m.name || `Mat ${idx + 1}`}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setSelectedMaterialIndex(-1)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition border ${
+                        selectedMaterialIndex === -1
+                          ? 'bg-cyan-600 text-white border-cyan-400'
+                          : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                      }`}
+                    >
+                      All Materials
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
                   <span className="text-slate-400 font-semibold">Base Color:</span>
@@ -1111,6 +1231,102 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                   />
                   <span className="font-mono text-cyan-300 font-bold text-[10px] w-8">{matProps.emissiveIntensity}x</span>
                 </div>
+              </div>
+
+              <div className="flex items-center justify-between bg-slate-950/80 px-3 py-2 rounded-lg border border-slate-800">
+                <span className="text-slate-300 font-bold text-xs">PBR Material Properties & Textures</span>
+                <button
+                  onClick={() => setShowMaterialModal(true)}
+                  className="px-2.5 py-1 bg-emerald-600/40 hover:bg-emerald-600/60 text-emerald-300 rounded border border-emerald-500/50 text-[11px] font-bold transition flex items-center gap-1.5"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  Open Material Editor
+                </button>
+              </div>
+
+              {/* Texture Map Slots */}
+              <div className="flex flex-col gap-2 pt-1">
+                {[
+                  { key: 'map', label: 'Albedo (Base Color)' },
+                  { key: 'normalMap', label: 'Normal Map' },
+                  { key: 'roughnessMap', label: 'Roughness Map' },
+                  { key: 'metalnessMap', label: 'Metalness Map' },
+                  { key: 'emissiveMap', label: 'Emission Map' },
+                  { key: 'aoMap', label: 'AO (Ambient Occlusion)' }
+                ].map((slot) => {
+                  return (
+                    <div key={slot.key} className="flex flex-col gap-1.5 bg-slate-950/90 px-2.5 py-1.5 rounded-lg border border-slate-800/80">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-slate-300 w-36 truncate">{slot.label}</span>
+                        <div className="flex items-center gap-1.5 flex-1 justify-end">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenSlotDropdown(openSlotDropdown === `main_${slot.key}` ? null : `main_${slot.key}`);
+                            }}
+                            className="bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-cyan-500/50 text-slate-300 text-[10px] rounded px-2 py-0.5 flex items-center gap-1 transition max-w-[130px]"
+                          >
+                            <span className="truncate">Choose Image ({imageAssets.length})</span>
+                            <span className="text-[9px] text-cyan-400">▼</span>
+                          </button>
+                          <label className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 rounded text-[10px] font-bold cursor-pointer transition">
+                            Upload
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) handleApplyTextureSlot(slot.key, URL.createObjectURL(f));
+                              }}
+                            />
+                          </label>
+                          <button
+                            onClick={() => handleApplyTextureSlot(slot.key, null)}
+                            className="px-1.5 py-0.5 bg-red-900/40 hover:bg-red-800/60 text-red-300 border border-red-700/50 rounded text-[10px] font-bold transition"
+                            title="Clear texture slot"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                      {openSlotDropdown === `main_${slot.key}` && (
+                        <div className="p-2 bg-slate-900 border border-cyan-500/40 rounded-lg shadow-lg flex flex-col gap-1 max-h-36 overflow-y-auto">
+                          <div className="text-[10px] font-bold text-slate-400 pb-1 border-b border-slate-800 flex items-center justify-between">
+                            <span>Select Imported Image Asset</span>
+                            <button
+                              onClick={() => setOpenSlotDropdown(null)}
+                              className="text-slate-400 hover:text-rose-400 font-bold"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          {imageAssets.length === 0 ? (
+                            <div className="py-1.5 text-[10px] text-slate-400 italic">
+                              No imported images found. Click &quot;Upload&quot; to import an image!
+                            </div>
+                          ) : (
+                            imageAssets.map((img) => (
+                              <button
+                                key={img.id}
+                                onClick={() => {
+                                  handleApplyTextureSlot(slot.key, img.url || null);
+                                  setOpenSlotDropdown(null);
+                                }}
+                                className="flex items-center justify-between px-2 py-1 rounded bg-slate-950/60 hover:bg-cyan-500/20 text-left transition border border-transparent hover:border-cyan-500/30"
+                              >
+                                <span className="text-[10px] font-semibold text-slate-200 truncate max-w-[180px]">
+                                  {img.name}
+                                </span>
+                                <span className="text-[9px] font-mono text-cyan-400">Apply</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>}
           </div>
@@ -1347,6 +1563,199 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Separate Floating Material Properties & PBR Texture Inspector Window */}
+      {showMaterialModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-auto">
+          <div className="w-[520px] max-h-[85vh] bg-slate-900 border border-emerald-500/60 rounded-2xl shadow-[0_0_50px_rgba(16,185,129,0.3)] flex flex-col overflow-hidden">
+            <div className="px-4 py-3 bg-gradient-to-r from-emerald-950 via-slate-900 to-slate-900 border-b border-emerald-500/40 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-emerald-400" />
+                <h3 className="text-sm font-bold text-emerald-300">
+                  Material & PBR Texture Inspector — {selectedAsset?.name || 'Selected Asset'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowMaterialModal(false)}
+                className="p-1 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-4 overflow-y-auto flex flex-col gap-4">
+              {targetMaterials.length > 1 && (
+                <div className="flex flex-col gap-2 bg-slate-950 p-2.5 rounded-xl border border-emerald-500/50">
+                  <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
+                    Target Material ({targetMaterials.length} found on mesh):
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {targetMaterials.map((m, idx) => (
+                      <button
+                        key={m.uuid}
+                        onClick={() => setSelectedMaterialIndex(idx)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition border ${
+                          selectedMaterialIndex === idx
+                            ? 'bg-emerald-600 text-white border-emerald-400 shadow'
+                            : 'bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800'
+                        }`}
+                      >
+                        #{idx + 1}: {m.name || `Mat ${idx + 1}`}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setSelectedMaterialIndex(-1)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold transition border ${
+                        selectedMaterialIndex === -1
+                          ? 'bg-cyan-600 text-white border-cyan-400'
+                          : 'bg-slate-900 text-slate-400 border-slate-700 hover:bg-slate-800'
+                      }`}
+                    >
+                      All Materials
+                    </button>
+                  </div>
+                </div>
+              )}
+              {/* Scalar PBR Properties */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-xl border border-slate-800">
+                  <span className="text-xs text-slate-400 font-semibold">Base Color:</span>
+                  <input
+                    type="color"
+                    value={matProps.color}
+                    onChange={(e) => handleUpdateMaterial('color', e.target.value)}
+                    className="w-8 h-8 rounded border border-slate-600 bg-transparent cursor-pointer"
+                  />
+                </div>
+                <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-xl border border-slate-800">
+                  <span className="text-xs text-slate-400 font-semibold">Roughness:</span>
+                  <input
+                    type="range"
+                    min="0" max="1" step="0.05"
+                    value={matProps.roughness}
+                    onChange={(e) => handleUpdateMaterial('roughness', parseFloat(e.target.value))}
+                    className="w-24 accent-emerald-400 cursor-pointer"
+                  />
+                  <span className="font-mono text-xs text-white">{matProps.roughness}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-xl border border-slate-800">
+                  <span className="text-xs text-slate-400 font-semibold">Metalness:</span>
+                  <input
+                    type="range"
+                    min="0" max="1" step="0.05"
+                    value={matProps.metalness}
+                    onChange={(e) => handleUpdateMaterial('metalness', parseFloat(e.target.value))}
+                    className="w-24 accent-emerald-400 cursor-pointer"
+                  />
+                  <span className="font-mono text-xs text-white">{matProps.metalness}</span>
+                </div>
+                <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-xl border border-slate-800">
+                  <span className="text-xs text-slate-400 font-semibold">Opacity:</span>
+                  <input
+                    type="range"
+                    min="0" max="1" step="0.05"
+                    value={matProps.opacity}
+                    onChange={(e) => handleUpdateMaterial('opacity', parseFloat(e.target.value))}
+                    className="w-24 accent-emerald-400 cursor-pointer"
+                  />
+                  <span className="font-mono text-xs text-white">{matProps.opacity}</span>
+                </div>
+              </div>
+
+              {/* Texture Map Slots Header */}
+              <div className="border-t border-slate-800 pt-3">
+                <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider mb-2.5">
+                  PBR Texture Slots (Albedo, Normal, Roughness, Metalness, Emission, AO)
+                </h4>
+                <div className="flex flex-col gap-2.5">
+                  {[
+                    { key: 'map', label: 'Albedo (Base Color)' },
+                    { key: 'normalMap', label: 'Normal Map' },
+                    { key: 'roughnessMap', label: 'Roughness Map' },
+                    { key: 'metalnessMap', label: 'Metalness Map' },
+                    { key: 'emissiveMap', label: 'Emission Map' },
+                    { key: 'aoMap', label: 'AO (Ambient Occlusion)' }
+                  ].map((slot) => (
+                    <div key={slot.key} className="flex flex-col gap-2 bg-slate-950 px-3 py-2.5 rounded-xl border border-slate-800">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-200">{slot.label}</span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenSlotDropdown(openSlotDropdown === `modal_${slot.key}` ? null : `modal_${slot.key}`);
+                            }}
+                            className="bg-slate-900 hover:bg-slate-800 border border-slate-700 hover:border-cyan-500/50 text-slate-300 text-xs rounded-lg px-2.5 py-1 flex items-center gap-1.5 transition max-w-[160px]"
+                          >
+                            <span className="truncate">Choose Image ({imageAssets.length})</span>
+                            <span className="text-[10px] text-cyan-400">▼</span>
+                          </button>
+                          <label className="px-3 py-1 bg-emerald-600/40 hover:bg-emerald-600/60 text-emerald-300 border border-emerald-500/50 rounded-lg text-xs font-bold cursor-pointer transition">
+                            Upload File
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="hidden"
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) handleApplyTextureSlot(slot.key, URL.createObjectURL(f));
+                              }}
+                            />
+                          </label>
+                          <button
+                            onClick={() => handleApplyTextureSlot(slot.key, null)}
+                            className="px-2.5 py-1 bg-red-900/40 hover:bg-red-800/60 text-red-300 border border-red-700/50 rounded-lg text-xs font-bold transition"
+                            title="Clear texture map"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+                      {openSlotDropdown === `modal_${slot.key}` && (
+                        <div className="p-2 bg-slate-900 border border-cyan-500/40 rounded-xl shadow-lg flex flex-col gap-1.5 max-h-40 overflow-y-auto">
+                          <div className="text-xs font-bold text-slate-400 pb-1 border-b border-slate-800 flex items-center justify-between">
+                            <span>Select Imported Image Asset</span>
+                            <button
+                              onClick={() => setOpenSlotDropdown(null)}
+                              className="text-slate-400 hover:text-rose-400 font-bold"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                          {imageAssets.length === 0 ? (
+                            <div className="py-2 px-1 text-xs text-slate-400 italic">
+                              No imported images found. Click &quot;Upload File&quot; next to this slot to import one directly!
+                            </div>
+                          ) : (
+                            imageAssets.map((img) => (
+                              <button
+                                key={img.id}
+                                onClick={() => {
+                                  handleApplyTextureSlot(slot.key, img.url || null);
+                                  setOpenSlotDropdown(null);
+                                }}
+                                className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-950/60 hover:bg-cyan-500/20 text-left transition border border-transparent hover:border-cyan-500/30"
+                              >
+                                <span className="text-xs font-semibold text-slate-200 truncate max-w-[220px]">
+                                  {img.name}
+                                </span>
+                                <span className="text-[10px] font-mono text-cyan-400">Apply</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </SpatialPopUpWrapper>
   );
 };

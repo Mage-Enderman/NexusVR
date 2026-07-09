@@ -103,6 +103,7 @@ export class SceneEngine {
     triangles: 0
   };
   
+  public isVRHandGrabbing?: (side: 'left' | 'right') => boolean;
   private updateCallbacks: Set<SceneUpdateCallback> = new Set();
   private lastTime = performance.now();
   private frameCount = 0;
@@ -713,6 +714,7 @@ export class SceneEngine {
   // direct writes to `camera.position`/`camera.rotation` would be lost.
   private updateVRLocomotion(delta: number): void {
     if (!this.vrInput) return;
+    if (this.isVRHandGrabbing && this.isVRHandGrabbing('left')) return;
     const ls = this.vrInput.left.stick;
     if (Math.abs(ls.x) < 1e-4 && Math.abs(ls.y) < 1e-4) return;
 
@@ -778,6 +780,7 @@ export class SceneEngine {
 
   private updateVRSmoothTurn(delta: number): void {
     if (!this.vrInput) return;
+    if (this.isVRHandGrabbing && this.isVRHandGrabbing('right')) return;
     const ts = this.vrInput.right.stick.x;
     if (Math.abs(ts) < 1e-4) return;
     // ~90 °/s — fast enough to feel responsive, slow enough to keep

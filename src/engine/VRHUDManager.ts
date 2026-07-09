@@ -939,6 +939,11 @@ export class VRHUDManager {
       this.closePanel();
       return true;
     }
+    if (action.startsWith('sys.open:')) {
+      const target = action.substring('sys.open:'.length);
+      this.openPanel(target);
+      return true;
+    }
     // Tab flip on the radial panel center hub is a built-in so the
     // user can browse slices without bouncing through App.tsx. The
     // per-slice actions (undo/redo/loco/scale/laser/grabmode) still
@@ -1016,6 +1021,7 @@ export class VRHUDManager {
     this.panelDrawers.set('sys-pair',      this.drawPairPanel.bind(this));
     this.panelDrawers.set('sys-session',   this.drawSessionPanel.bind(this));
     this.panelDrawers.set('sys-inspector', this.drawInspectorPanel.bind(this));
+    this.panelDrawers.set('sys-material',  this.drawMaterialPanel.bind(this));
     this.panelDrawers.set('sys-chat',      this.drawChatPanel.bind(this));
     // The radial context menu is a 3D panel in VR (the React DOM version
     // is invisible in pure immersive WebXR). 5 slices + center hub,
@@ -1965,6 +1971,7 @@ export class VRHUDManager {
 
     // ===== MATERIAL (y 696..758) =====
     drawCard(696 + yShift, 758 + yShift, 'MATERIAL', '#06b6d4');
+    drawBtn(660, 703 + yShift, 310, 22, 'OPEN MATERIAL & TEXTURES EDITOR', 'inspect.openMaterialEditor', 'rgba(16,185,129,0.25)', '#6ee7b7', '#10b981');
     const matY = 720 + yShift;
     // Color R/G/B row
     const colorChans: Array<{ label: string; key: 'r'|'g'|'b' }> = [
@@ -2013,6 +2020,156 @@ export class VRHUDManager {
     });
 
     // Reset baseline
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  /**
+   * Dedicated Material & PBR Texture Inspector panel for VR.
+   * Allows applying held or imported image textures to Albedo, Normal, Roughness,
+   * Metalness, Emission, and AO texture slots, as well as fine-tuning PBR scalars.
+   */
+  private drawMaterialPanel(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    _h: number,
+    helper: PanelDrawHelper,
+    data: PanelContext
+  ): void {
+    const bodyTop = helper.drawStandardChrome(
+      'MATERIAL & TEXTURE INSPECTOR',
+      'Apply held or imported image textures to PBR material slots',
+      '#10b981'
+    );
+
+    const sel = data.selectedAsset;
+    if (!sel) {
+      ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('NO ASSET SELECTED', 60, bodyTop + 40);
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Select a 3D object in VR or via the Scene Inspector first.', 60, bodyTop + 70);
+      return;
+    }
+
+    const mats: THREE.Material[] = [];
+    sel.object3d.traverse((c) => {
+      const m = (c as THREE.Mesh).material;
+      if (m) {
+        if (Array.isArray(m)) mats.push(...m);
+        else mats.push(m);
+      }
+    });
+    const mat0 = (mats[0] as THREE.MeshStandardMaterial) ?? null;
+
+    const drawCard = (top: number, bottom: number, title: string, accent: string) => {
+      const cardH = bottom - top;
+      ctx.fillStyle = 'rgba(8,10,18,0.55)';
+      ctx.fillRect(40, top, w - 80, cardH);
+      ctx.strokeStyle = accent; ctx.lineWidth = 2;
+      ctx.strokeRect(40, top, w - 80, cardH);
+      ctx.fillStyle = accent; ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(title.toUpperCase(), 50, top + 22);
+    };
+
+    const drawBtn = (
+      x: number, y: number, bw: number, bh: number,
+      label: string, action: string,
+      bg: string, fill: string, stroke: string
+    ): void => {
+      ctx.fillStyle = bg;
+      ctx.fillRect(x, y, bw, bh);
+      ctx.strokeStyle = stroke; ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, bw, bh);
+      ctx.fillStyle = fill;
+      ctx.font = `bold ${Math.min(13, bh * 0.55) | 0}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, x + bw / 2, y + bh / 2);
+      helper.registerButton({ x, y, w: bw, h: bh }, action);
+    };
+
+    // Card 1: PBR TEXTURE MAP SLOTS
+    drawCard(bodyTop + 10, bodyTop + 330, 'PBR TEXTURE MAP SLOTS', '#10b981');
+    const slots: Array<{ label: string; key: string }> = [
+      { label: 'ALBEDO / BASE COLOR MAP', key: 'map' },
+      { label: 'NORMAL MAP',              key: 'normalMap' },
+      { label: 'ROUGHNESS MAP',           key: 'roughnessMap' },
+      { label: 'METALNESS MAP',           key: 'metalnessMap' },
+      { label: 'EMISSION MAP',            key: 'emissiveMap' },
+      { label: 'AO (OCCLUSION) MAP',      key: 'aoMap' },
+    ];
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    slots.forEach((s, i) => {
+      const rowY = bodyTop + 45 + i * 46;
+      ctx.fillStyle = 'rgba(30,41,59,0.7)';
+      ctx.fillRect(56, rowY, w - 112, 38);
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 1;
+      ctx.strokeRect(56, rowY, w - 112, 38);
+
+      const hasTex = mat0 && (mat0 as any)[s.key] != null;
+      ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(s.label, 72, rowY + 23);
+
+      ctx.fillStyle = hasTex ? '#10b981' : '#64748b'; ctx.font = 'bold 12px monospace';
+      ctx.fillText(hasTex ? '[ TEXTURE ACTIVE ]' : '[ NO TEXTURE ]', 320, rowY + 23);
+
+      // Buttons
+      drawBtn(
+        560, rowY + 6, 260, 26,
+        'APPLY HELD / CYCLE IMAGE',
+        `inspect.material.slot:${s.key}`,
+        'rgba(16,185,129,0.25)', '#6ee7b7', '#10b981'
+      );
+      drawBtn(
+        832, rowY + 6, 90, 26,
+        'CLEAR',
+        `inspect.material.slotClear:${s.key}`,
+        'rgba(239,68,68,0.25)', '#fca5a5', '#ef4444'
+      );
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    });
+
+    // Card 2: PBR SCALARS & TUNING
+    drawCard(bodyTop + 345, bodyTop + 510, 'MATERIAL SCALAR TUNING', '#06b6d4');
+    const scalarProps: Array<{ label: string; prop: string; fmt: (n:number)=>string; get: () => number; }> = [
+      { label: 'ROUGHNESS',  prop: 'roughness',  fmt: n => n.toFixed(2), get: () => mat0?.roughness ?? 0.5 },
+      { label: 'METALNESS',  prop: 'metalness',  fmt: n => n.toFixed(2), get: () => mat0?.metalness ?? 0 },
+      { label: 'OPACITY',    prop: 'opacity',    fmt: n => n.toFixed(2), get: () => mat0?.opacity ?? 1 },
+      { label: 'EMISS INT.', prop: 'emissive',   fmt: n => n.toFixed(2), get: () => (mat0 as any)?.emissiveIntensity ?? 1 },
+    ];
+
+    const scalarStartY = bodyTop + 385;
+    const cellW = (w - 112 - 36) / 4;
+    scalarProps.forEach((p, i) => {
+      const cx = 56 + i * (cellW + 12);
+      const cy = scalarStartY;
+      ctx.fillStyle = 'rgba(30,41,59,0.7)';
+      ctx.fillRect(cx, cy, cellW, 54);
+      ctx.strokeStyle = '#334155'; ctx.lineWidth = 1;
+      ctx.strokeRect(cx, cy, cellW, 54);
+
+      ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 12px sans-serif';
+      ctx.fillText(p.label, cx + 12, cy + 20);
+      ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 16px monospace';
+      ctx.fillText(p.fmt(p.get()), cx + 12, cy + 42);
+
+      const btnW = 32;
+      drawBtn(cx + cellW - btnW * 3 - 10, cy + 14, btnW, 26, '\u2212', `inspect.material.props:${p.prop}-`, 'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444');
+      drawBtn(cx + cellW - btnW * 2 - 6,  cy + 14, btnW, 26, '+',       `inspect.material.props:${p.prop}+`, 'rgba(16,185,129,0.20)', '#86efac', '#10b981');
+      drawBtn(cx + cellW - btnW - 2,      cy + 14, btnW, 26, '\u21ba', `inspect.material.props:${p.prop}.reset`, 'rgba(148,163,184,0.20)', '#cbd5e1', '#94a3b8');
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    });
+
+    // Back button
+    drawBtn(
+      56, bodyTop + 460, 240, 32,
+      '\u2190 BACK TO SCENE INSPECTOR',
+      'sys.open:sys-inspector',
+      'rgba(148,163,184,0.25)', '#e2e8f0', '#64748b'
+    );
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
   }
