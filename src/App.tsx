@@ -1911,25 +1911,12 @@ const vrHud = new VRHUDManager(
       // animation loop's `oversized` skip below keeps it static (no
       // pulse) so it reads as a permanent failure indicator rather
       // than a still-loading asset.
-      if (data.streamingHint && data.type === 'video') {
-        // Phase 3A receiver: large video on a binary DataChannel.
-        // We don't go through blob -> importFile or url ->
-        // importFromUrl; instead VideoStreamingService.attachReceiver
-        // gives us a pre-wired MSE-backed <video> element streamed
-        // straight into AssetManager.loadVideoFromStreamedSource which
-        // wraps it as a THREE.VideoTexture.
-        //
-        // v4 fix: attachReceiver (sync) is wrapped in try/catch so a
-        // synchronous throw (e.g. MediaSource unsupported on iOS Safari)
-        // cleanly falls through to the fileDataOversized red-placeholder
-        // branch below instead of being swallowed inside an IIFE whose
-        // outer return had already fired. We use the existing onSpawn's
-        // `.then(...).catch(...)` pattern (mirrors the importFile
-        // chains two blocks down) for the async load step.
+      if (data.type === 'video' && (data.streamingHint || (!data.fileData && !data.url))) {
+        const hint = data.streamingHint || { id: data.id, fileSize: 0, mimeHint: 'video/mp4' };
         let v: HTMLVideoElement | null = null;
         try {
           v = videoStreamingServiceRef.current.attachReceiver(
-            data.streamingHint,
+            hint,
             data.id,
             data.senderPeerId
           );
@@ -3966,7 +3953,7 @@ const vrHud = new VRHUDManager(
               scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
               url: asset.url,
               primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
-              fileData: file.size <= VIDEO_STREAMING_THRESHOLD ? asset.fileData : undefined,
+              fileData: (videoSyncMode !== 'watch-party' && file.size <= VIDEO_STREAMING_THRESHOLD) ? asset.fileData : undefined,
               isCollidable: asset.isCollidable,
               isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
               materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
@@ -4693,6 +4680,7 @@ const vrHud = new VRHUDManager(
                   resetVideoInactivityTimer();
                 }}
                 syncMode={activeVideoState.syncMode || activeVideoAsset.metadata?.videoSyncMode || 'persistent'}
+                canToggleSyncMode={!!(activeVideoAsset.fileData || networkServiceRef.current.isHost)}
                 onSyncModeToggle={(mode) => {
                   handleVideoAction(activeVideoAsset.id, 'syncMode', mode);
                   resetVideoInactivityTimer();

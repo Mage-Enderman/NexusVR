@@ -178,7 +178,7 @@ export class VideoStreamingService {
    * know to expect a binary stream instead of an inline fileData.
    */
   public registerHostFile(file: File | Blob, assetId: string, mimeHint?: string): VideoStreamingHint {
-    const id = `vstream-${assetId}-${Math.random().toString(36).slice(2, 9)}`;
+    const id = `vs-${Math.random().toString(36).slice(2, 12)}`;
     this.senders.set(id, {
       assetId,
       file,
@@ -246,35 +246,54 @@ export class VideoStreamingService {
    * Peers receive frames immediately with zero file downloading or RAM buffering.
    */
   public startLiveStreamToPeer(assetId: string, videoElement: HTMLVideoElement, peerId: string): void {
-    try {
-      const stream: MediaStream =
-        typeof (videoElement as unknown as { captureStream?: (fps?: number) => MediaStream }).captureStream === 'function'
-          ? (videoElement as unknown as { captureStream: (fps?: number) => MediaStream }).captureStream(30)
-          : typeof (videoElement as unknown as { mozCaptureStream?: (fps?: number) => MediaStream }).mozCaptureStream === 'function'
-          ? (videoElement as unknown as { mozCaptureStream: (fps?: number) => MediaStream }).mozCaptureStream(30)
-          : (null as unknown as MediaStream);
-      if (!stream) {
-        console.warn('[VideoStreaming] captureStream not supported on this browser');
-        return;
-      }
-      console.log('[VideoStreaming] Calling peer with high-res live WebRTC MediaStream:', peerId, 'asset:', assetId);
-      const call = this.net.callMediaStream(peerId, stream, { kind: 'vid-live-stream', assetId });
-      if (call && call.peerConnection) {
-        const senders = call.peerConnection.getSenders();
-        for (const sender of senders) {
-          if (sender.track && sender.track.kind === 'video') {
-            try {
-              const params = sender.getParameters();
-              if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-              params.encodings[0].maxBitrate = 8_000_000; // 8 Mbps crisp video stream
-              sender.setParameters(params).catch(() => {});
-            } catch { /* ignore if browser doesn't support sender parameters */ }
+    const launch = () => {
+      try {
+        videoElement.play().catch(() => {});
+        const stream: MediaStream =
+          typeof (videoElement as unknown as { captureStream?: (fps?: number) => MediaStream }).captureStream === 'function'
+            ? (videoElement as unknown as { captureStream: (fps?: number) => MediaStream }).captureStream(30)
+            : typeof (videoElement as unknown as { mozCaptureStream?: (fps?: number) => MediaStream }).mozCaptureStream === 'function'
+            ? (videoElement as unknown as { mozCaptureStream: (fps?: number) => MediaStream }).mozCaptureStream(30)
+            : (null as unknown as MediaStream);
+        if (!stream) {
+          console.warn('[VideoStreaming] captureStream not supported on this browser');
+          return;
+        }
+        console.log('[VideoStreaming] Calling peer with active live WebRTC MediaStream:', peerId, 'asset:', assetId, 'dimensions:', videoElement.videoWidth, 'x', videoElement.videoHeight);
+        const call = this.net.callMediaStream(peerId, stream, { kind: 'vid-live-stream', assetId });
+        if (call && call.peerConnection) {
+          const senders = call.peerConnection.getSenders();
+          for (const sender of senders) {
+            if (sender.track && sender.track.kind === 'video') {
+              try {
+                const params = sender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+                params.encodings[0].maxBitrate = 8_000_000; // 8 Mbps crisp video stream
+                sender.setParameters(params).catch(() => {});
+              } catch { /* ignore if browser doesn't support sender parameters */ }
+            }
           }
         }
+        call?.on('error', (err) => console.warn('[VideoStreaming] Live stream call error:', err));
+      } catch (err) {
+        console.warn('[VideoStreaming] startLiveStreamToPeer failed:', err);
       }
-      call?.on('error', (err) => console.warn('[VideoStreaming] Live stream call error:', err));
-    } catch (err) {
-      console.warn('[VideoStreaming] startLiveStreamToPeer failed:', err);
+    };
+
+    if (videoElement.readyState < 2 || videoElement.videoWidth === 0) {
+      console.log('[VideoStreaming] Video element not yet decoded (readyState:', videoElement.readyState, '). Waiting for loadeddata/canplay before calling peer WebRTC stream:', peerId);
+      videoElement.play().catch(() => {});
+      const onReady = () => {
+        videoElement.removeEventListener('loadeddata', onReady);
+        videoElement.removeEventListener('canplay', onReady);
+        videoElement.removeEventListener('playing', onReady);
+        launch();
+      };
+      videoElement.addEventListener('loadeddata', onReady);
+      videoElement.addEventListener('canplay', onReady);
+      videoElement.addEventListener('playing', onReady);
+    } else {
+      launch();
     }
   }
 
@@ -717,44 +736,43 @@ export class VideoStreamingService {
       sessionIds: new Set(subs.map(s => s.hint.id))
     });
     for (const sub of subs) {
-      // Map.get returns undefined for absent keys; clearTimeout is a safe no-op on that.
       clearTimeout(this.receiverWatchdogs.get(sub.receiverKey));
       this.receiverWatchdogs.delete(sub.receiverKey);
-      dataConn.on('data', (raw) => {
-        this.handleIncomingBinary(sub.assetId, sub.hint, sub.receiverKey, raw);
-      });
     }
+
+    dataConn.on('data', async (raw) => {
+      let buf: ArrayBuffer | null = null;
+      if (raw instanceof ArrayBuffer) {
+        buf = raw;
+      } else if (ArrayBuffer.isView(raw)) {
+        const view = raw as ArrayBufferView;
+        buf = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
+      } else if (raw instanceof Blob) {
+        buf = await raw.arrayBuffer();
+      }
+      if (!buf || !(buf instanceof ArrayBuffer)) return;
+      const { header, body } = parseChunkMessage(buf);
+      for (const session of this.receivers.values()) {
+        if (session.hint.id === header.sessionId) {
+          this.processChunkForSession(session, header, body);
+          break;
+        }
+      }
+    });
   }
 
-  private async handleIncomingBinary(
-    _assetId: string,
-    hint: VideoStreamingHint,
-    receiverKey: string,
-    raw: unknown
-  ): Promise<void> {
-    const session = this.receivers.get(receiverKey);
-    if (!session || session.finished) {
-      return;
-    }
-    let buf: ArrayBuffer | null = null;
-    if (raw instanceof ArrayBuffer) {
-      buf = raw;
-    } else if (ArrayBuffer.isView(raw)) {
-      const view = raw as ArrayBufferView;
-      buf = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength) as ArrayBuffer;
-    } else if (raw instanceof Blob) {
-      buf = await raw.arrayBuffer();
-    }
-    if (!buf || !(buf instanceof ArrayBuffer)) return;
-    const { header, body } = parseChunkMessage(buf);
-    if (header.sessionId !== hint.id) {
-      return;
-    }
+  private processChunkForSession(
+    session: ReceiverSession,
+    header: { kind: 'start' | 'data' | 'end'; sessionId: string },
+    body?: ArrayBuffer | null
+  ): void {
+    if (session.finished) return;
     if (header.kind === 'end') {
       this.finishReceiverSession(session);
       return;
     }
     if (header.kind !== 'data' || !body) return;
+    const hint = session.hint;
     const prevMB = Math.floor((session.bytesReceived - body.byteLength) / (10 * 1024 * 1024));
     session.receivedChunks.push(body);
     session.bytesReceived += body.byteLength;
@@ -775,11 +793,22 @@ export class VideoStreamingService {
       session.receivedChunks = [];
       console.log('[VideoStreaming] Assembled clean video blob for peer:', session.assetId, blob.size, 'bytes');
       const blobUrl = URL.createObjectURL(blob);
-      session.videoElement.src = blobUrl;
-      session.videoElement.load();
-      session.videoElement.play().catch(() => {});
+      const ve = session.videoElement;
+      ve.src = blobUrl;
+      ve.currentTime = 0;
+      const ensurePlay = () => {
+        console.log('[VideoStreaming] Playing assembled persistent blob for:', session.assetId);
+        ve.play().catch((err) => {
+          console.warn('[VideoStreaming] Play failed on assembled blob:', err);
+        });
+      };
+      ve.addEventListener('loadedmetadata', ensurePlay);
+      ve.addEventListener('loadeddata', ensurePlay);
+      ve.addEventListener('canplay', ensurePlay);
+      ve.load();
+      ensurePlay();
       session.ready = true;
-      this.fireAssetReady(session.assetId, session.videoElement);
+      this.fireAssetReady(session.assetId, ve);
     } catch (err) {
       console.warn('[VideoStreaming] Failed to assemble video blob:', err);
       this.fail(session.assetId, err instanceof Error ? err : new Error(String(err)));
@@ -878,11 +907,9 @@ export class VideoStreamingService {
 // ===========================================================================
 // Wire-format helpers (header parsing + building)
 // ===========================================================================
-// Header layout: [u8 kind, 1B][idSlot 23B][u64 offset 8B] = 32 bytes total.
-// Builder writes bytes 0..31 inclusive. Parser slices the body from byte 32
-// onward. Misalignment here was a critical bug — 13 bytes of every chunk
-// were bleeding into the next chunk's body extraction.
-const HEADER_LEN = 32;
+// Header layout: [u8 kind, 1B][idSlot 55B][u64 offset 8B] = 64 bytes total.
+const HEADER_LEN = 64;
+const ID_SLOT_LEN = 55;
 
 interface ParsedChunkHeader {
   kind: 'data' | 'end';
@@ -893,12 +920,11 @@ interface ParsedChunkHeader {
 function buildChunkHeader(sessionId: string, byteOffset: number): ArrayBuffer {
   const buf = new ArrayBuffer(HEADER_LEN);
   const view = new DataView(buf);
-  // u8 kind: 0 = data, 1 = end. Use 24 bytes for the id padded with zeros.
   view.setUint8(0, 0);
   const idBytes = new TextEncoder().encode(sessionId);
-  const copyLen = Math.min(idBytes.length, 23);
+  const copyLen = Math.min(idBytes.length, ID_SLOT_LEN);
   for (let i = 0; i < copyLen; i++) view.setUint8(1 + i, idBytes[i]);
-  view.setBigUint64(24, BigInt(byteOffset), true /*littleEndian*/);
+  view.setBigUint64(56, BigInt(byteOffset), true /*littleEndian*/);
   return buf;
 }
 
@@ -907,7 +933,7 @@ function buildEndOfStreamMarker(sessionId: string): ArrayBuffer {
   const view = new DataView(buf);
   view.setUint8(0, 1);
   const idBytes = new TextEncoder().encode(sessionId);
-  const copyLen = Math.min(idBytes.length, 23);
+  const copyLen = Math.min(idBytes.length, ID_SLOT_LEN);
   for (let i = 0; i < copyLen; i++) view.setUint8(1 + i, idBytes[i]);
   return buf;
 }
@@ -918,12 +944,11 @@ function parseChunkMessage(buf: ArrayBuffer): { header: ParsedChunkHeader; body:
   }
   const view = new DataView(buf);
   const kind = view.getUint8(0);
-  const idBytes = new Uint8Array(buf, 1, 23);
-  // Trim trailing zeros.
+  const idBytes = new Uint8Array(buf, 1, ID_SLOT_LEN);
   let idLen = idBytes.length;
   while (idLen > 0 && idBytes[idLen - 1] === 0) idLen--;
   const sessionId = new TextDecoder().decode(idBytes.subarray(0, idLen));
-  const byteOffset = Number(view.getBigUint64(24, true));
+  const byteOffset = Number(view.getBigUint64(56, true));
   if (kind === 1) {
     return { header: { kind: 'end', sessionId, byteOffset }, body: null };
   }

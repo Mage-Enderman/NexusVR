@@ -40,6 +40,8 @@ export interface VideoObjectControlsProps {
   syncMode?: 'persistent' | 'watch-party';
   /** Toggle sync mode */
   onSyncModeToggle?: (mode: 'persistent' | 'watch-party') => void;
+  /** Whether the current user can toggle sync mode (must be host or file owner) */
+  canToggleSyncMode?: boolean;
 }
 
 /**
@@ -71,6 +73,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   onRemoveVideo,
   syncMode,
   onSyncModeToggle,
+  canToggleSyncMode = true,
 }) => {
   const fillRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
@@ -185,21 +188,34 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               <span className="truncate max-w-[400px]">{assetName || 'Enter URL Here'}</span>
             </div>
             {syncMode && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSyncModeToggle?.(syncMode === 'persistent' ? 'watch-party' : 'persistent');
-                }}
-                className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-md ${
-                  syncMode === 'watch-party'
-                    ? 'bg-purple-500/30 text-purple-200 border border-purple-400/60 hover:bg-purple-500/40'
-                    : 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/50 hover:bg-cyan-500/30'
-                }`}
-                title={syncMode === 'watch-party' ? 'Watch Party: Live WebRTC stream (Zero Quest RAM)' : 'Persistent: Independent chunk streaming & peer cache'}
-              >
-                <span>{syncMode === 'watch-party' ? '📡 Watch Party Stream (Live)' : '💾 Persistent Chunk Stream'}</span>
-              </button>
+              canToggleSyncMode ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSyncModeToggle?.(syncMode === 'persistent' ? 'watch-party' : 'persistent');
+                  }}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-md ${
+                    syncMode === 'watch-party'
+                      ? 'bg-purple-500/30 text-purple-200 border border-purple-400/60 hover:bg-purple-500/40'
+                      : 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/50 hover:bg-cyan-500/30'
+                  }`}
+                  title={syncMode === 'watch-party' ? 'Watch Party: Live WebRTC stream (Zero Quest RAM)' : 'Persistent: Independent chunk streaming & peer cache'}
+                >
+                  <span>{syncMode === 'watch-party' ? '📡 Watch Party Stream (Live)' : '💾 Persistent Chunk Stream'}</span>
+                </button>
+              ) : (
+                <div
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-md cursor-default opacity-80 ${
+                    syncMode === 'watch-party'
+                      ? 'bg-purple-500/20 text-purple-300 border border-purple-400/40'
+                      : 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/40'
+                  }`}
+                  title="Only the host or file owner can change the video sync mode"
+                >
+                  <span>{syncMode === 'watch-party' ? '📡 Watch Party Mode' : '💾 Persistent Mode'}</span>
+                </div>
+              )
             )}
           </div>
         </div>

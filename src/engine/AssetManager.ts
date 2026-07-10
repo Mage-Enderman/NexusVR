@@ -1168,35 +1168,6 @@ export class AssetManager {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         texture.generateMipmaps = false;
-        const drawFrame = () => {
-          if (!ctx || !canvasEl) return;
-          if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-            const vw = videoElement.videoWidth, vh = videoElement.videoHeight;
-            const canvasAspect = canvasEl.width / canvasEl.height;
-            const videoAspect = vw / vh;
-            let dw: number, dh: number;
-            if (videoAspect > canvasAspect) { dw = canvasEl.width; dh = Math.round(canvasEl.width / videoAspect); }
-            else { dh = canvasEl.height; dw = Math.round(canvasEl.height * videoAspect); }
-            try { ctx.drawImage(videoElement, 0, 0, dw, dh); texture.needsUpdate = true; } catch { /* noop */ }
-          }
-        };
-        // Pick one of rVFC / rAF (preferring rVFC when available); never
-        // both — registering both would double-pump drawFrame on
-        // supported browsers. Store the chosen id on rVfcHandle so the
-        // dispose path can cancel it.
-        if ('requestVideoFrameCallback' in videoElement) {
-          const tick = () => {
-            drawFrame();
-            rVfcHandle = (videoElement as unknown as { requestVideoFrameCallback: (cb: () => void) => number }).requestVideoFrameCallback(tick);
-          };
-          rVfcHandle = (videoElement as unknown as { requestVideoFrameCallback: (cb: () => void) => number }).requestVideoFrameCallback(tick);
-        } else {
-          const raf = () => {
-            drawFrame();
-            rVfcHandle = requestAnimationFrame(raf);
-          };
-          rVfcHandle = requestAnimationFrame(raf);
-        }
       } else {
         texture = new THREE.VideoTexture(videoElement);
         texture.colorSpace = THREE.SRGBColorSpace;
@@ -1209,46 +1180,6 @@ export class AssetManager {
       texture.generateMipmaps = false;
     }
 
-    // Phase 3A peer-side fix: MSE-backed <video> elements (instantiated
-    // by VideoStreamingService's streaming pipeline) need a manual
-    // needsUpdate driver on a plain THREE.VideoTexture. THREE's internal
-    // path wires frame updates via `requestVideoFrameCallback` (with a
-    // `timeupdate` fallback), but for a SOURCEBUFFER-backed element the
-    // first event fires only after VideoTexture.update() short-circuits —
-    // which it does on `video.videoWidth === 0`. The MSE decoder doesn't
-    // populate `videoWidth` until a segment has been appended to the
-    // SourceBuffer AND the video element's media engine has decoded a
-    // frame. Without this driver the first `texImage2D` upload captures
-    // the uninitialised black front buffer and is never replaced — the
-    // peer sees a solid-black screen even though bytes are flowing.
-    // The local File blob-URL loadVideo path doesn't need this because
-    // the browser starts decoding on src-set synchronously. Skipped on
-    // the downscale branch: its drawFrame loop above already drives
-    // pixels, so this would only duplicate WebGL uploads.
-    if (texture instanceof THREE.VideoTexture) {
-      const driveTextureUpdate = () => {
-        if (
-          videoElement.readyState >= 2 &&
-          videoElement.videoWidth > 0 &&
-          videoElement.videoHeight > 0
-        ) {
-          texture.needsUpdate = true;
-        }
-      };
-      if ('requestVideoFrameCallback' in videoElement) {
-        const tick = () => {
-          driveTextureUpdate();
-          rVfcHandle = (videoElement as unknown as { requestVideoFrameCallback: (cb: () => void) => number }).requestVideoFrameCallback(tick);
-        };
-        rVfcHandle = (videoElement as unknown as { requestVideoFrameCallback: (cb: () => void) => number }).requestVideoFrameCallback(tick);
-      } else {
-        const raf = () => {
-          driveTextureUpdate();
-          rVfcHandle = requestAnimationFrame(raf);
-        };
-        rVfcHandle = requestAnimationFrame(raf);
-      }
-    }
     let width = 3.0, height = 1.6875;
     if (config?.videoAspectRatio === '9:16') { width = 1.6875; height = 3.0; }
     else if (config?.videoAspectRatio === '1:1') { width = 2.2; height = 2.2; }
@@ -1256,7 +1187,8 @@ export class AssetManager {
     group.position.copy(pos);
     const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.08);
     const frameMat = new THREE.MeshStandardMaterial({ color: '#07090e', roughness: 0.2, metalness: 0.8 });
-    group.add(new THREE.Mesh(frameGeo, frameMat));
+    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+    group.add(frameMesh);
     const screenGeo = new THREE.PlaneGeometry(width, height);
     const screenMat = new THREE.MeshBasicMaterial({ map: texture });
     const screenMesh = new THREE.Mesh(screenGeo, screenMat);
@@ -1269,7 +1201,84 @@ export class AssetManager {
     };
     group.userData.videoState = videoState;
     group.userData.videoAspectRatio = config?.videoAspectRatio || 'auto';
-    videoElement.addEventListener('loadedmetadata', () => { videoState.duration = Number.isFinite(videoElement.duration) ? videoElement.duration : 0; });
+    const updateGeometryAspect = () => {
+      const aspectMode = config?.videoAspectRatio || group.userData.videoAspectRatio || 'auto';
+      if (
+        aspectMode === 'auto' &&
+        Number.isFinite(videoElement.videoWidth) && videoElement.videoWidth > 0 &&
+        Number.isFinite(videoElement.videoHeight) && videoElement.videoHeight > 0
+      ) {
+        const aspect = videoElement.videoWidth / videoElement.videoHeight;
+        const newHeight = height;
+        const newWidth = newHeight * aspect;
+        frameMesh.geometry.dispose();
+        frameMesh.geometry = new THREE.BoxGeometry(newWidth + 0.1, newHeight + 0.1, 0.08);
+        screenMesh.geometry.dispose();
+        screenMesh.geometry = new THREE.PlaneGeometry(newWidth, newHeight);
+      }
+    };
+
+    let lastVideoWidth = -1;
+    let lastVideoHeight = -1;
+    const ensureValidTexture = () => {
+      if (
+        (videoElement.videoWidth !== lastVideoWidth || videoElement.videoHeight !== lastVideoHeight) &&
+        videoElement.videoWidth > 0 &&
+        videoElement.videoHeight > 0
+      ) {
+        lastVideoWidth = videoElement.videoWidth;
+        lastVideoHeight = videoElement.videoHeight;
+        if (screenMesh.material.map) {
+          screenMesh.material.map.dispose();
+        }
+        let newTex: THREE.VideoTexture | THREE.CanvasTexture;
+        if (downscalePlan.downscale && canvasEl) {
+          canvasEl.width = downscalePlan.width;
+          canvasEl.height = downscalePlan.height;
+          newTex = new THREE.CanvasTexture(canvasEl);
+          newTex.colorSpace = THREE.SRGBColorSpace;
+          newTex.minFilter = THREE.LinearFilter;
+          newTex.magFilter = THREE.LinearFilter;
+          newTex.generateMipmaps = false;
+        } else {
+          newTex = new THREE.VideoTexture(videoElement);
+          newTex.colorSpace = THREE.SRGBColorSpace;
+          newTex.minFilter = THREE.LinearFilter;
+          newTex.magFilter = THREE.LinearFilter;
+          newTex.generateMipmaps = false;
+        }
+        texture = newTex;
+        screenMesh.material.map = newTex;
+        screenMesh.material.needsUpdate = true;
+        updateGeometryAspect();
+      }
+    };
+
+    const drawLoop = () => {
+      ensureValidTexture();
+      if (videoElement.readyState >= 2 && videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+        if (downscalePlan.downscale && canvasEl) {
+          const ctx = canvasEl.getContext('2d');
+          if (ctx) {
+            const vw = videoElement.videoWidth, vh = videoElement.videoHeight;
+            const canvasAspect = canvasEl.width / canvasEl.height;
+            const videoAspect = vw / vh;
+            let dw: number, dh: number;
+            if (videoAspect > canvasAspect) { dw = canvasEl.width; dh = Math.round(canvasEl.width / videoAspect); }
+            else { dh = canvasEl.height; dw = Math.round(canvasEl.height * videoAspect); }
+            try { ctx.drawImage(videoElement, 0, 0, dw, dh); } catch { /* noop */ }
+          }
+        }
+        texture.needsUpdate = true;
+      }
+      rVfcHandle = requestAnimationFrame(drawLoop);
+    };
+    rVfcHandle = requestAnimationFrame(drawLoop);
+
+    videoElement.addEventListener('loadedmetadata', () => {
+      videoState.duration = Number.isFinite(videoElement.duration) ? videoElement.duration : 0;
+      ensureValidTexture();
+    });
     videoElement.addEventListener('timeupdate', () => { videoState.currentTime = videoElement.currentTime; });
     videoElement.addEventListener('play', () => { videoState.playing = true; });
     videoElement.addEventListener('pause', () => { videoState.playing = false; });
