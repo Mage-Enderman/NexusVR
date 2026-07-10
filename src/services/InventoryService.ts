@@ -14,7 +14,7 @@ export interface InventoryItem {
   toolType?: 'dev' | 'material' | 'light' | 'shape' | 'brush';
   folder?: string;
   previewUrl?: string;
-  materialState?: MaterialUpdate;
+  materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   metadata?: {
     fileSize?: number;
     mimeType?: string;
@@ -174,6 +174,44 @@ export class InventoryService {
       createdAt: 0,
       metadata: { folders: nextFolders }
     } as any);
+  }
+
+  public async renameFolder(oldName: string, newName: string): Promise<void> {
+    const trimmedNew = newName.trim();
+    if (!trimmedNew || oldName === trimmedNew) return;
+
+    const items = await this.getItems();
+    for (const it of items) {
+      if (it.folder === oldName) {
+        it.folder = trimmedNew;
+        await this.saveItem(it);
+      } else if (it.folder && it.folder.startsWith(`${oldName}/`)) {
+        it.folder = `${trimmedNew}/${it.folder.slice(oldName.length + 1)}`;
+        await this.saveItem(it);
+      }
+    }
+
+    const folders = await this.getFolders();
+    const nextFolders = folders.map(f => {
+      if (f === oldName) return trimmedNew;
+      if (f.startsWith(`${oldName}/`)) return `${trimmedNew}/${f.slice(oldName.length + 1)}`;
+      return f;
+    });
+
+    await this.saveItem({
+      id: 'sys-folders',
+      name: 'System Folders',
+      type: 'system',
+      createdAt: 0,
+      metadata: { folders: Array.from(new Set(nextFolders)) }
+    } as any);
+  }
+
+  public async moveFolder(folderName: string, targetParent?: string): Promise<void> {
+    const baseName = folderName.includes('/') ? folderName.split('/').pop()! : folderName;
+    const newPath = targetParent ? `${targetParent}/${baseName}` : baseName;
+    if (newPath === folderName) return;
+    await this.renameFolder(folderName, newPath);
   }
 
   public async clearCustomItems(): Promise<void> {

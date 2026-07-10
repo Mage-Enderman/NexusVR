@@ -40,7 +40,7 @@ export interface AssetSpawnData {
   // inspector checkbox and tree-orange-dot indicator both reflect the
   // synced state.
   isPersistent?: boolean;
-  materialState?: MaterialUpdate;
+  materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
   // Phase 3A: when the host imports a video too large for the sync
   // envelope, the spawn carries `fileData: undefined` +
@@ -246,7 +246,29 @@ export class NetworkService {
   public mode: ConnectionMode = 'offline';
   public roomId: string | null = null;
   public localPeerId: string;
-  public localUserName = 'Traveler';
+  public localUserName = (() => {
+    try {
+      return localStorage.getItem('nexus_username') || 'Traveler';
+    } catch {
+      return 'Traveler';
+    }
+  })();
+
+  public setLocalUserName(name: string): void {
+    const trimmed = name.trim() || 'Traveler';
+    this.localUserName = trimmed;
+    try {
+      localStorage.setItem('nexus_username', trimmed);
+    } catch {}
+    if (this.mode !== 'offline') {
+      this.broadcastEnvelope(this.buildEnvelope('hs', {
+        peerId: this.localPeerId,
+        userName: trimmed,
+        role: this.localRole
+      }));
+    }
+  }
+
   public peers: Set<string> = new Set();
   public hostId: string;
   public isHost = true;
@@ -420,8 +442,10 @@ export class NetworkService {
       if (this.mode === 'online' && this.roomId) {
         if (this.localPeerId === `${this.roomId}-host`) return;
         void this.attemptDialHostOrClaim(this.roomId);
+        void this.enableVoiceChat();
       } else if (this.mode === 'paired' && this.roomId) {
         this.connectToPeer(this.roomId);
+        void this.enableVoiceChat();
       }
     });
 
@@ -593,6 +617,7 @@ export class NetworkService {
       config: { iceServers: NetworkService.ICE_SERVERS }
     });
     this.bindPeerHandlers();
+    void this.enableVoiceChat();
     this.notifySystemChat(`You are the host of "${roomId}".`);
   }
 
@@ -893,9 +918,12 @@ export class NetworkService {
       case 'mat':
         for (const cb of this.onMaterialCallbacks) cb(env.payload as MaterialUpdate);
         break;
-      case 'av':
-        for (const cb of this.onAvatarCallbacks) cb(env.payload as AvatarTransform);
+      case 'av': {
+        const av = env.payload as AvatarTransform;
+        av.peerId = fromPeerId;
+        for (const cb of this.onAvatarCallbacks) cb(av);
         break;
+      }
       case 'spawn': {
         const data = env.payload as AssetSpawnData;
         data.senderPeerId = fromPeerId;
@@ -1209,7 +1237,8 @@ export class NetworkService {
 
   public broadcastAvatar(update: AvatarTransform): void {
     if (this.mode === 'offline') return;
-    this.broadcastEnvelope(this.buildEnvelope('av', update));
+    const toSend = { ...update, peerId: this.localPeerId };
+    this.broadcastEnvelope(this.buildEnvelope('av', toSend));
   }
 
   public broadcastSpawn(data: AssetSpawnData): void {
@@ -1437,12 +1466,41 @@ export class NetworkService {
     }
   }
 
-  public toggleMute(): boolean {
+  public async toggleMute(): Promise<boolean> {
+    if (!this.localAudioStream) {
+      await this.enableVoiceChat();
+      this.isMuted = false;
+      return this.isMuted;
+    }
     this.isMuted = !this.isMuted;
     if (this.localAudioStream) {
       this.localAudioStream.getAudioTracks().forEach((t) => { t.enabled = !this.isMuted; });
     }
     return this.isMuted;
+  }
+
+  public async switchAudioInputDevice(deviceId: string): Promise<boolean> {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: deviceId ? { exact: deviceId } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        },
+        video: false
+      });
+      if (this.localAudioStream) {
+        this.localAudioStream.getAudioTracks().forEach(t => t.stop());
+      }
+      this.localAudioStream = stream;
+      stream.getAudioTracks().forEach(t => { t.enabled = !this.isMuted; });
+      for (const peerId of this.peers) this.callPeerForAudio(peerId);
+      return true;
+    } catch (err) {
+      console.warn('Failed to switch audio device:', err);
+      return false;
+    }
   }
 
   public callMediaStream(peerId: string, stream: MediaStream, metadata?: Record<string, unknown>): import('peerjs').MediaConnection | null {

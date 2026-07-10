@@ -141,10 +141,11 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <button
           onClick={onToggleChat}
-          className="btn-icon btn-glass relative"
-          title="Toggle Chat & Voice"
+          className="btn-glass px-3.5 py-2 rounded-xl flex items-center gap-2 text-sm font-medium relative"
+          title="Toggle Text Chat"
         >
-          <MessageSquare className="w-4 h-4" />
+          <MessageSquare className="w-4 h-4 text-cyan-400" />
+          <span>Chat</span>
           {unreadChatCount > 0 && (
             <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-[#ec4899] text-[10px] font-bold flex items-center justify-center text-white animate-pulse">
               {unreadChatCount}

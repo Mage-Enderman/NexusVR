@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, Mic, MicOff, Volume2, VolumeX, Send, Minimize2, Radio } from 'lucide-react';
+import { MessageSquare, Send, Minimize2 } from 'lucide-react';
 import { NetworkService } from '../services/NetworkService.ts';
 import type { ChatMessage } from '../services/NetworkService.ts';
 
@@ -18,9 +18,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [isVoiceActive, setIsVoiceActive] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isDeafened, setIsDeafened] = useState(false);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -45,79 +42,23 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setInput('');
   };
 
-  const toggleVoice = async () => {
-    if (!isVoiceActive) {
-      const success = await networkService.enableVoiceChat();
-      if (success) {
-        setIsVoiceActive(true);
-        setIsMuted(false);
-      }
-    } else {
-      const muted = networkService.toggleMute();
-      setIsMuted(muted);
-    }
-  };
-
-  const toggleDeaf = () => {
-    const deaf = networkService.toggleDeafen();
-    setIsDeafened(deaf);
-  };
-
   if (!isOpen) return null;
 
   return (
-    <div className="absolute top-16 right-4 z-20 w-80 h-[calc(100vh-6rem)] glass-panel flex flex-col overflow-hidden shadow-2xl animate-in slide-in-from-right duration-200">
-      {/* Header & Voice Controls */}
-      <div className="p-3.5 border-b border-white/10 bg-slate-900/60 flex flex-col gap-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <MessageSquare className="w-4 h-4 text-[#00f0ff]" />
-            <span className="font-['Outfit'] font-bold text-sm">Text & Voice Chat</span>
-          </div>
-          <button onClick={onClose} className="btn-icon w-6 h-6 btn-glass text-slate-400 hover:text-white">
-            <Minimize2 className="w-3.5 h-3.5" />
-          </button>
+    <div className="fixed bottom-20 right-4 z-40 w-80 max-h-[380px] glass-panel flex flex-col overflow-hidden shadow-2xl animate-in slide-in-from-right duration-200 border border-slate-700/80 bg-slate-900/90 backdrop-blur-xl">
+      {/* Header */}
+      <div className="p-3.5 border-b border-white/10 bg-slate-900/60 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-2">
+          <MessageSquare className="w-4 h-4 text-[#00f0ff]" />
+          <span className="font-['Outfit'] font-bold text-sm">Text Chat</span>
         </div>
-
-        {/* Voice Bar */}
-        <div className="flex items-center justify-between bg-black/40 p-2 rounded-xl border border-white/5">
-          <div className="flex items-center gap-2">
-            <Radio className={`w-4 h-4 ${isVoiceActive ? (isMuted ? 'text-amber-400' : 'text-emerald-400 animate-pulse') : 'text-slate-500'}`} />
-            <span className="text-xs font-medium text-slate-300">
-              {!isVoiceActive ? 'Voice Inactive' : (isMuted ? 'Mic Muted' : 'Voice Active')}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              onClick={toggleVoice}
-              className={`btn-icon w-7 h-7 rounded-lg text-xs ${
-                isVoiceActive
-                  ? (isMuted ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40')
-                  : 'btn-glass text-slate-300 hover:text-[#00f0ff]'
-              }`}
-              title={!isVoiceActive ? 'Connect Microphone' : (isMuted ? 'Unmute Mic' : 'Mute Mic')}
-            >
-              {isVoiceActive && !isMuted ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
-            </button>
-
-            {isVoiceActive && (
-              <button
-                onClick={toggleDeaf}
-                className={`btn-icon w-7 h-7 rounded-lg text-xs ${
-                  isDeafened ? 'bg-rose-500/20 text-rose-400 border border-rose-500/40' : 'btn-glass text-slate-300'
-                }`}
-                title={isDeafened ? 'Undeafen Audio' : 'Deafen Incoming Audio'}
-              >
-                {isDeafened ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-              </button>
-            )}
-          </div>
-        </div>
+        <button onClick={onClose} className="btn-icon w-6 h-6 btn-glass text-slate-400 hover:text-white" title="Close Text Chat">
+          <Minimize2 className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div className="overflow-y-auto max-h-[230px] min-h-[80px] p-3 space-y-3">
         {messages.length === 0 ? (
           <div className="text-center py-12 text-slate-500 text-xs">
             <p>No messages yet.</p>

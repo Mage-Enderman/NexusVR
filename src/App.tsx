@@ -247,7 +247,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     }, 6000);
   }, []);
   const [cameraMode, setCameraMode] = useState<'orbit' | 'first-person'>('first-person');
-  const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(true);
+  const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(false);
   const [locomotionMode, setLocomotionMode] = useState<'walk' | 'flight' | 'noclip'>('walk');
   const [showSceneInspector, setShowSceneInspector] = useState<boolean>(false);
   // Ref so the canvas click handler can read the current value without
@@ -340,8 +340,9 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   const [importInitialFile, setImportInitialFile] = useState<File | null>(null);
   const [showWorldEnvModal, setShowWorldEnvModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
-  const [showChatPanel, setShowChatPanel] = useState<boolean>(false);
+  const [showChatPanel, setShowChatPanel] = useState<boolean>(true);
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
+  const [userName, setUserName] = useState<string>(() => networkServiceRef.current.localUserName);
   // Rolling buffer of recent chat messages; mirrors VRHUDManager's
   // internal _recentMessages for the React-driven setDataContext push
   // (the manager keeps its own copy via appendIncomingChat so the canvas
@@ -359,6 +360,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   });
   const [showDashMenu, setShowDashMenu] = useState<boolean>(false);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [inventoryFolders, setInventoryFolders] = useState<string[]>([]);
   // Mirror of inventoryItems state held in a ref so the VR panel-based
   // useEffect dependency array can read fresh data without forcing a
   // re-render every time  is called. Without this
@@ -397,6 +399,36 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     ambientIntensity: 0.4,
     dirLightIntensity: 1.5,
   });
+
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string>('');
+
+  useEffect(() => {
+    if ((showDashMenu || showRadialMenu) && navigator.mediaDevices?.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then(devices => {
+        const mics = devices.filter(d => d.kind === 'audioinput');
+        setAudioDevices(mics);
+      }).catch(err => console.warn('Failed to enumerate audio devices:', err));
+    }
+  }, [showDashMenu, showRadialMenu]);
+
+  const handleSelectAudioDevice = async (deviceId: string) => {
+    setSelectedAudioDeviceId(deviceId);
+    await networkServiceRef.current.switchAudioInputDevice(deviceId);
+  };
+
+  const handleToggleMute = useCallback(async () => {
+    await networkServiceRef.current.toggleMute();
+    const isMuted = networkServiceRef.current.isMuted;
+    vrRadialMenuLeftRef.current?.setState({ isMuted });
+    vrRadialMenuRightRef.current?.setState({ isMuted });
+    const listener = avatarManagerRef.current?.audioListener;
+    if (listener && listener.context.state === 'suspended') {
+      listener.context.resume().catch(() => {});
+    }
+    setPeerCount(prev => prev);
+  }, []);
+
 
   // Mirror activeTool / cameraMode state into refs so the single-bound
   // animation-loop callback (registered in the engine-init effect
@@ -534,6 +566,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
         laserEnabled,
         grabMode,
         isHeld: sideIsHolding,
+        isMuted: networkServiceRef.current.isMuted,
         heldAssetType: sideIsHolding && heldAssetType !== null ? String(heldAssetType) : null,
       });
       if (sideIsHolding) {
@@ -2338,6 +2371,7 @@ const vrHud = new VRHUDManager(
     let lastCenterRay = 0;
     const unbindLoop = sceneEngine.registerUpdateCallback((_delta, elapsed) => {
       manipulationManager.update(_delta);
+      assetManager.update(_delta, elapsed);
 
       // Pulse in-flight import placeholders so they read as "loading"
       // at a glance. Cheap: a few sin / multiplies per pending place,
@@ -2637,7 +2671,7 @@ const vrHud = new VRHUDManager(
     const users: import('./engine/VRHUDManager').PanelUser[] = [
       {
         id: selfId,
-        name: net?.localUserName ?? 'You',
+        name: userName || net?.localUserName || 'You',
         role: net?.isHost ? 'admin' : 'guest',
         isSelf: true,
         isHost: !!net?.isHost,
@@ -2715,26 +2749,74 @@ const vrHud = new VRHUDManager(
   // the desktop dash or inventory modal. Without this the panel
   // shows "No items yet" in pure-VR sessions. The follow-up
   // useEffect below keeps the data fresh on desktop-modal opens.
-  useEffect(() => {
+  const refreshInventoryData = useCallback(() => {
     const inv = inventoryServiceRef.current;
     if (!inv) return;
     inv.getItems().then((items) => {
       inventoryItemsRef.current = items.slice();
       setInventoryItems(items);
-    }).catch(() => { /* swallow — IDB may not be ready */ });
+    }).catch(() => {});
+    inv.getFolders().then((folders) => {
+      setInventoryFolders(folders);
+    }).catch(() => {});
   }, []);
 
-  // Refresh inventory items when the user opens either the desktop
-  // dash or the desktop inventory modal — keeps the VR panel view
-  // fed fresh data WITHOUT relying on a state update path.
   useEffect(() => {
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  useEffect(() => {
+    refreshInventoryData();
+  }, [showDashMenu, showInventoryModal, refreshInventoryData]);
+
+  const handleDeleteInventoryItem = useCallback(async (id: string) => {
     const inv = inventoryServiceRef.current;
     if (!inv) return;
-    inv.getItems().then((items) => {
-      inventoryItemsRef.current = items.slice();
-      setInventoryItems(items);
-    }).catch(() => { /* swallow — IDB may not be ready */ });
-  }, [showDashMenu, showInventoryModal]);
+    await inv.removeItem(id);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleRenameInventoryItem = useCallback(async (id: string, newName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !newName.trim()) return;
+    await inv.renameItem(id, newName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleCreateInventoryFolder = useCallback(async (folderName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !folderName.trim()) return;
+    await inv.createFolder(folderName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleMoveInventoryItem = useCallback(async (id: string, folder?: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.moveItemToFolder(id, folder);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleRenameInventoryFolder = useCallback(async (oldName: string, newName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !newName.trim()) return;
+    await inv.renameFolder(oldName, newName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleDeleteInventoryFolder = useCallback(async (folderName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.deleteFolder(folderName);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleMoveInventoryFolder = useCallback(async (folderName: string, targetParent?: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.moveFolder(folderName, targetParent);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
 
 
   // Dev tool's secondary action (R key): center-of-screen raycast
@@ -2876,10 +2958,17 @@ const vrHud = new VRHUDManager(
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
       }
-      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined;
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as any;
       if (matState) {
         AssetManager.applyMaterialUpdate(newAsset, matState);
-        networkServiceRef.current.broadcastMaterialUpdate({ ...matState, assetId: newAsset.id });
+        const mats = Array.isArray(matState)
+          ? matState
+          : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+          ? Object.values(matState)
+          : [matState];
+        mats.forEach((m: any) => {
+          networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: newAsset.id });
+        });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -2959,6 +3048,13 @@ const vrHud = new VRHUDManager(
           }
           return !prev;
         });
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        setShowChatPanel((prev) => !prev);
+        setUnreadChatCount(0);
         return;
       }
 
@@ -3331,10 +3427,17 @@ const vrHud = new VRHUDManager(
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
       }
-      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined;
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as any;
       if (matState) {
         AssetManager.applyMaterialUpdate(newAsset, matState);
-        networkServiceRef.current.broadcastMaterialUpdate({ ...matState, assetId: newAsset.id });
+        const mats = Array.isArray(matState)
+          ? matState
+          : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+          ? Object.values(matState)
+          : [matState];
+        mats.forEach((m: any) => {
+          networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: newAsset.id });
+        });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -3687,6 +3790,7 @@ const vrHud = new VRHUDManager(
     onDuplicate: () => handleDuplicateHeld(menuSide),
     onSaveHeld: () => handleSaveHeldToInventory(menuSide),
     onDownloadHeld: () => { handleDownloadHeld?.(menuSide); },
+    onToggleMute: () => handleToggleMute(),
     onClose: () => closeVrRadial(menuSide),
     onNextTab: () => {
       const mesh = menuSide === 'left' ? vrRadialMenuLeftRef.current : vrRadialMenuRightRef.current;
@@ -3698,7 +3802,7 @@ const vrHud = new VRHUDManager(
         : (cur === 'general' ? 'grab' : 'general');
       mesh.setActiveTab(next);
     },
-  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld]);
+  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute]);
   const buildVrRadialInitialState = useCallback((menuSide: 'left' | 'right'): VRRadialMenuState => {
     const sideHeldAsset = heldAssetsBySideRef.current[menuSide];
     const sideIsHolding = sideHeldAsset !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
@@ -3708,6 +3812,7 @@ const vrHud = new VRHUDManager(
       laserEnabled: laserEnabledRef.current,
       grabMode: grabModeRef.current,
       isHeld: sideIsHolding,
+      isMuted: networkServiceRef.current.isMuted,
       heldAssetType: sideHeldAsset?.type ? String(sideHeldAsset.type) : sideIsHolding ? heldAssetTypeRef.current : null,
       activeTab: sideIsHolding ? 'held' : 'general',
     };
@@ -3729,11 +3834,15 @@ const vrHud = new VRHUDManager(
   const handleModerateUser = (action: 'kick' | 'ban' | 'silence' | 'unsilence' | 'respawn' | 'jump', targetPeerId: string) => {
     const net = networkServiceRef.current;
     if (action === 'jump') {
-      const targetAvatar = avatarManagerRef.current?.peers.get(targetPeerId);
-      if (targetAvatar && sceneEngineRef.current) {
-        const pos = targetAvatar.group.position;
-        sceneEngineRef.current.camera.position.set(pos.x, pos.y + 1.6, pos.z + 2);
-        sceneEngineRef.current.controls.target.copy(pos);
+      if (sceneEngineRef.current) {
+        const targetAvatar = avatarManagerRef.current?.peers.get(targetPeerId);
+        const worldPos = new THREE.Vector3(0, 1.6, 0);
+        if (targetAvatar) {
+          const headObj = targetAvatar.headMesh || targetAvatar.vrm?.scene || targetAvatar.group;
+          headObj.getWorldPosition(worldPos);
+        }
+        sceneEngineRef.current.camera.position.set(worldPos.x, worldPos.y, worldPos.z + 1.8);
+        sceneEngineRef.current.controls.target.set(worldPos.x, worldPos.y, worldPos.z);
         sceneEngineRef.current.controls.update();
       }
       return;
@@ -4156,11 +4265,23 @@ const vrHud = new VRHUDManager(
 
     const pos = getSpawnPositionInFrontOfUser(2.0);
     
+    const broadcastInventoryMaterialState = (targetId: string, matState: any) => {
+      if (!matState) return;
+      const mats = Array.isArray(matState)
+        ? matState
+        : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+        ? Object.values(matState)
+        : [matState];
+      mats.forEach((m: any) => {
+        networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: targetId });
+      });
+    };
+
     if (item.type === 'primitive' && item.primitiveType) {
       const prim = assetManager.spawnPrimitive(item.primitiveType, pos);
       if (prim && item.materialState) {
         AssetManager.applyMaterialUpdate(prim, item.materialState);
-        networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: prim.id });
+        broadcastInventoryMaterialState(prim.id, item.materialState);
       }
       manipulationManagerRef.current?.selectAsset(prim);
       if (prim) recordSpawnUndo(prim);
@@ -4171,7 +4292,7 @@ const vrHud = new VRHUDManager(
       if (asset) {
         if (item.materialState) {
           AssetManager.applyMaterialUpdate(asset, item.materialState);
-          networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: asset.id });
+          broadcastInventoryMaterialState(asset.id, item.materialState);
         }
         if (asset.type !== 'video') {
           manipulationManagerRef.current?.selectAsset(asset);
@@ -4190,7 +4311,7 @@ const vrHud = new VRHUDManager(
       if (asset) {
         if (item.materialState) {
           AssetManager.applyMaterialUpdate(asset, item.materialState);
-          networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: asset.id });
+          broadcastInventoryMaterialState(asset.id, item.materialState);
         }
         if (asset.type !== 'video') {
           manipulationManagerRef.current?.selectAsset(asset);
@@ -4210,6 +4331,11 @@ const vrHud = new VRHUDManager(
     const file = new File([blob], item.name);
     await avatarManagerRef.current?.loadLocalVRM(file);
     setShowInventoryModal(false);
+  };
+
+  const handleUpdateUserName = (name: string) => {
+    networkServiceRef.current.setLocalUserName(name);
+    setUserName(networkServiceRef.current.localUserName);
   };
 
   const handleUpdateGraphicsSettings = (newSettings: Partial<GraphicsSettings>) => {
@@ -4256,7 +4382,7 @@ const vrHud = new VRHUDManager(
   };
 
   return (
-    <div className="w-screen h-screen relative bg-[#07090e] select-none">
+    <div className="w-screen h-screen relative bg-[#07090e] select-none overflow-hidden">
       {/* 3D WebGL Canvas Container */}
       <div ref={containerRef} className="absolute inset-0 z-0 w-full h-full" />
 
@@ -4766,6 +4892,8 @@ const vrHud = new VRHUDManager(
         <SettingsModal
           settings={graphicsSettings}
           stats={stats}
+          userName={userName}
+          onUpdateUserName={handleUpdateUserName}
           onUpdateSettings={handleUpdateGraphicsSettings}
           onClose={() => setShowSettingsModal(false)}
         />
@@ -4776,6 +4904,8 @@ const vrHud = new VRHUDManager(
       <DashMenu
         isOpen={showDashMenu}
         onClose={() => setShowDashMenu(false)}
+        userName={userName}
+        onUpdateUserName={handleUpdateUserName}
         networkService={networkServiceRef.current}
         localRole={localRole}
         onUpdateRole={handleUpdateRole}
@@ -4783,9 +4913,25 @@ const vrHud = new VRHUDManager(
         defaultConfig={defaultPermissionsConfig}
         onUpdateDefaultConfig={setDefaultPermissionsConfig}
         inventoryItems={inventoryItems}
+        inventoryFolders={inventoryFolders}
         onSpawnItem={handleSpawnFromInventory}
         onEquipVrm={handleEquipVrmFromInventory}
+        onDeleteInventoryItem={handleDeleteInventoryItem}
+        onRenameInventoryItem={handleRenameInventoryItem}
+        onCreateInventoryFolder={handleCreateInventoryFolder}
+        onMoveInventoryItem={handleMoveInventoryItem}
+        onRenameInventoryFolder={handleRenameInventoryFolder}
+        onDeleteInventoryFolder={handleDeleteInventoryFolder}
+        onMoveInventoryFolder={handleMoveInventoryFolder}
         onOpenFullSettings={() => { setShowDashMenu(false); setShowSettingsModal(true); }}
+        graphicsSettings={graphicsSettings}
+        performanceStats={stats}
+        onUpdateGraphicsSettings={handleUpdateGraphicsSettings}
+        audioDevices={audioDevices}
+        selectedAudioDeviceId={selectedAudioDeviceId}
+        onSelectAudioDevice={handleSelectAudioDevice}
+        isMuted={networkServiceRef.current.isMuted}
+        onToggleMute={handleToggleMute}
       />
 
       {/* Resonite Radial Context Menu (Pie Menu) — desktop 2D overlay */}
@@ -4809,6 +4955,8 @@ const vrHud = new VRHUDManager(
         onDuplicate={handleDuplicateHeld}
         onSaveHeld={handleSaveHeldToInventory}
         onDownloadHeld={handleDownloadHeld}
+        isMuted={networkServiceRef.current.isMuted}
+        onToggleMute={handleToggleMute}
       />
 
    </div>

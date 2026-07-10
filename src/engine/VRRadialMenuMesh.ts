@@ -4,7 +4,7 @@ import * as THREE from 'three';
 // Slice definitions — mirrors RadialContextMenu.tsx geometry exactly
 // ---------------------------------------------------------------------------
 interface SliceDef {
-  id: 'undo' | 'redo' | 'right' | 'bottom' | 'left';
+  id: 'top' | 'undo' | 'redo' | 'right' | 'bottom' | 'left';
   /** Start angle in degrees (0 = up/north, clockwise). Gap-adjusted. */
   startDeg: number;
   endDeg: number;
@@ -17,11 +17,12 @@ interface SliceDef {
 }
 
 const BASE_SLICES: SliceDef[] = [
-  { id: 'undo',   startDeg: -67,  endDeg: -5,  color: '#6366f1', label: 'Undo' },
-  { id: 'redo',   startDeg:   5,  endDeg:  67, color: '#6366f1', label: 'Redo' },
-  { id: 'right',  startDeg:  77,  endDeg: 139, color: '#f59e0b', label: 'Locomotion', subLabel: 'Walk' },
-  { id: 'bottom', startDeg: 149,  endDeg: 211, color: '#06b6d4', label: 'Scaling',    subLabel: 'On' },
-  { id: 'left',   startDeg: 221,  endDeg: 283, color: '#06b6d4', label: 'Laser',      subLabel: 'On' },
+  { id: 'top',    startDeg: -25,  endDeg:  25, color: '#10b981', label: 'Mic',        subLabel: 'Live' },
+  { id: 'redo',   startDeg:  35,  endDeg:  85, color: '#6366f1', label: 'Redo' },
+  { id: 'right',  startDeg:  95,  endDeg: 145, color: '#f59e0b', label: 'Locomotion', subLabel: 'Walk' },
+  { id: 'bottom', startDeg: 155,  endDeg: 205, color: '#06b6d4', label: 'Scaling',    subLabel: 'On' },
+  { id: 'left',   startDeg: 215,  endDeg: 265, color: '#06b6d4', label: 'Laser',      subLabel: 'On' },
+  { id: 'undo',   startDeg: 275,  endDeg: 325, color: '#6366f1', label: 'Undo' },
 ];
 
 export interface VRRadialMenuState {
@@ -30,6 +31,7 @@ export interface VRRadialMenuState {
   laserEnabled: boolean;
   grabMode: 'auto' | 'precision' | 'palm' | 'laser';
   isHeld: boolean;
+  isMuted?: boolean;
   /**
    * AssetType of the currently held asset (mirrors App.tsx's
    * `heldAssetType` state). Drives the conditional held-tab slice labels:
@@ -61,6 +63,7 @@ export interface VRRadialMenuCallbacks {
    * unused then. Mirrors RadialContextMenu's `onDownloadHeld` prop.
    */
   onDownloadHeld?: () => void;
+  onToggleMute?: () => void;
   onClose: () => void;
   onNextTab: () => void;
 }
@@ -286,6 +289,7 @@ export class VRRadialMenuMesh {
     if (debug) console.log('[vr-radial] select fired (slice=' + this._slices[this.hoveredSlice].id + ')');
     const slice = this._slices[this.hoveredSlice];
     switch (slice.id) {
+      case 'top':    cb.onToggleMute?.(); cb.onClose(); break;
       case 'undo':   cb.onUndo(); cb.onClose(); break;
       case 'redo':   cb.onRedo(); cb.onClose(); break;
       case 'right':
@@ -421,7 +425,9 @@ export class VRRadialMenuMesh {
       let subLabel = '';
       let color = slice.color;
 
-      if (slice.id === 'undo') {
+      if (slice.id === 'top') {
+        label = 'Mic'; subLabel = s.isMuted ? '🔇 Muted' : '🎙 Live'; color = s.isMuted ? '#ef4444' : '#10b981';
+      } else if (slice.id === 'undo') {
         label = 'Undo'; subLabel = '↩'; color = '#818cf8';
       } else if (slice.id === 'redo') {
         label = 'Redo'; subLabel = '↪'; color = '#818cf8';

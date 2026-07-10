@@ -17,7 +17,9 @@ import {
   Trash2,
   Copy,
   BookmarkPlus,
-  Download
+  Download,
+  Mic,
+  MicOff
 } from 'lucide-react';
 import type { AssetType } from '../engine/AssetManager.ts';
 
@@ -35,24 +37,14 @@ export interface RadialContextMenuProps {
   onSetGrabMode: (mode: 'auto' | 'precision' | 'palm' | 'laser') => void;
   onUndo?: () => void;
   onRedo?: () => void;
-  // 'held' tab — only reachable when isHeld is true. Mirrors the
-  // 'held' radial tab in the VR 3D radial panel so the desktop and
-  // VR UIs expose the same act-on-the-held-object verbs.
   isHeld?: boolean;
-  // Type of the currently held asset (mirrors App.tsx's heldAssetType
-  // state). Drives the conditional held-tab slice labels: a misc file
-  // held in the hand replaces the "Duplicate" bottom slice with a
-  // "Download" slice (misc files are the only type that meaningfully
-  // downloads — the rest live in the world already). For other types
-  // the bottom slice keeps the original Duplicate verb.
   heldAssetType?: AssetType | null;
   onDestroy?: () => void;
   onDuplicate?: () => void;
   onSaveHeld?: () => void;
-  // Download the held asset to the user's device. Wired only when
-  // the held asset is a misc file; the menu hides the corresponding
-  // slice for other types so the prop is effectively unused then.
   onDownloadHeld?: () => void;
+  isMuted?: boolean;
+  onToggleMute?: () => void;
 }
 
 /**
@@ -116,7 +108,9 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   onDestroy,
   onDuplicate,
   onSaveHeld,
-  onDownloadHeld
+  onDownloadHeld,
+  isMuted = false,
+  onToggleMute
 }) => {
   // 'held' is a third tab only reachable when isHeld is true. The hub
   // click handler filters it out of the cycle when isHeld is false.
@@ -200,13 +194,14 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const rIn = 45;
   const rOut = 115;
 
-  // Symmetrical 5 slices with 10 degree gap
+  // Symmetrical 6 slices with 10 degree gap around 360 degrees
   const slices = [
-    { id: 'undo', start: -67, end: -5, label: 'Undo' },
-    { id: 'redo', start: 5, end: 67, label: 'Redo' },
-    { id: 'right', start: 77, end: 139, label: 'Right' },
-    { id: 'bottom', start: 149, end: 211, label: 'Bottom' },
-    { id: 'left', start: 221, end: 283, label: 'Left' },
+    { id: 'top', start: -25, end: 25, label: 'Mute' },
+    { id: 'redo', start: 35, end: 85, label: 'Redo' },
+    { id: 'right', start: 95, end: 145, label: 'Right' },
+    { id: 'bottom', start: 155, end: 205, label: 'Bottom' },
+    { id: 'left', start: 215, end: 265, label: 'Left' },
+    { id: 'undo', start: 275, end: 325, label: 'Undo' },
   ];
 
   const dx = virtualCursor.x - 180;
@@ -216,8 +211,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
 
   if (dist >= 36 && dist <= 160) {
     let angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
-    if (angleDeg > 290) angleDeg -= 360;
-    else if (angleDeg < -70) angleDeg += 360;
+    if (angleDeg > 335) angleDeg -= 360;
+    else if (angleDeg < -35) angleDeg += 360;
 
     for (let i = 0; i < slices.length; i++) {
       const s = slices[i];
@@ -236,7 +231,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const triggerSliceAction = (index: number) => {
     const slice = slices[index];
     if (!slice) return;
-    if (slice.id === 'undo') { onUndo?.(); onClose(); }
+    if (slice.id === 'top') { onToggleMute?.(); onClose(); }
+    else if (slice.id === 'undo') { onUndo?.(); onClose(); }
     else if (slice.id === 'redo') { onRedo?.(); onClose(); }
     else if (slice.id === 'right') {
       if (activeTab === 'general') handleNextLocomotion();
@@ -343,7 +339,12 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
             let iconElement: React.ReactNode = null;
             let onClickAction = () => {};
 
-            if (slice.id === 'undo') {
+            if (slice.id === 'top') {
+              strokeColor = isMuted ? '#ef4444' : '#10b981';
+              filterStyle = isMuted ? 'drop-shadow(0 0 10px rgba(239, 68, 68, 0.45))' : 'drop-shadow(0 0 10px rgba(16, 185, 129, 0.45))';
+              iconElement = isMuted ? <MicOff className="w-6 h-6 text-rose-400" /> : <Mic className="w-6 h-6 text-emerald-400" />;
+              onClickAction = () => { onToggleMute?.(); onClose(); };
+            } else if (slice.id === 'undo') {
               strokeColor = isHovered ? '#a3a3a3' : '#525252';
               iconElement = <Undo2 className="w-6 h-6 text-slate-300" />;
               onClickAction = () => { onUndo?.(); onClose(); };

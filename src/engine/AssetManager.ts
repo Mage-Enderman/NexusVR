@@ -110,6 +110,7 @@ export class AssetManager {
   
   public assets: Map<string, LoadedAsset> = new Map();
   private pendingLiveStreams: Map<string, MediaStream> = new Map();
+  private videoTickCallbacks: Map<string, () => void> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
   private onAssetRemovedCallbacks: Set<(id: string) => void> = new Set();
   // In-progress import dedup. Concurrent calls to `importFile` /
@@ -193,6 +194,20 @@ export class AssetManager {
     this.videoStreamingService = videoStreamingService ?? null;
     void this.videoStreamingService;
     void AssetManager.LOCAL_MSE_BYTES;
+  }
+
+  /**
+   * Per-frame update called by SceneEngine loop.
+   * Ensures VideoTexture and CanvasTexture draw/upload callbacks execute
+   * during WebXR immersive VR sessions where window.requestAnimationFrame
+   * and requestVideoFrameCallback are suspended by the browser.
+   */
+  public update(_delta: number, _elapsed: number): void {
+    if (this.videoTickCallbacks.size > 0) {
+      for (const cb of this.videoTickCallbacks.values()) {
+        try { cb(); } catch { /* ignore */ }
+      }
+    }
   }
 
   /**
@@ -918,6 +933,32 @@ export class AssetManager {
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = false;
     }
+
+    this.videoTickCallbacks.set(id, () => {
+      if (downscalePlan.downscale && canvasCtx && canvasEl) {
+        if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+          const vw = video.videoWidth, vh = video.videoHeight;
+          const canvasAspect = canvasEl.width / canvasEl.height;
+          const videoAspect = vw / vh;
+          let dw: number, dh: number;
+          if (videoAspect > canvasAspect) {
+            dw = canvasEl.width;
+            dh = Math.round(canvasEl.width / videoAspect);
+          } else {
+            dh = canvasEl.height;
+            dw = Math.round(canvasEl.height * videoAspect);
+          }
+          try {
+            canvasCtx.drawImage(video, 0, 0, dw, dh);
+            (texture as THREE.CanvasTexture).needsUpdate = true;
+          } catch {
+            /* ignore */
+          }
+        }
+      } else if (video.readyState >= 2) {
+        texture.needsUpdate = true;
+      }
+    });
     // Stash the rVfcHandle + canvas element on userData so removeAsset
     // can cancel the callback and dispose the canvas. See dispose
     // path at the bottom of the file for the consumer.
@@ -1274,6 +1315,7 @@ export class AssetManager {
       rVfcHandle = requestAnimationFrame(drawLoop);
     };
     rVfcHandle = requestAnimationFrame(drawLoop);
+    this.videoTickCallbacks.set(id, drawLoop);
 
     videoElement.addEventListener('loadedmetadata', () => {
       videoState.duration = Number.isFinite(videoElement.duration) ? videoElement.duration : 0;
@@ -1337,8 +1379,16 @@ export class AssetManager {
       return true;
     }
     console.log('[AssetManager] Attaching live WebRTC MediaStream immediately to asset:', assetId);
-    asset.videoElement.srcObject = stream;
-    asset.videoElement.play().catch(() => {});
+    const ve = asset.videoElement;
+    ve.srcObject = stream;
+    ve.muted = true;
+    ve.playsInline = true;
+    const attemptPlay = () => {
+      ve.play().catch(() => {});
+    };
+    attemptPlay();
+    ve.addEventListener('loadedmetadata', attemptPlay, { once: true });
+    ve.addEventListener('canplay', attemptPlay, { once: true });
     return true;
   }
 
@@ -1826,6 +1876,7 @@ export class AssetManager {
       asset.videoElement.src = '';
     }
 
+    this.videoTickCallbacks.delete(id);
     this.assets.delete(id);
     for (const cb of this.onAssetRemovedCallbacks) cb(id);
   }
@@ -1847,13 +1898,81 @@ export class AssetManager {
     if (blob) URL.revokeObjectURL(url);
   }
 
-  public static applyMaterialUpdate(asset: LoadedAsset, update: MaterialUpdate): void {
-    if (!asset || !asset.object3d) return;
+  public static applyMaterialUpdate(
+    asset: LoadedAsset,
+    update: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>
+  ): void {
+    if (!asset || !asset.object3d || !update) return;
 
-    asset.object3d.userData.materialState = {
-      ...((asset.object3d.userData.materialState as MaterialUpdate) || {}),
-      ...update
-    };
+    const updatesList: MaterialUpdate[] = [];
+    if (Array.isArray(update)) {
+      updatesList.push(...update);
+    } else if (typeof update === 'object') {
+      if (
+        'assetId' in update ||
+        'materialIndex' in update ||
+        'color' in update ||
+        'map' in update ||
+        'roughness' in update ||
+        'metalness' in update ||
+        'emissive' in update ||
+        'opacity' in update ||
+        'normalMap' in update ||
+        'roughnessMap' in update ||
+        'metalnessMap' in update
+      ) {
+        updatesList.push(update as MaterialUpdate);
+      } else {
+        Object.values(update).forEach((v) => {
+          if (v && typeof v === 'object') updatesList.push(v as MaterialUpdate);
+        });
+      }
+    }
+    if (updatesList.length === 0) return;
+
+    const stateMap: Record<string, MaterialUpdate> = {};
+    const existing = asset.object3d.userData.materialState;
+    if (existing) {
+      if (Array.isArray(existing)) {
+        existing.forEach((item) => {
+          if (item && typeof item === 'object') {
+            const key = item.materialIndex !== undefined ? String(item.materialIndex) : 'all';
+            stateMap[key] = { ...(stateMap[key] || {}), ...item };
+          }
+        });
+      } else if (typeof existing === 'object') {
+        if (
+          'assetId' in existing ||
+          'materialIndex' in existing ||
+          'color' in existing ||
+          'map' in existing ||
+          'roughness' in existing ||
+          'metalness' in existing ||
+          'emissive' in existing ||
+          'opacity' in existing
+        ) {
+          const item = existing as MaterialUpdate;
+          const key = item.materialIndex !== undefined ? String(item.materialIndex) : 'all';
+          stateMap[key] = { ...(stateMap[key] || {}), ...item };
+        } else {
+          Object.entries(existing).forEach(([k, v]) => {
+            if (v && typeof v === 'object') {
+              stateMap[k] = { ...(stateMap[k] || {}), ...(v as MaterialUpdate) };
+            }
+          });
+        }
+      }
+    }
+
+    updatesList.forEach((upd) => {
+      const key = upd.materialIndex !== undefined ? String(upd.materialIndex) : 'all';
+      stateMap[key] = {
+        ...(stateMap[key] || { assetId: asset.id, materialIndex: upd.materialIndex }),
+        ...upd
+      };
+    });
+
+    asset.object3d.userData.materialState = stateMap;
 
     const materials: THREE.MeshStandardMaterial[] = [];
     asset.object3d.traverse((child) => {
@@ -1867,61 +1986,63 @@ export class AssetManager {
       }
     });
 
-    const targetMats =
-      typeof update.materialIndex === 'number' && update.materialIndex >= 0 && materials[update.materialIndex]
-        ? [materials[update.materialIndex]]
-        : materials;
+    updatesList.forEach((upd) => {
+      const targetMats =
+        typeof upd.materialIndex === 'number' && upd.materialIndex >= 0 && materials[upd.materialIndex]
+          ? [materials[upd.materialIndex]]
+          : materials;
 
-    targetMats.forEach((m) => {
-      if (update.color !== undefined) m.color.set(update.color);
-      if (update.roughness !== undefined) m.roughness = update.roughness;
-      if (update.metalness !== undefined) m.metalness = update.metalness;
-      if (update.emissive !== undefined) {
-        m.emissive.set(update.emissive);
-        if (update.emissiveIntensity !== undefined) m.emissiveIntensity = update.emissiveIntensity;
-      }
-      if (update.emissiveIntensity !== undefined) m.emissiveIntensity = update.emissiveIntensity;
-      if (update.opacity !== undefined) {
-        m.opacity = update.opacity;
-        m.transparent = update.opacity < 1.0;
-      }
-      if (update.wireframe !== undefined) m.wireframe = update.wireframe;
-      if (update.flatShading !== undefined) {
-        m.flatShading = update.flatShading;
-        m.needsUpdate = true;
-      }
-      if (update.normalScale !== undefined) {
-        if (!m.normalScale) m.normalScale = new THREE.Vector2(1, 1);
-        m.normalScale.set(update.normalScale, update.normalScale);
-        m.needsUpdate = true;
-      }
-      if (update.aoMapIntensity !== undefined) {
-        m.aoMapIntensity = update.aoMapIntensity;
-        m.needsUpdate = true;
-      }
-    });
-
-    const slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap'] as const;
-    slots.forEach((slotName) => {
-      const url = update[slotName];
-      if (url === null) {
-        targetMats.forEach((m) => {
-          (m as any)[slotName] = null;
+      targetMats.forEach((m) => {
+        if (upd.color !== undefined) m.color.set(upd.color);
+        if (upd.roughness !== undefined) m.roughness = upd.roughness;
+        if (upd.metalness !== undefined) m.metalness = upd.metalness;
+        if (upd.emissive !== undefined) {
+          m.emissive.set(upd.emissive);
+          if (upd.emissiveIntensity !== undefined) m.emissiveIntensity = upd.emissiveIntensity;
+        }
+        if (upd.emissiveIntensity !== undefined) m.emissiveIntensity = upd.emissiveIntensity;
+        if (upd.opacity !== undefined) {
+          m.opacity = upd.opacity;
+          m.transparent = upd.opacity < 1.0;
+        }
+        if (upd.wireframe !== undefined) m.wireframe = upd.wireframe;
+        if (upd.flatShading !== undefined) {
+          m.flatShading = upd.flatShading;
           m.needsUpdate = true;
-        });
-      } else if (typeof url === 'string' && url.length > 0) {
-        new THREE.TextureLoader().load(url, (tex) => {
-          tex.wrapS = THREE.RepeatWrapping;
-          tex.wrapT = THREE.RepeatWrapping;
-          if (slotName === 'map' || slotName === 'emissiveMap') {
-            tex.colorSpace = THREE.SRGBColorSpace;
-          }
+        }
+        if (upd.normalScale !== undefined) {
+          if (!m.normalScale) m.normalScale = new THREE.Vector2(1, 1);
+          m.normalScale.set(upd.normalScale, upd.normalScale);
+          m.needsUpdate = true;
+        }
+        if (upd.aoMapIntensity !== undefined) {
+          m.aoMapIntensity = upd.aoMapIntensity;
+          m.needsUpdate = true;
+        }
+      });
+
+      const slots = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap'] as const;
+      slots.forEach((slotName) => {
+        const url = upd[slotName];
+        if (url === null) {
           targetMats.forEach((m) => {
-            (m as any)[slotName] = tex;
+            (m as any)[slotName] = null;
             m.needsUpdate = true;
           });
-        });
-      }
+        } else if (typeof url === 'string' && url.length > 0) {
+          new THREE.TextureLoader().load(url, (tex) => {
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            if (slotName === 'map' || slotName === 'emissiveMap') {
+              tex.colorSpace = THREE.SRGBColorSpace;
+            }
+            targetMats.forEach((m) => {
+              (m as any)[slotName] = tex;
+              m.needsUpdate = true;
+            });
+          });
+        }
+      });
     });
   }
 }

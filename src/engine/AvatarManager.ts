@@ -214,7 +214,7 @@ export class PeerAvatar {
 export class AvatarManager {
   private scene: THREE.Scene;
   private worldRoot: THREE.Object3D;
-  private audioListener: THREE.AudioListener;
+  public audioListener: THREE.AudioListener;
   private gltfLoader: GLTFLoader;
   public peers: Map<string, PeerAvatar> = new Map();
   public localVrmUrl: string | null = null;

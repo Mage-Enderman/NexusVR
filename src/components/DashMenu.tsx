@@ -3,15 +3,19 @@ import type { UserRole, DefaultPermissionsConfig } from '../types/permissions.ts
 import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryItem } from '../services/InventoryService.ts';
+import type { GraphicsSettings, PerformanceStats } from '../engine/SceneEngine.ts';
 import { 
   Shield, Users, Key, Settings as SettingsIcon, Package, HelpCircle, 
   X, Volume2, VolumeX, RefreshCw, Navigation, UserX, AlertTriangle, 
-  Check, Sparkles
+  Check, Sparkles, Trash2, Edit2, FolderPlus, Folder, FolderInput, ChevronDown,
+  Mic, MicOff, Monitor, Eye, Sliders, Cpu, User
 } from 'lucide-react';
 
 export interface DashMenuProps {
   isOpen: boolean;
   onClose: () => void;
+  userName?: string;
+  onUpdateUserName?: (name: string) => void;
   networkService: NetworkService;
   localRole: UserRole;
   onUpdateRole: (targetPeerId: string, newRole: UserRole) => void;
@@ -19,14 +23,32 @@ export interface DashMenuProps {
   defaultConfig: DefaultPermissionsConfig;
   onUpdateDefaultConfig: (config: DefaultPermissionsConfig) => void;
   inventoryItems: InventoryItem[];
+  inventoryFolders?: string[];
   onSpawnItem: (item: InventoryItem) => void;
   onEquipVrm: (item: InventoryItem) => void;
-  onOpenFullSettings: () => void;
+  onDeleteInventoryItem?: (id: string) => void;
+  onRenameInventoryItem?: (id: string, newName: string) => void;
+  onCreateInventoryFolder?: (folderName: string) => void;
+  onMoveInventoryItem?: (id: string, folder?: string) => void;
+  onRenameInventoryFolder?: (oldName: string, newName: string) => void;
+  onDeleteInventoryFolder?: (folderName: string) => void;
+  onMoveInventoryFolder?: (folderName: string, targetParent?: string) => void;
+  onOpenFullSettings?: () => void;
+  graphicsSettings?: GraphicsSettings;
+  performanceStats?: PerformanceStats;
+  onUpdateGraphicsSettings?: (newSettings: Partial<GraphicsSettings>) => void;
+  audioDevices?: MediaDeviceInfo[];
+  selectedAudioDeviceId?: string;
+  onSelectAudioDevice?: (deviceId: string) => void;
+  isMuted?: boolean;
+  onToggleMute?: () => void;
 }
 
 export const DashMenu: React.FC<DashMenuProps> = ({
   isOpen,
   onClose,
+  userName = 'Traveler',
+  onUpdateUserName,
   networkService,
   localRole,
   onUpdateRole,
@@ -34,12 +56,44 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   defaultConfig,
   onUpdateDefaultConfig,
   inventoryItems,
+  inventoryFolders = [],
   onSpawnItem,
   onEquipVrm,
-  onOpenFullSettings
+  onDeleteInventoryItem,
+  onRenameInventoryItem,
+  onCreateInventoryFolder,
+  onMoveInventoryItem,
+  onRenameInventoryFolder,
+  onDeleteInventoryFolder,
+  onMoveInventoryFolder,
+  graphicsSettings,
+  performanceStats,
+  onUpdateGraphicsSettings,
+  audioDevices = [],
+  selectedAudioDeviceId,
+  onSelectAudioDevice,
+  isMuted,
+  onToggleMute
 }) => {
   const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'controls'>('session');
   const [sessionSubTab, setSessionSubTab] = useState<'users' | 'permissions'>('users');
+  const [dashNameInput, setDashNameInput] = useState<string>(userName);
+
+  React.useEffect(() => {
+    setDashNameInput(userName);
+  }, [userName]);
+
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [activeFolderFilter, setActiveFolderFilter] = useState<string>('all');
+  const [isRenaming, setIsRenaming] = useState<boolean>(false);
+  const [renameInput, setRenameInput] = useState<string>('');
+  const [isCreatingFolder, setIsCreatingFolder] = useState<boolean>(false);
+  const [folderNameInput, setFolderNameInput] = useState<string>('');
+  const [showMoveDropdown, setShowMoveDropdown] = useState<boolean>(false);
+
+  const [isRenamingFolder, setIsRenamingFolder] = useState<boolean>(false);
+  const [folderRenameInput, setFolderRenameInput] = useState<string>('');
+  const [showFolderMoveDropdown, setShowFolderMoveDropdown] = useState<boolean>(false);
 
   if (!isOpen) return null;
 
@@ -143,13 +197,13 @@ export const DashMenu: React.FC<DashMenuProps> = ({
             </button>
 
             <button
-              onClick={() => { setActiveTab('settings'); onOpenFullSettings(); }}
+              onClick={() => setActiveTab('settings')}
               className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'settings' ? 'dash-tab-active-amber' : 'dash-tab'}`}
             >
               <SettingsIcon className="w-5 h-5 text-amber-400" />
               <div className="flex-1">
-                <div>World Settings</div>
-                <div className="text-[10px] text-slate-500 font-normal">Graphics & Environment</div>
+                <div>Settings & Audio</div>
+                <div className="text-[10px] text-slate-500 font-normal">Graphics, Mic & Environment</div>
               </div>
             </button>
 
@@ -366,98 +420,523 @@ export const DashMenu: React.FC<DashMenuProps> = ({
             )}
 
             {/* INVENTORY TAB */}
-            {activeTab === 'inventory' && (
-              <div className="space-y-6">
-                <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-                  <div>
-                    <h3 className="font-bold text-white text-base">Quick Asset Spawn</h3>
-                    <p className="text-xs text-slate-400">Select an item from your inventory or primitives to spawn directly into the scene.</p>
-                  </div>
-                  {!permissions.canSpawnItems && (
-                    <span className="px-3 py-1 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5">
-                      <AlertTriangle className="w-4 h-4" /> Spawning Disabled by Role
-                    </span>
-                  )}
-                </div>
+            {activeTab === 'inventory' && (() => {
+              const primitiveItems: InventoryItem[] = ['cube', 'sphere', 'cylinder', 'torus', 'cone'].map((prim) => ({
+                id: `prim-${prim}`,
+                name: `Primitive (${prim.toUpperCase()})`,
+                type: 'primitive',
+                primitiveType: prim as any,
+                createdAt: 0
+              }));
 
-                <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 gap-2.5 pb-4">
-                  {/* Default primitives */}
-                  {['cube', 'sphere', 'cylinder', 'torus', 'cone'].map((prim) => (
-                    <div
-                      key={prim}
-                      onClick={() => {
-                        if (permissions.canSpawnItems) {
-                          onSpawnItem({
-                            id: `prim-${prim}`,
-                            name: `Primitive (${prim.toUpperCase()})`,
-                            type: 'primitive',
-                            primitiveType: prim as any,
-                            createdAt: Date.now()
-                          });
-                          onClose();
-                        }
-                      }}
-                      className={`p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1.5 text-center transition ${
-                        permissions.canSpawnItems
-                          ? 'bg-slate-800/60 hover:bg-slate-700/80 border-slate-700 hover:border-cyan-500/60 cursor-pointer shadow-sm'
-                          : 'bg-slate-900/40 border-slate-800 opacity-50 cursor-not-allowed'
-                      }`}
-                    >
-                      <div className="w-10 h-10 rounded-lg bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300 font-extrabold uppercase text-[10px]">
-                        {prim.slice(0, 4)}
-                      </div>
-                      <span className="text-xs font-bold text-white capitalize truncate w-full">{prim}</span>
-                      <span className="text-[9px] text-cyan-400 font-mono font-semibold">SHAPE</span>
+              const allDisplayItems: InventoryItem[] = [...primitiveItems, ...inventoryItems];
+              const availableFolders = Array.from(
+                new Set([
+                  ...inventoryFolders,
+                  ...(inventoryItems.map((i) => i.folder).filter(Boolean) as string[])
+                ])
+              ).sort();
+
+              const selectedItem = allDisplayItems.find((i) => i.id === selectedItemId) || null;
+              const selectedFolder = selectedItemId?.startsWith('folder:') ? selectedItemId.slice(7) : null;
+              const isSelectedPrimitive = selectedItem?.id.startsWith('prim-') ?? false;
+              const isCustomFolderActive = activeFolderFilter !== 'all' && activeFolderFilter !== 'primitives' && activeFolderFilter !== 'root';
+
+              const filteredDisplayItems = allDisplayItems.filter((item) => {
+                if (activeFolderFilter === 'all') return true;
+                if (activeFolderFilter === 'primitives') return item.id.startsWith('prim-');
+                if (activeFolderFilter === 'root') return !item.id.startsWith('prim-') && !item.folder;
+                return item.folder === activeFolderFilter;
+              });
+
+              const handleTriggerSpawn = (item: InventoryItem) => {
+                if (item.type === 'vrm') {
+                  onEquipVrm(item);
+                  onClose();
+                } else if (permissions.canSpawnItems) {
+                  onSpawnItem(item);
+                  onClose();
+                }
+              };
+
+              return (
+                <div className="space-y-4">
+                  {/* Header & Main Action Toolbar */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                    <div>
+                      <h3 className="font-bold text-white text-base">Quick Inventory & Asset Spawn</h3>
+                      <p className="text-xs text-slate-400">Select an item or folder to manage it, or double-click to spawn/open.</p>
                     </div>
-                  ))}
 
-                  {/* Stored inventory items & tools */}
-                  {inventoryItems.map((item) => {
-                    const displayName =
-                      item.name === 'Primitive' && item.primitiveType ? `Shape: ${item.primitiveType}` :
-                      item.name === 'Tool' && item.toolType ? `Tool: ${item.toolType}` :
-                      item.name || 'Unnamed Asset';
+                    {/* Action Buttons Toolbar */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => selectedItem && handleTriggerSpawn(selectedItem)}
+                        disabled={!selectedItem || !permissions.canSpawnItems}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition shadow-md ${
+                          selectedItem && permissions.canSpawnItems
+                            ? 'bg-gradient-to-r from-cyan-500 to-emerald-600 hover:from-cyan-400 hover:to-emerald-500 text-white shadow-cyan-500/20'
+                            : 'bg-slate-800/60 text-slate-500 border border-slate-700/60 cursor-not-allowed'
+                        }`}
+                        title="Spawn selected asset into the scene"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Spawn
+                      </button>
 
-                    const typeLabel =
-                      item.type === 'vrm' ? 'Avatar' :
-                      item.type === 'tool' ? `${item.toolType || 'Tool'}` :
-                      item.type === 'primitive' ? `${item.primitiveType || 'Shape'}` :
-                      'Asset';
-
-                    return (
-                      <div
-                        key={item.id}
+                      <button
                         onClick={() => {
-                          if (item.type === 'vrm') {
-                            onEquipVrm(item);
-                            onClose();
-                          } else if (item.type === 'tool') {
-                            onSpawnItem(item);
-                            onClose();
-                          } else if (permissions.canSpawnItems) {
-                            onSpawnItem(item);
-                            onClose();
+                          if (selectedFolder) {
+                            setIsRenamingFolder(true);
+                            setFolderRenameInput(selectedFolder);
+                            setIsRenaming(false);
+                          } else if (selectedItem && !isSelectedPrimitive) {
+                            setIsRenaming(true);
+                            setRenameInput(selectedItem.name);
+                            setIsRenamingFolder(false);
                           }
                         }}
-                        className="p-2.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/80 border border-slate-700 hover:border-emerald-500/60 cursor-pointer flex flex-col items-center justify-center gap-1.5 text-center transition shadow-sm"
+                        disabled={(!selectedItem || isSelectedPrimitive) && !selectedFolder}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                          selectedFolder || (selectedItem && !isSelectedPrimitive)
+                            ? 'bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-slate-500'
+                            : 'bg-slate-900/40 text-slate-600 border-slate-800 cursor-not-allowed'
+                        }`}
+                        title="Rename selected asset or folder"
                       >
-                        <div className={`w-10 h-10 rounded-lg border flex items-center justify-center font-extrabold uppercase text-[10px] overflow-hidden ${
-                          item.type === 'tool' ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' :
-                          item.type === 'primitive' ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300' :
-                          'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                        }`}>
-                          {item.previewUrl ? <img src={item.previewUrl} alt="" className="w-full h-full object-cover" /> : (item.toolType || item.primitiveType || item.type)?.slice(0, 4)}
-                        </div>
-                        <span className="text-xs font-bold text-white truncate w-full" title={displayName}>{displayName}</span>
-                        <span className="text-[9px] text-slate-400 uppercase font-mono font-semibold truncate w-full">
-                          {typeLabel}
-                        </span>
+                        <Edit2 className="w-3.5 h-3.5" />
+                        Rename
+                      </button>
+
+                      <div className="relative">
+                        <button
+                          onClick={() => {
+                            if (selectedFolder) {
+                              setShowFolderMoveDropdown(!showFolderMoveDropdown);
+                            } else if (selectedItem && !isSelectedPrimitive) {
+                              setShowMoveDropdown(!showMoveDropdown);
+                            }
+                          }}
+                          disabled={(!selectedItem || isSelectedPrimitive) && !selectedFolder}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                            selectedFolder || (selectedItem && !isSelectedPrimitive)
+                              ? 'bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-slate-500'
+                              : 'bg-slate-900/40 text-slate-600 border-slate-800 cursor-not-allowed'
+                          }`}
+                          title="Move selected asset or folder"
+                        >
+                          <FolderInput className="w-3.5 h-3.5" />
+                          Move
+                          <ChevronDown className="w-3 h-3 ml-0.5" />
+                        </button>
+
+                        {showMoveDropdown && selectedItem && !isSelectedPrimitive && (
+                          <div className="absolute right-0 mt-1.5 w-44 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-1.5 z-30 animate-in fade-in duration-150">
+                            <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Move to folder</div>
+                            <button
+                              onClick={() => {
+                                onMoveInventoryItem?.(selectedItem.id, undefined);
+                                setShowMoveDropdown(false);
+                              }}
+                              className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2"
+                            >
+                              <Folder className="w-3.5 h-3.5 text-slate-500" />
+                              (Root / No Folder)
+                            </button>
+                            {availableFolders.map((f) => (
+                              <button
+                                key={f}
+                                onClick={() => {
+                                  onMoveInventoryItem?.(selectedItem.id, f);
+                                  setShowMoveDropdown(false);
+                                }}
+                                className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2 truncate"
+                              >
+                                <Folder className="w-3.5 h-3.5 text-cyan-400" />
+                                {f}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {showFolderMoveDropdown && selectedFolder && (
+                          <div className="absolute right-0 mt-1.5 w-48 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-1.5 z-30 animate-in fade-in duration-150">
+                            <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Move folder inside...</div>
+                            <button
+                              onClick={() => {
+                                onMoveInventoryFolder?.(selectedFolder, undefined);
+                                setShowFolderMoveDropdown(false);
+                              }}
+                              className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2"
+                            >
+                              <Folder className="w-3.5 h-3.5 text-slate-500" />
+                              (Root Level)
+                            </button>
+                            {availableFolders.filter(f => f !== selectedFolder && !f.startsWith(`${selectedFolder}/`)).map(f => (
+                              <button
+                                key={f}
+                                onClick={() => {
+                                  onMoveInventoryFolder?.(selectedFolder, f);
+                                  setShowFolderMoveDropdown(false);
+                                }}
+                                className="w-full text-left px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2 truncate"
+                              >
+                                <Folder className="w-3.5 h-3.5 text-cyan-400" />
+                                {f}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    );
-                  })}
+
+                      <button
+                        onClick={() => {
+                          setIsCreatingFolder(true);
+                          setFolderNameInput('');
+                          setIsRenaming(false);
+                          setIsRenamingFolder(false);
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800/80 hover:bg-slate-700 text-cyan-300 border border-cyan-500/30 hover:border-cyan-500 transition"
+                        title="Create a new folder for organization"
+                      >
+                        <FolderPlus className="w-3.5 h-3.5" />
+                        New Folder
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          if (selectedFolder) {
+                            onDeleteInventoryFolder?.(selectedFolder);
+                            setSelectedItemId(null);
+                          } else if (selectedItem && !isSelectedPrimitive) {
+                            onDeleteInventoryItem?.(selectedItem.id);
+                            setSelectedItemId(null);
+                          }
+                        }}
+                        disabled={(!selectedItem || isSelectedPrimitive) && !selectedFolder}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                          selectedFolder || (selectedItem && !isSelectedPrimitive)
+                            ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border-rose-500/40 hover:border-rose-400'
+                            : 'bg-slate-900/40 text-slate-600 border-slate-800 cursor-not-allowed'
+                        }`}
+                        title="Delete selected asset or folder"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Active Folder Navigation Breadcrumb */}
+                  {isCustomFolderActive && (
+                    <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-800/60 border border-slate-700">
+                      <div className="flex items-center gap-2">
+                        <Folder className="w-4 h-4 text-cyan-400" />
+                        <span className="text-xs font-bold text-white">Viewing Folder: <span className="text-cyan-300">{activeFolderFilter}</span></span>
+                      </div>
+                      <button
+                        onClick={() => setActiveFolderFilter('all')}
+                        className="px-2.5 py-1 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-xs font-bold text-slate-200"
+                      >
+                        ← Back to All Items
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Inline Dialogs for Rename Item, Rename Folder & Create Folder */}
+                  {isRenaming && selectedItem && (
+                    <div className="p-3 rounded-xl bg-slate-800/90 border border-cyan-500/40 flex flex-wrap items-center gap-3 animate-in fade-in duration-150">
+                      <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                        <Edit2 className="w-3.5 h-3.5" /> Rename Item:
+                      </span>
+                      <input
+                        type="text"
+                        value={renameInput}
+                        onChange={(e) => setRenameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && renameInput.trim()) {
+                            onRenameInventoryItem?.(selectedItem.id, renameInput.trim());
+                            setIsRenaming(false);
+                          } else if (e.key === 'Escape') {
+                            setIsRenaming(false);
+                          }
+                        }}
+                        className="flex-1 min-w-[180px] bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                        placeholder="Enter new asset name..."
+                        autoFocus
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (renameInput.trim()) {
+                              onRenameInventoryItem?.(selectedItem.id, renameInput.trim());
+                              setIsRenaming(false);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setIsRenaming(false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {isRenamingFolder && (selectedFolder || isCustomFolderActive) && (
+                    <div className="p-3 rounded-xl bg-slate-800/90 border border-cyan-500/40 flex flex-wrap items-center gap-3 animate-in fade-in duration-150">
+                      <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                        <Edit2 className="w-3.5 h-3.5" /> Rename Folder:
+                      </span>
+                      <input
+                        type="text"
+                        value={folderRenameInput}
+                        onChange={(e) => setFolderRenameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          const targetFolder = selectedFolder || activeFolderFilter;
+                          if (e.key === 'Enter' && folderRenameInput.trim() && targetFolder) {
+                            onRenameInventoryFolder?.(targetFolder, folderRenameInput.trim());
+                            if (activeFolderFilter === targetFolder) {
+                              setActiveFolderFilter(folderRenameInput.trim());
+                            }
+                            setIsRenamingFolder(false);
+                          } else if (e.key === 'Escape') {
+                            setIsRenamingFolder(false);
+                          }
+                        }}
+                        className="flex-1 min-w-[180px] bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                        placeholder="New folder name..."
+                        autoFocus
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            const targetFolder = selectedFolder || activeFolderFilter;
+                            if (folderRenameInput.trim() && targetFolder) {
+                              onRenameInventoryFolder?.(targetFolder, folderRenameInput.trim());
+                              if (activeFolderFilter === targetFolder) {
+                                setActiveFolderFilter(folderRenameInput.trim());
+                              }
+                              setIsRenamingFolder(false);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setIsRenamingFolder(false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {isCreatingFolder && (
+                    <div className="p-3 rounded-xl bg-slate-800/90 border border-cyan-500/40 flex flex-wrap items-center gap-3 animate-in fade-in duration-150">
+                      <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                        <FolderPlus className="w-3.5 h-3.5" /> Create Folder:
+                      </span>
+                      <input
+                        type="text"
+                        value={folderNameInput}
+                        onChange={(e) => setFolderNameInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && folderNameInput.trim()) {
+                            onCreateInventoryFolder?.(folderNameInput.trim());
+                            setIsCreatingFolder(false);
+                          } else if (e.key === 'Escape') {
+                            setIsCreatingFolder(false);
+                          }
+                        }}
+                        className="flex-1 min-w-[180px] bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-500"
+                        placeholder="Folder name (e.g. Avatars, Props, Tools)..."
+                        autoFocus
+                      />
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (folderNameInput.trim()) {
+                              onCreateInventoryFolder?.(folderNameInput.trim());
+                              setIsCreatingFolder(false);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs"
+                        >
+                          Create
+                        </button>
+                        <button
+                          onClick={() => setIsCreatingFolder(false)}
+                          className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold text-xs"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Folder Pills Bar */}
+                  <div className="flex flex-wrap items-center gap-1.5 pb-2">
+                    <button
+                      onClick={() => setActiveFolderFilter('all')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                        activeFolderFilter === 'all'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                          : 'bg-slate-800/50 text-slate-400 hover:text-white border border-transparent'
+                      }`}
+                    >
+                      All Items ({allDisplayItems.length})
+                    </button>
+
+                    <button
+                      onClick={() => setActiveFolderFilter('primitives')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                        activeFolderFilter === 'primitives'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                          : 'bg-slate-800/50 text-slate-400 hover:text-white border border-transparent'
+                      }`}
+                    >
+                      Primitives ({primitiveItems.length})
+                    </button>
+
+                    <button
+                      onClick={() => setActiveFolderFilter('root')}
+                      className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                        activeFolderFilter === 'root'
+                          ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                          : 'bg-slate-800/50 text-slate-400 hover:text-white border border-transparent'
+                      }`}
+                    >
+                      Unsorted ({inventoryItems.filter((i) => !i.folder).length})
+                    </button>
+
+                    {availableFolders.map((f) => {
+                      const count = inventoryItems.filter((i) => i.folder === f).length;
+                      return (
+                        <button
+                          key={f}
+                          onClick={() => setActiveFolderFilter(f)}
+                          className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+                            activeFolderFilter === f
+                              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                              : 'bg-slate-800/50 text-slate-400 hover:text-white border border-transparent'
+                          }`}
+                        >
+                          <Folder className="w-3.5 h-3.5 text-cyan-400" />
+                          {f} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Grid of Folders & Items */}
+                  <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 gap-2.5 pb-4 max-h-[420px] overflow-y-auto pr-1">
+                    {/* Render Folder Cards when viewing All Items or Root */}
+                    {(activeFolderFilter === 'all' || activeFolderFilter === 'root') &&
+                      availableFolders.map((f) => {
+                        const isFolderSelected = selectedItemId === `folder:${f}`;
+                        const count = inventoryItems.filter((i) => i.folder === f).length;
+                        return (
+                          <div
+                            key={`folder-card-${f}`}
+                            onClick={() => setSelectedItemId(`folder:${f}`)}
+                            onDoubleClick={() => setActiveFolderFilter(f)}
+                            className={`relative p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1.5 text-center transition cursor-pointer select-none shadow-sm ${
+                              isFolderSelected
+                                ? 'bg-cyan-500/20 border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.3)] scale-[1.03]'
+                                : 'bg-slate-800/80 hover:bg-slate-700 border-slate-700/80 hover:border-cyan-500/60'
+                            }`}
+                          >
+                            {isFolderSelected && (
+                              <div className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-cyan-500 text-slate-950 flex items-center justify-center shadow">
+                                <Check className="w-2.5 h-2.5 stroke-[3]" />
+                              </div>
+                            )}
+
+                            <div className="w-10 h-10 rounded-lg bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center text-cyan-300">
+                              <Folder className="w-6 h-6" />
+                            </div>
+                            <span className="text-xs font-bold text-white truncate w-full" title={f}>
+                              {f}
+                            </span>
+                            <span className="text-[9px] text-cyan-400 font-mono font-semibold">
+                              FOLDER ({count})
+                            </span>
+                          </div>
+                        );
+                      })}
+
+                    {filteredDisplayItems.map((item) => {
+                      const isPrim = item.id.startsWith('prim-');
+                      const isSelected = selectedItemId === item.id;
+
+                      const displayName =
+                        item.name === 'Primitive' && item.primitiveType
+                          ? `Shape: ${item.primitiveType}`
+                          : item.name === 'Tool' && item.toolType
+                          ? `Tool: ${item.toolType}`
+                          : item.name || 'Unnamed Asset';
+
+                      const typeLabel =
+                        item.type === 'vrm'
+                          ? 'Avatar'
+                          : item.type === 'tool'
+                          ? `${item.toolType || 'Tool'}`
+                          : item.type === 'primitive'
+                          ? `${item.primitiveType || 'Shape'}`
+                          : 'Asset';
+
+                      return (
+                        <div
+                          key={item.id}
+                          onClick={() => setSelectedItemId(item.id)}
+                          onDoubleClick={() => handleTriggerSpawn(item)}
+                          className={`relative p-2.5 rounded-xl border flex flex-col items-center justify-center gap-1.5 text-center transition cursor-pointer select-none shadow-sm ${
+                            isSelected
+                              ? 'bg-cyan-500/15 border-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.25)] scale-[1.03]'
+                              : 'bg-slate-800/60 hover:bg-slate-700/80 border-slate-700 hover:border-slate-500'
+                          }`}
+                        >
+                          {isSelected && (
+                            <div className="absolute top-1.5 right-1.5 w-4 h-4 rounded-full bg-cyan-500 text-slate-950 flex items-center justify-center shadow">
+                              <Check className="w-2.5 h-2.5 stroke-[3]" />
+                            </div>
+                          )}
+
+                          <div
+                            className={`w-10 h-10 rounded-lg border flex items-center justify-center font-extrabold uppercase text-[10px] overflow-hidden ${
+                              item.type === 'tool'
+                                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                                : isPrim
+                                ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300'
+                                : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                            }`}
+                          >
+                            {item.previewUrl ? (
+                              <img src={item.previewUrl} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              (item.toolType || item.primitiveType || item.type)?.slice(0, 4)
+                            )}
+                          </div>
+                          <span className="text-xs font-bold text-white truncate w-full" title={displayName}>
+                            {displayName}
+                          </span>
+                          <span className="text-[9px] text-slate-400 uppercase font-mono font-semibold truncate w-full">
+                            {typeLabel}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* CONTROLS GUIDE TAB */}
             {activeTab === 'controls' && (
@@ -530,6 +1009,192 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                     <kbd className="px-3 py-1.5 rounded bg-slate-900 border border-slate-700 text-cyan-400 font-mono text-xs font-bold">TAB</kbd>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* SETTINGS & AUDIO TAB */}
+            {activeTab === 'settings' && (
+              <div className="space-y-6 animate-in fade-in duration-150">
+                <div className="pb-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-white text-base">Audio, Voice & Graphical Settings</h3>
+                    <p className="text-xs text-slate-400">Configure input microphone, voice state, rendering scale, and graphical quality.</p>
+                  </div>
+                  {performanceStats && (
+                    <div className="flex items-center gap-3 bg-slate-900/80 px-3 py-1.5 rounded-xl border border-slate-700">
+                      <div className="flex items-center gap-1.5 text-xs font-mono">
+                        <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                        <span className="text-slate-400">FPS:</span>
+                        <span className={`font-bold ${performanceStats.fps >= 50 ? 'text-emerald-400' : 'text-amber-400'}`}>{performanceStats.fps}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 text-xs font-mono border-l border-slate-700 pl-3">
+                        <Sliders className="w-3.5 h-3.5 text-purple-400" />
+                        <span className="text-slate-400">Draws:</span>
+                        <span className="font-bold text-white">{performanceStats.drawCalls}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* DISPLAY NAME SETTINGS */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-purple-500/30 space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center">
+                      <User className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white">User Display Name</h4>
+                      <p className="text-xs text-slate-400">Change how your name appears to peers in the room</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <input
+                      type="text"
+                      value={dashNameInput}
+                      onChange={(e) => setDashNameInput(e.target.value)}
+                      onBlur={() => onUpdateUserName?.(dashNameInput)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          onUpdateUserName?.(dashNameInput);
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                      placeholder="Enter display name..."
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-purple-400 font-semibold"
+                      maxLength={24}
+                    />
+                    <button
+                      onClick={() => onUpdateUserName?.(dashNameInput)}
+                      className="px-4 py-2 rounded-xl text-xs font-bold bg-purple-500 hover:bg-purple-400 text-slate-950 transition-colors shadow-lg"
+                    >
+                      Save Name
+                    </button>
+                  </div>
+                </div>
+
+                {/* AUDIO & MICROPHONE SETTINGS */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-cyan-500/30 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isMuted ? 'bg-rose-500/20 text-rose-400' : 'bg-emerald-500/20 text-emerald-400'}`}>
+                        {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-white">Microphone & Voice Input</h4>
+                        <p className="text-xs text-slate-400">Status: <span className={isMuted ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}>{isMuted ? 'Muted' : 'Live & Active'}</span></p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => onToggleMute?.()}
+                      className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition shadow-lg ${
+                        isMuted
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                      }`}
+                    >
+                      {isMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
+                      {isMuted ? 'Unmute Mic' : 'Mute Mic'}
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                      Input Microphone Device
+                    </label>
+                    <select
+                      value={selectedAudioDeviceId || ''}
+                      onChange={(e) => onSelectAudioDevice?.(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 text-xs text-white rounded-xl px-3 py-2.5 focus:outline-none focus:border-cyan-500"
+                    >
+                      <option value="">System Default Microphone</option>
+                      {audioDevices?.map((device, i) => (
+                        <option key={device.deviceId || `mic-${i}`} value={device.deviceId}>
+                          {device.label || `Microphone Device ${i + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* GRAPHICAL SETTINGS */}
+                {graphicsSettings && onUpdateGraphicsSettings && (
+                  <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/80 space-y-5">
+                    {/* Resolution Scale */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <Monitor className="w-3.5 h-3.5 text-cyan-400" /> Resolution Scaling / DPI
+                        </label>
+                        <span className="text-xs font-mono font-bold text-cyan-300">{graphicsSettings.resolutionScale}x</span>
+                      </div>
+                      <div className="grid grid-cols-6 gap-2">
+                        {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map((scale) => (
+                          <button
+                            key={scale}
+                            onClick={() => onUpdateGraphicsSettings({ resolutionScale: scale })}
+                            className={`py-2 rounded-xl text-xs font-bold border transition ${
+                              graphicsSettings.resolutionScale === scale
+                                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
+                                : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
+                            }`}
+                          >
+                            {scale}x
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Shadow Quality */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <Eye className="w-3.5 h-3.5 text-purple-400" /> Shadow Quality
+                        </label>
+                        <span className="text-xs font-mono font-bold text-purple-300 capitalize">{graphicsSettings.shadowQuality}</span>
+                      </div>
+                      <div className="grid grid-cols-5 gap-2">
+                        {(['off', 'low', 'medium', 'high', 'ultra'] as const).map((q) => (
+                          <button
+                            key={q}
+                            onClick={() => onUpdateGraphicsSettings({ shadowQuality: q })}
+                            className={`py-2 rounded-xl text-xs font-bold capitalize border transition ${
+                              graphicsSettings.shadowQuality === q
+                                ? 'bg-purple-500/20 text-purple-300 border-purple-500/50'
+                                : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
+                            }`}
+                          >
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Anti-Aliasing */}
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 text-pink-400" /> Anti-Aliasing
+                        </label>
+                        <span className="text-xs font-mono font-bold text-pink-300 uppercase">{graphicsSettings.antiAliasing}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        {(['none', 'fxaa', 'msaa'] as const).map((aa) => (
+                          <button
+                            key={aa}
+                            onClick={() => onUpdateGraphicsSettings({ antiAliasing: aa })}
+                            className={`py-2 rounded-xl text-xs font-bold uppercase border transition ${
+                              graphicsSettings.antiAliasing === aa
+                                ? 'bg-pink-500/20 text-pink-300 border-pink-500/50'
+                                : 'bg-slate-900/60 text-slate-400 border-slate-800 hover:text-white'
+                            }`}
+                          >
+                            {aa}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

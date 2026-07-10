@@ -359,6 +359,7 @@ button {
 .top-4 { top: 1rem; } .left-4 { left: 1rem; } .right-4 { right: 1rem; } .bottom-4 { bottom: 1rem; }
 .top-6 { top: 1.5rem; } .bottom-6 { bottom: 1.5rem; }
 .top-20 { top: 5rem; }
+.bottom-20 { bottom: 5rem; }
 .left-1\/2 { left: 50%; }
 .-translate-x-1\/2 { transform: translateX(-50%); }
 .-translate-y-1\/2 { transform: translateY(-50%); }
@@ -368,8 +369,12 @@ button {
 .z-10 { z-index: 10; }
 .z-20 { z-index: 20; }
 .z-30 { z-index: 30; }
+.z-40 { z-index: 40; }
 .z-50 { z-index: 50; }
 .z-100 { z-index: 100; }
+.max-h-\[380px\] { max-height: 380px; }
+.max-h-\[230px\] { max-height: 230px; }
+.min-h-\[80px\] { min-height: 80px; }
 .overflow-hidden { overflow: hidden; }
 .overflow-y-auto { overflow-y: auto; }
 .overflow-x-hidden { overflow-x: hidden; }

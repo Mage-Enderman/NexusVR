@@ -286,7 +286,11 @@ export class SceneEngine {
       this.vrButtonElement = VRButton.createButton(this.renderer, {
         optionalFeatures: ['local-floor', 'hand-tracking']
       });
-      this.vrButtonElement.style.display = 'none'; // We can trigger it from our custom React HUD
+      this.vrButtonElement.style.opacity = '0';
+      this.vrButtonElement.style.pointerEvents = 'none';
+      this.vrButtonElement.style.position = 'absolute';
+      this.vrButtonElement.style.top = '-9999px';
+      this.vrButtonElement.style.left = '-9999px';
       document.body.appendChild(this.vrButtonElement);
 
       const controllerModelFactory = new XRControllerModelFactory();

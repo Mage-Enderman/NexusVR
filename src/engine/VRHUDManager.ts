@@ -2298,64 +2298,73 @@ export class VRHUDManager {
       ctx.textAlign = 'left';
     }
 
-    // === Alphabet + special keys grid (6 cols x 5 rows = 30 cells) ===
+    // === QWERTY + special keys grid ===
     const gridStartY = msgStartY + maxVisible * msgHeight + 14;
     const gap = 8;
-    const cellW = (w - 80 - 5 * gap) / 6;
-    const cellH = 50;
-    const cells: string[][] = [
-      ['a', 'b', 'c', 'd', 'e', 'f'],
-      ['g', 'h', 'i', 'j', 'k', 'l'],
-      ['m', 'n', 'o', 'p', 'q', 'r'],
-      ['s', 't', 'u', 'v', 'w', 'x'],
-      ['y', 'z', 'SPACE', 'BACK', 'CLEAR', 'SEND'],
+    const cellH = 48;
+
+    // Row 0: 10 keys (Q W E R T Y U I O P)
+    // Row 1: 9 keys (A S D F G H J K L)
+    // Row 2: 7 keys (Z X C V B N M)
+    const letterRows: string[][] = [
+      ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+      ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+      ['z', 'x', 'c', 'v', 'b', 'n', 'm'],
     ];
-    cells.forEach((row, rIdx) => {
-      const y = gridStartY + rIdx * (cellH + gap / 2);
+
+    const totalW = w - 80;
+    const stdCellW = (totalW - 9 * gap) / 10;
+
+    letterRows.forEach((row, rIdx) => {
+      const y = gridStartY + rIdx * (cellH + gap);
+      const rowWidth = row.length * stdCellW + (row.length - 1) * gap;
+      const xStart = 40 + (totalW - rowWidth) / 2;
+
       row.forEach((label, cIdx) => {
-        const x = 40 + cIdx * (cellW + gap);
-        let action: string;
-        let accent: string;
-        let labelText: string;
-        let fontPx = 18;
-        if (label === 'SPACE') {
-          action = 'chat.append: ';
-          accent = '#06b6d4';
-          labelText = 'SPACE';
-          fontPx = 14;
-        } else if (label === 'BACK') {
-          action = 'chat.backspace';
-          accent = '#ef4444';
-          labelText = 'BACK';
-          fontPx = 14;
-        } else if (label === 'CLEAR') {
-          action = 'chat.clear';
-          accent = '#fbbf24';
-          labelText = 'CLR';
-          fontPx = 14;
-        } else if (label === 'SEND') {
-          action = 'chat.send';
-          accent = '#10b981';
-          labelText = 'SEND';
-          fontPx = 14;
-        } else {
-          action = 'chat.append:' + label;
-          accent = '#a855f7';
-          labelText = label.toUpperCase();
-        }
+        const x = xStart + cIdx * (stdCellW + gap);
+        const action = 'chat.append:' + label;
+        const accent = '#a855f7';
+        const labelText = label.toUpperCase();
+
         ctx.fillStyle = 'rgba(255,255,255,0.04)';
-        ctx.fillRect(x, y, cellW, cellH);
+        ctx.fillRect(x, y, stdCellW, cellH);
         ctx.strokeStyle = accent + 'aa';
         ctx.lineWidth = 2;
-        ctx.strokeRect(x, y, cellW, cellH);
+        ctx.strokeRect(x, y, stdCellW, cellH);
         ctx.fillStyle = accent;
-        ctx.font = `bold ${fontPx}px "Outfit", sans-serif`;
+        ctx.font = 'bold 18px "Outfit", sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(labelText, x + cellW / 2, y + cellH / 2);
-        helper.registerButton({ x, y, w: cellW, h: cellH }, action);
+        ctx.fillText(labelText, x + stdCellW / 2, y + cellH / 2);
+        helper.registerButton({ x, y, w: stdCellW, h: cellH }, action);
       });
     });
+
+    // Row 3: Action bar (SPACE, BACK, CLEAR, SEND)
+    const actionRowY = gridStartY + 3 * (cellH + gap);
+    const actionKeys = [
+      { label: 'SPACE', w: 340, accent: '#06b6d4', action: 'chat.append: ' },
+      { label: 'BACK',  w: 180, accent: '#ef4444', action: 'chat.backspace' },
+      { label: 'CLEAR', w: 180, accent: '#fbbf24', action: 'chat.clear' },
+      { label: 'SEND',  w: totalW - 340 - 180 - 180 - 3 * gap, accent: '#10b981', action: 'chat.send' },
+    ];
+
+    let currX = 40;
+    actionKeys.forEach((k) => {
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(currX, actionRowY, k.w, cellH);
+      ctx.strokeStyle = k.accent + 'aa';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(currX, actionRowY, k.w, cellH);
+      ctx.fillStyle = k.accent;
+      ctx.font = 'bold 15px "Outfit", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(k.label, currX + k.w / 2, actionRowY + cellH / 2);
+      helper.registerButton({ x: currX, y: actionRowY, w: k.w, h: cellH }, k.action);
+      currX += k.w + gap;
+    });
+
     // Reset baseline
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';

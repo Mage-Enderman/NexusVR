@@ -1,10 +1,12 @@
-import React from 'react';
-import { X, Settings, Monitor, Sliders, Cpu, Eye, ShieldAlert, Sparkles, Layers, Triangle, Hash } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, Settings, Monitor, Sliders, Cpu, Eye, ShieldAlert, Sparkles, Layers, Triangle, Hash, User } from 'lucide-react';
 import type { GraphicsSettings, PerformanceStats } from '../engine/SceneEngine.ts';
 
 interface SettingsModalProps {
   settings: GraphicsSettings;
   stats: PerformanceStats;
+  userName?: string;
+  onUpdateUserName?: (name: string) => void;
   onUpdateSettings: (newSettings: Partial<GraphicsSettings>) => void;
   onClose: () => void;
 }
@@ -12,9 +14,17 @@ interface SettingsModalProps {
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   settings,
   stats,
+  userName = 'Traveler',
+  onUpdateUserName,
   onUpdateSettings,
   onClose,
 }) => {
+  const [nameInput, setNameInput] = useState(userName);
+
+  useEffect(() => {
+    setNameInput(userName);
+  }, [userName]);
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content glass-panel max-w-xl w-[90vw] p-6 space-y-6" onClick={(e) => e.stopPropagation()}>
@@ -25,8 +35,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <Settings className="w-6 h-6" />
             </div>
             <div>
-              <h2 className="text-xl font-bold font-['Outfit'] tracking-wide">Graphical Settings</h2>
-              <p className="text-xs text-slate-400">Configure Three.js rendering, shadows, and anti-aliasing.</p>
+              <h2 className="text-xl font-bold font-['Outfit'] tracking-wide">Preferences & Settings</h2>
+              <p className="text-xs text-slate-400">Configure your display name, Three.js rendering, and graphics.</p>
             </div>
           </div>
           <button onClick={onClose} className="btn-icon btn-glass hover:text-rose-400">
@@ -66,6 +76,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Settings Controls */}
         <div className="space-y-5 max-h-[50vh] overflow-y-auto pr-2">
+          {/* User Profile / Display Name */}
+          <div className="space-y-2 pb-3 border-b border-white/10">
+            <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+              <User className="w-3.5 h-3.5 text-cyan-400" /> Display Name
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                onBlur={() => onUpdateUserName?.(nameInput)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    onUpdateUserName?.(nameInput);
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                placeholder="Enter display name..."
+                className="flex-1 bg-slate-900/90 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white focus:outline-none focus:border-cyan-400 font-['Outfit'] font-semibold"
+                maxLength={24}
+              />
+              <button
+                onClick={() => onUpdateUserName?.(nameInput)}
+                className="btn btn-primary px-4 py-2 text-xs font-bold rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 transition-colors"
+              >
+                Save Name
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              Your display name is shown in chat messages and to other peers in the room.
+            </p>
+          </div>
+
           {/* Resolution Scale */}
           <div className="space-y-2">
             <div className="flex justify-between items-center">
