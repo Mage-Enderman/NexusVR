@@ -70,6 +70,17 @@ NexusVR is open-source and warmly welcomes forks, experiments, and pull requests
 
 ---
 
+## 🙏 Acknowledgements & Third-Party Open Source
+
+NexusVR is built with several incredible open-source libraries:
+- **[PeerJS](https://peerjs.com/)** (MIT License) — Peer-to-peer WebRTC networking and data streaming
+- **[Three.js](https://threejs.org/)** (MIT License) — 3D WebGL rendering engine
+- **[React](https://react.dev/)** (MIT License) — UI framework
+- **[MP4Box.js](https://github.com/gpac/mp4box.js)** (BSD-3-Clause License) — MP4 container demuxing and parsing
+- **[three-vrm](https://github.com/pixiv/three-vrm)** (MIT License) — VRM avatar loading for Three.js
+
+---
+
 ## 📝 License
 
 This project is licensed under the **[MIT License](LICENSE)** — free and open for anyone to use, modify, fork, and distribute.
