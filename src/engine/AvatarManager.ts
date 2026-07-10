@@ -219,6 +219,10 @@ export class AvatarManager {
   public peers: Map<string, PeerAvatar> = new Map();
   public localVrmUrl: string | null = null;
   public localVrm: VRM | null = null;
+  private _scratchPos = new THREE.Vector3();
+  private _scratchQuat = new THREE.Quaternion();
+  private _scratchRootInvQuat = new THREE.Quaternion();
+  private _scratchEuler = new THREE.Euler();
 
   constructor(scene: THREE.Scene, camera: THREE.Camera, worldRoot: THREE.Object3D) {
     this.scene = scene;
@@ -281,32 +285,36 @@ export class AvatarManager {
     }
   }
 
+  private toLocalPose(obj: THREE.Object3D): { position: [number, number, number]; rotation: [number, number, number] } {
+    obj.updateWorldMatrix(true, false);
+    obj.getWorldPosition(this._scratchPos);
+    this.worldRoot.worldToLocal(this._scratchPos);
+
+    obj.getWorldQuaternion(this._scratchQuat);
+    this.worldRoot.getWorldQuaternion(this._scratchRootInvQuat).invert();
+    this._scratchRootInvQuat.multiply(this._scratchQuat);
+    this._scratchEuler.setFromQuaternion(this._scratchRootInvQuat, obj.rotation.order || 'YXZ');
+
+    return {
+      position: [this._scratchPos.x, this._scratchPos.y, this._scratchPos.z],
+      rotation: [this._scratchEuler.x, this._scratchEuler.y, this._scratchEuler.z]
+    };
+  }
+
   public getLocalTransform(camera: THREE.Camera, controller1?: THREE.Object3D, controller2?: THREE.Object3D, isSpeaking = false, isCompanion = false): AvatarTransform {
-    // VR joystick movement uses the inverse-treadmill: SceneEngine's
-    // updateVRLocomotion() translates worldRoot in the OPPOSITE direction
-    // of intended motion, so the HMD-tracked camera.position never changes
-    // when the user pushes the stick. If we broadcast camera.position
-    // directly, other clients see the VR user's avatar frozen at the HMD
-    // real-world position — only physical HMD movement (which writes to
-    // camera.position) syncs. The fix: subtract worldRoot.position so the
-    // broadcast reflects the VR user's SIMULATED world position, i.e.
-    // "where they would be if they'd walked physically". Similarly for
-    // smooth-turn: worldRoot.rotation.y is incremented by the turn angle,
-    // so the avatar's head Y rotation needs the inverse to face the
-    // right direction in the world frame.
-    //
-    // Desktop mode leaves worldRoot at identity (position 0,0,0,
-    // rotation 0,0,0), so the subtraction is a no-op for desktop users —
-    // the broadcast is unchanged. Only VR mode sees the correction.
-    //
-    // Y-only rotation correction because updateVRSmoothTurn only rotates
-    // around Y; worldRoot.rotation.x/z are always 0. A general quaternion
-    // correction (worldRoot.quaternion.inverse() * camera.quaternion) would
-    // be equivalent here but is overkill for the current Y-only case.
-    const wx = this.worldRoot.position.x;
-    const wy = this.worldRoot.position.y;
-    const wz = this.worldRoot.position.z;
-    const wyaw = this.worldRoot.rotation.y;
+    // VR joystick movement & smooth turn rotate and translate `worldRoot`.
+    // Remote peer avatars live parented to `worldRoot`, so broadcasting
+    // raw scene subtraction (camera.position - worldRoot.position) without
+    // accounting for worldRoot's rotation caused the VR player to swing in
+    // an orbit around the origin when spinning with the right joystick.
+    // Converting each tracked object's exact world position/quaternion into
+    // `worldRoot`'s local coordinate space ensures turning rotates the player
+    // cleanly in place relative to all peers and world objects.
+    this.worldRoot.updateWorldMatrix(true, false);
+
+    const head = this.toLocalPose(camera);
+    const leftHand = controller1 ? this.toLocalPose(controller1) : undefined;
+    const rightHand = controller2 ? this.toLocalPose(controller2) : undefined;
 
     const ua = navigator.userAgent.toLowerCase();
     const isQuest3 = ua.includes('quest 3') || ua.includes('quest 3s');
@@ -314,12 +322,12 @@ export class AvatarManager {
 
     return {
       peerId: 'local',
-      headPosition: [camera.position.x - wx, camera.position.y - wy, camera.position.z - wz],
-      headRotation: [camera.rotation.x, camera.rotation.y - wyaw, camera.rotation.z],
-      leftHandPosition: controller1 ? [controller1.position.x - wx, controller1.position.y - wy, controller1.position.z - wz] : undefined,
-      leftHandRotation: controller1 ? [controller1.rotation.x, controller1.rotation.y - wyaw, controller1.rotation.z] : undefined,
-      rightHandPosition: controller2 ? [controller2.position.x - wx, controller2.position.y - wy, controller2.position.z - wz] : undefined,
-      rightHandRotation: controller2 ? [controller2.rotation.x, controller2.rotation.y - wyaw, controller2.rotation.z] : undefined,
+      headPosition: head.position,
+      headRotation: head.rotation,
+      leftHandPosition: leftHand?.position,
+      leftHandRotation: leftHand?.rotation,
+      rightHandPosition: rightHand?.position,
+      rightHandRotation: rightHand?.rotation,
       isSpeaking,
       vrmUrl: this.localVrmUrl || undefined,
       isCompanion,

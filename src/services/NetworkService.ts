@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import Peer, { type DataConnection, type MediaConnection } from 'peerjs';
 import type { TransformUpdate } from '../engine/ManipulationManager.ts';
 import type { AvatarTransform } from '../engine/AvatarManager.ts';
@@ -39,6 +40,41 @@ export interface AssetSpawnData {
   // inspector checkbox and tree-orange-dot indicator both reflect the
   // synced state.
   isPersistent?: boolean;
+  materialState?: MaterialUpdate;
+  videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
+  // Phase 3A: when the host imports a video too large for the sync
+  // envelope, the spawn carries `fileData: undefined` +
+  // `fileDataOversized: true` AND this streamingHint. Receivers use it
+  // to attach a VideoStreamingService receiver and bring up an MSE-
+  // backed <video> element which then feeds THREE.VideoTexture via the
+  // existing Phase 2 cap.
+  streamingHint?: {
+    id: string;
+    fileSize: number;
+    mimeHint?: string;
+  };
+  senderPeerId?: string;
+}
+
+export interface MaterialUpdate {
+  assetId: string;
+  materialIndex?: number;
+  color?: string;
+  roughness?: number;
+  metalness?: number;
+  emissive?: string;
+  emissiveIntensity?: number;
+  opacity?: number;
+  wireframe?: boolean;
+  flatShading?: boolean;
+  normalScale?: number;
+  aoMapIntensity?: number;
+  map?: string | null;
+  normalMap?: string | null;
+  roughnessMap?: string | null;
+  metalnessMap?: string | null;
+  emissiveMap?: string | null;
+  aoMap?: string | null;
 }
 
 /**
@@ -141,7 +177,7 @@ export interface SceneStateSnapshot {
  */
 type EnvelopeType =
   | 'trans' | 'av' | 'spawn' | 'rem' | 'chat'
-  | 'syncreq' | 'syncresp' | 'role' | 'mod' | 'hs'
+  | 'syncreq' | 'syncresp' | 'role' | 'mod' | 'hs' | 'peerlist'
   // 'pending'          — host broadcasts on import-start (before the
   //                      async load resolves) so peers can render a
   //                      "Loading…" placeholder at the asset's future
@@ -180,7 +216,7 @@ type EnvelopeType =
   //                      also broadcast but ONLY by the originator —
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
-  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate';
+  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat';
 
 interface Envelope {
   type: EnvelopeType;
@@ -215,6 +251,7 @@ export class NetworkService {
   public hostId: string;
   public isHost = true;
   public isCompanion = false;
+  public worldRoot: THREE.Object3D | null = null;
 
   public localRole: UserRole = 'admin';
   public peerRoles: Map<string, UserRole> = new Map();
@@ -225,6 +262,22 @@ export class NetworkService {
   // PeerJS internals
   private peer: Peer | null = null;
   private readonly dataConns: Map<string, DataConnection> = new Map();
+  // Phase 3A: outbound binary conns (host's `openBinaryChannel` dials)
+  // AND inbound binary conns that arrived via `peer.on('connection')`
+  // and matched the `vid-binary` metadata discriminator. Storing both
+  // sides in one Map means disconnect()/teardown close them all in one
+  // pass without us having to remember which side originated. Receivers
+  // use this map's late-registrant check inside `onBinaryChannelOpen`
+  // so a listener registered AFTER the host already dialed still gets
+  // the open conn (without this check the listener would never fire —
+  // 'connection' events are emitted once and never replayed).
+  private readonly binaryConns: Map<string, DataConnection> = new Map();
+  // Phase 3A: peerId → set of one-shot callbacks waiting for the next
+  // inbound `vid-binary` conn. Fired by the `peer.on('connection')`
+  // branch above once the conn reaches 'open' state. Cleared after
+  // each delivery so a slow receiver registration can't accidentally
+  // receive a stale conn from a later video import by the same host.
+  private readonly inboundBinaryListeners: Map<string, Set<(dc: DataConnection) => void>> = new Map();
   private readonly mediaConns: Map<string, MediaConnection> = new Map();
   // Outgoing envelopes that arrived while a DataConnection hadn't yet
   // reached its `open` state. We cannot call conn.send() pre-open —
@@ -302,6 +355,7 @@ export class NetworkService {
   private onRemoveCallbacks: Set<(id: string) => void> = new Set();
   private onChatCallbacks: Set<(msg: ChatMessage) => void> = new Set();
   private onStreamCallbacks: Set<(stream: MediaStream, peerId: string) => void> = new Set();
+  private onVideoLiveStreamCallbacks: Set<(assetId: string, stream: MediaStream, peerId: string) => void> = new Set();
   private onSyncReqCallbacks: Set<(fromPeerId: string) => void> = new Set();
   private onSyncRespCallbacks: Set<(snapshot: SceneStateSnapshot) => void> = new Set();
   private onRoleCallbacks: Set<(data: RoleUpdatePayload) => void> = new Set();
@@ -310,6 +364,7 @@ export class NetworkService {
   private onPendingCancelCallbacks: Set<(id: string) => void> = new Set();
   private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
   private onPanelStateCallbacks: Set<(data: PanelStateData) => void> = new Set();
+  private onMaterialCallbacks: Set<(update: MaterialUpdate) => void> = new Set();
 
   constructor() {
     this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
@@ -371,7 +426,41 @@ export class NetworkService {
     });
 
     this.peer.on('connection', (conn) => {
-      this.acceptDataConnection(conn);
+      // Phase 3A: discriminate inbound by the metadata we attach on
+      // outbound openBinaryChannel. JSON envelopes (the default
+      // acceptDataConnection path) route to handleEnvelopeFrom —
+      // which would try to JSON.parse raw video bytes and crash the
+      // peer-side path. Binary conns go to onBinaryChannelOpen instead.
+      // The discriminator is `metadata.kind === 'vid-binary'`, set in
+      // openBinaryChannel's `peer.connect` argument, and propagated
+      // to inbound via PeerJS's standard metadata channel. Forward
+      // compatible with future binary streams (raw audio, mesh BVH,
+      // etc.) by adding new `kind` values without touching this branch.
+      const md = (conn as { metadata?: { kind?: string } | null }).metadata;
+      if (md && typeof md === 'object' && md.kind === 'vid-binary') {
+        const handleBinaryOpen = () => {
+          this.binaryConns.set(conn.peer, conn);
+          const listeners = this.inboundBinaryListeners.get(conn.peer);
+          if (listeners) {
+            for (const cb of listeners) {
+              try { cb(conn); } catch (err) { console.warn('[Net] binary listener threw:', err); }
+            }
+            this.inboundBinaryListeners.delete(conn.peer);
+          }
+        };
+        if (conn.open) {
+          handleBinaryOpen();
+        } else {
+          conn.on('open', handleBinaryOpen);
+        }
+        conn.on('close', () => { this.binaryConns.delete(conn.peer); });
+        conn.on('error', (err) => {
+          console.warn('[Net] binary conn error:', conn.peer, err);
+          this.binaryConns.delete(conn.peer);
+        });
+      } else {
+        this.acceptDataConnection(conn);
+      }
     });
 
     this.peer.on('call', (call) => {
@@ -453,6 +542,7 @@ export class NetworkService {
       }
       conn.removeAllListeners();
       if (hostReachable) {
+        this.hostId = hostId;
         this.acceptDataConnection(conn);
       } else {
         conn.close();
@@ -568,16 +658,10 @@ export class NetworkService {
 
     this.dataConns.set(conn.peer, conn);
 
-    conn.on('open', () => {
+    const onConnOpen = () => {
       this.peers.add(conn.peer);
       this.evaluateHost();
 
-      // Drain envelopes queued while we were mid-handshake. FIFO order
-      // matters — an early 'spawn' (e.g. host's scene primitives) needs
-      // to land on the guest BEFORE a later 'trans' (which would
-      // otherwise reference an asset id the guest hasn't seen yet). Try/
-      // catch per-env so a mid-flush error doesn't drop the rest of the
-      // queue (PeerJS doesn't have a clean atomic-send semantics here).
       const pending = this.pendingEnvelopes.get(conn.peer);
       if (pending && pending.length > 0) {
         for (const env of pending) {
@@ -588,27 +672,36 @@ export class NetworkService {
         this.pendingEnvelopes.delete(conn.peer);
       }
 
-      // Outgoing: tell the new peer who we are.
       this.sendEnvelopeTo(conn, this.buildEnvelope('hs', {
         peerId: this.localPeerId,
         userName: this.localUserName,
         role: this.localRole
       }));
 
-      // If they're the host and we're not, request initial scene sync.
-      if (!this.isHost && conn.peer === this.hostId) {
+      // Request initial scene sync when connecting to the host
+      if (!this.isHost || conn.peer === `${this.roomId}-host` || conn.peer === this.hostId) {
+        this.hostId = conn.peer;
         this.sendEnvelopeTo(conn, this.buildEnvelope('syncreq', { from: this.localPeerId }));
+      } else if (this.isHost) {
+        const existingPeers = Array.from(this.dataConns.keys()).filter((id) => id !== conn.peer);
+        if (existingPeers.length > 0) {
+          this.sendEnvelopeTo(conn, this.buildEnvelope('peerlist', { peers: existingPeers }));
+        }
       }
 
-      // If we have an active audio stream and aren't muted, call them so
-      // they get our mic too.
       if (this.localAudioStream && !this.isMuted) {
         this.callPeerForAudio(conn.peer);
       }
 
       for (const cb of this.onPeerJoinCallbacks) cb(conn.peer);
       this.notifySystemChat(`User joined the room`);
-    });
+    };
+
+    if (conn.open) {
+      onConnOpen();
+    } else {
+      conn.on('open', onConnOpen);
+    }
 
     conn.on('data', (raw) => {
       this.handleEnvelopeFrom(conn.peer, raw);
@@ -641,24 +734,25 @@ export class NetworkService {
   }
 
   private acceptMediaCall(call: MediaConnection): void {
-    // Banned peers can still ring us if they discover our peer id out of
-    // band — their DataConnection was closed on accept, but `peer.call` is
-    // an independent path. Drop the call immediately so their microphone
-    // stream never reaches our `onStreamCallbacks`.
     if (this.bannedPeers.has(call.peer)) {
       try { call.close(); } catch { /* noop */ }
       return;
     }
 
-    // We always answer (with our local stream if any, else with no stream).
-    // The remote's microphone stream is delivered via the 'stream' event;
-    // whether they ACTUALLY get audio depends on `localAudioStream` (our
-    // mic) being present at the moment we answer.
+    const md = (call as unknown as { metadata?: { kind?: string; assetId?: string } }).metadata;
+    if (md && md.kind === 'vid-live-stream' && md.assetId) {
+      try { call.answer(); } catch { /* noop */ }
+      call.on('stream', (remoteStream) => {
+        for (const cb of this.onVideoLiveStreamCallbacks) {
+          cb(md.assetId!, remoteStream, call.peer);
+        }
+      });
+      return;
+    }
+
     if (this.localAudioStream) {
       call.answer(this.localAudioStream);
     } else {
-      // sendAnswer(false) → no media sent back. Without an active mic we
-      // still attach the 'stream' listener so we DON'T waste the call.
       try { call.answer(); } catch { /* noop */ }
     }
     this.mediaConns.set(call.peer, call);
@@ -796,12 +890,18 @@ export class NetworkService {
       case 'trans':
         for (const cb of this.onTransformCallbacks) cb(env.payload as TransformUpdate);
         break;
+      case 'mat':
+        for (const cb of this.onMaterialCallbacks) cb(env.payload as MaterialUpdate);
+        break;
       case 'av':
         for (const cb of this.onAvatarCallbacks) cb(env.payload as AvatarTransform);
         break;
-      case 'spawn':
-        for (const cb of this.onSpawnCallbacks) cb(env.payload as AssetSpawnData);
+      case 'spawn': {
+        const data = env.payload as AssetSpawnData;
+        data.senderPeerId = fromPeerId;
+        for (const cb of this.onSpawnCallbacks) cb(data);
         break;
+      }
       case 'rem':
         for (const cb of this.onRemoveCallbacks) cb(env.payload as string);
         break;
@@ -813,9 +913,16 @@ export class NetworkService {
           for (const cb of this.onSyncReqCallbacks) cb(fromPeerId);
         }
         break;
-      case 'syncresp':
-        for (const cb of this.onSyncRespCallbacks) cb(env.payload as SceneStateSnapshot);
+      case 'syncresp': {
+        const snapshot = env.payload as SceneStateSnapshot;
+        if (snapshot && snapshot.assets) {
+          for (const asset of snapshot.assets) {
+            asset.senderPeerId = fromPeerId;
+          }
+        }
+        for (const cb of this.onSyncRespCallbacks) cb(snapshot);
         break;
+      }
       case 'role': {
         const data = env.payload as RoleUpdatePayload;
         this.peerRoles.set(data.targetPeerId, data.newRole);
@@ -839,6 +946,17 @@ export class NetworkService {
         const id = data.peerId || fromPeerId;
         this.peerNames.set(id, data.userName || 'Traveler');
         if (data.role) this.peerRoles.set(id, data.role);
+        break;
+      }
+      case 'peerlist': {
+        const data = env.payload as { peers?: string[] };
+        if (Array.isArray(data?.peers)) {
+          for (const peerId of data.peers) {
+            if (peerId && peerId !== this.localPeerId && !this.dataConns.has(peerId)) {
+              this.connectToPeer(peerId);
+            }
+          }
+        }
         break;
       }
       case 'pending':
@@ -946,15 +1064,28 @@ export class NetworkService {
     let i = 0;
     const sendNext = (): void => {
       if (i >= total || !conn.open) return;
-      const chunkStr = jsonStr.substring(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, jsonStr.length));
-      try {
-        conn.send({ type: 'chunk', payload: { id: msgId, i, total, data: chunkStr } });
-      } catch (err) {
-        console.warn('[PeerJS] chunked send failed at', i, 'of', total, 'for', conn.peer, err);
-        return;
+      // Send chunks in a burst as long as bufferedAmount stays below threshold
+      while (i < total && conn.open) {
+        const dc = (conn as any).dataChannel as RTCDataChannel | undefined;
+        if (dc && dc.bufferedAmount > 512 * 1024) {
+          // Send buffer is filling up; yield to let WebRTC flush
+          setTimeout(sendNext, 4);
+          return;
+        }
+        const chunkStr = jsonStr.substring(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, jsonStr.length));
+        try {
+          conn.send({ type: 'chunk', payload: { id: msgId, i, total, data: chunkStr } });
+        } catch (err) {
+          console.warn('[PeerJS] chunked send failed at', i, 'of', total, 'for', conn.peer, err);
+          setTimeout(sendNext, 10);
+          return;
+        }
+        i++;
+        if (!dc) {
+          if (i < total) setTimeout(sendNext, 3);
+          return;
+        }
       }
-      i++;
-      if (i < total) setTimeout(sendNext, 4);
     };
     sendNext();
   }
@@ -976,8 +1107,15 @@ export class NetworkService {
   private evaluateHost(): void {
     // Same rule as the previous Trystero version: lowest alphabetical peer
     // id wins. Includes our own id. Fall back to self when we're alone.
-    const allIds = [this.localPeerId, ...Array.from(this.peers)].sort();
-    const newHostId = allIds[0] ?? this.localPeerId;
+    const roomHostId = `${this.roomId}-host`;
+    const allIds = [this.localPeerId, ...Array.from(this.peers)];
+    let newHostId = this.localPeerId;
+    if (allIds.includes(roomHostId)) {
+      newHostId = roomHostId;
+    } else {
+      allIds.sort();
+      newHostId = allIds[0] ?? this.localPeerId;
+    }
     const oldIsHost = this.isHost;
 
     this.hostId = newHostId;
@@ -987,11 +1125,14 @@ export class NetworkService {
       for (const cb of this.onHostChangeCallbacks) cb(this.hostId, this.isHost);
       if (this.isHost) {
         this.notifySystemChat(`Host migrated. You are now the authoritative Host.`);
+        if (this.mode === 'online' && this.roomId && this.localPeerId !== `${this.roomId}-host`) {
+          this.becomeHost(this.roomId);
+        }
       }
     }
   }
 
-  private notifySystemChat(text: string): void {
+  public notifySystemChat(text: string): void {
     // Dedupe identical system-chat text within a 3-second window so a
     // tight network loop (e.g. unavailable-id → guest → host-dial
     // timeout → becomeHost firing repeatedly) doesn't spam the chat
@@ -1029,18 +1170,38 @@ export class NetworkService {
     this.broadcastEnvelope(this.buildEnvelope('trans', update));
   }
 
+  public broadcastMaterialUpdate(update: MaterialUpdate): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('mat', update));
+  }
+
   public broadcastAssetUpdate(asset: LoadedAsset): void {
     if (this.mode === 'offline') return;
     const obj = asset.object3d;
-    // Sourced from userData (matches SceneInspector checkbox writer) so
-    // toggling "Persistent" in the inspector immediately reaches peers
-    // through the same 'trans' envelope that position/rotation/scale do.
+    obj.updateWorldMatrix(true, false);
+    let pos = [obj.position.x, obj.position.y, obj.position.z] as [number, number, number];
+    let rot = [obj.rotation.x, obj.rotation.y, obj.rotation.z] as [number, number, number];
+    let scl = [obj.scale.x, obj.scale.y, obj.scale.z] as [number, number, number];
+    const refParent = this.worldRoot ?? (obj.parent && obj.parent !== this.worldRoot ? obj.parent : null);
+    if (refParent) {
+      refParent.updateWorldMatrix(true, false);
+      const parentInv = refParent.matrixWorld.clone().invert();
+      const localMat = parentInv.multiply(obj.matrixWorld);
+      const p = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const s = new THREE.Vector3();
+      localMat.decompose(p, q, s);
+      const e = new THREE.Euler().setFromQuaternion(q, obj.rotation.order);
+      pos = [p.x, p.y, p.z];
+      rot = [e.x, e.y, e.z];
+      scl = [s.x, s.y, s.z];
+    }
     const isPersistent = (obj.userData as Record<string, unknown>)?.isPersistent as boolean | undefined;
     this.broadcastEnvelope(this.buildEnvelope('trans', {
       assetId: asset.id,
-      position: [obj.position.x, obj.position.y, obj.position.z],
-      rotation: [obj.rotation.x, obj.rotation.y, obj.rotation.z],
-      scale: [obj.scale.x, obj.scale.y, obj.scale.z],
+      position: pos,
+      rotation: rot,
+      scale: scl,
       isCollidable: asset.isCollidable,
       isPersistent
     }));
@@ -1138,6 +1299,93 @@ export class NetworkService {
     return () => this.onPanelStateCallbacks.delete(cb);
   }
 
+  /**
+   * Phase 3A: open a SECOND PeerJS DataConnection to a peer for binary
+   * streaming (e.g. large video bytes). Returns the DataConnection
+   * live (does not await 'open' — callers can attach handlers first,
+   * then drop into begin-send once `open` fires).
+   *
+   * Mirrors the existing `connectToPeer` pattern but with the
+   * `{ reliable: true }` flag and a `{ label }` so the peer's
+   * acceptDataConnection can route by channel. Future expansion may
+   * use the label to disambiguate at the broker level.
+   */
+  public openBinaryChannel(peerId: string): DataConnection {
+    if (!this.peer) throw new Error('NetworkService peer not initialized');
+    if (peerId === this.localPeerId) throw new Error('Cannot open channel to self');
+    // `serialization: 'binary'` keeps PeerJS from wrapping each
+    // `conn.send(ArrayBuffer)` in a JSON envelope. Without it the receiver
+    // receives {data: '<base64 string>'} and handleEnvelopeFrom rejects
+    // every chunk as an invalid envelope before VideoStreamingService's
+    // listener can de-multiplex. The accompanying `metadata.kind`
+    // discriminator is what bindPeerHandlers' `peer.on('connection')`
+    // branch uses to route the INBOUND half of this conn to
+    // `onBinaryChannelOpen` instead of `acceptDataConnection` (which
+    // would JSON-fail on raw video bytes). We do NOT call
+    // acceptDataConnection from here — that handler installs an
+    // `on('data') => handleEnvelopeFrom` listener which would log
+    // spurious "invalid envelope" warnings for every chunk. Instead
+    // the conn lives only in `binaryConns` so the host can send
+    // bytes via `dc.send(ArrayBuffer)` directly and disconnect()'
+    // can close it on teardown.
+    const conn = this.peer.connect(peerId, {
+      reliable: true,
+      serialization: 'binary',
+      metadata: { kind: 'vid-binary' }
+    });
+    this.binaryConns.set(conn.peer, conn);
+    conn.on('close', () => { this.binaryConns.delete(conn.peer); });
+    conn.on('error', (err) => {
+      console.warn('[Net] binary outbound conn error:', conn.peer, err);
+      this.binaryConns.delete(conn.peer);
+    });
+    return conn;
+  }
+
+  /**
+   * Phase 3A: register a one-shot callback fired when an inbound
+   * `vid-binary` DataConnection from `peerId` reaches the 'open'
+   * state (or synchronously if one is already open from a previous
+   * host dial). Used by VideoStreamingService.attachReceiver to
+   * attach its `handleIncomingBinary` listener to the host's
+   * outbound conn — without this the receiver would have to dial
+   * a SECOND binary conn back to the host (a 2nd RTCDataChannel
+   * pair that the host's `beginStreamingToPeer` would never pump),
+   * leading to "importer sees it locally, peer sees nothing"
+   * because outbound conn on host and outbound conn on receiver
+   * are SEPARATE underlying RTCDataChannels despite both sides
+   * looking like "binary channels to the same peer".
+   *
+   * Returns an unsubscribe function so a duplicate-import path
+   * (e.g. registerOnAssetAdded re-firing for a sync-snapshot hit)
+   * can cancel a stale listener without leaving a dangling Set
+   * entry that fires on the NEXT video import by the same host
+   * (which would race against the current asset's MediaSource).
+   */
+  public onBinaryChannelOpen(peerId: string, cb: (dc: DataConnection) => void): () => void {
+    const existing = this.binaryConns.get(peerId);
+    if (existing) {
+      if (existing.open) {
+        // Late registration: connection is already sitting open.
+        try { cb(existing); } catch (err) { console.warn('[Net] late binary listener threw:', err); }
+        return () => {};
+      } else {
+        // Existing connection is mid-handshake; listen for its 'open' event.
+        const onOpen = () => {
+          try { cb(existing); } catch (err) { console.warn('[Net] binary listener threw:', err); }
+        };
+        existing.on('open', onOpen);
+        return () => existing.off('open', onOpen);
+      }
+    }
+    if (!this.inboundBinaryListeners.has(peerId)) {
+      this.inboundBinaryListeners.set(peerId, new Set());
+    }
+    const set = this.inboundBinaryListeners.get(peerId)!;
+    set.add(cb);
+    return () => { set.delete(cb); };
+  }
+
   public broadcastRemove(id: string): void {
     if (this.mode === 'offline') return;
     this.broadcastEnvelope(this.buildEnvelope('rem', id));
@@ -1197,6 +1445,15 @@ export class NetworkService {
     return this.isMuted;
   }
 
+  public callMediaStream(peerId: string, stream: MediaStream, metadata?: Record<string, unknown>): import('peerjs').MediaConnection | null {
+    if (!this.peer || this.bannedPeers.has(peerId)) return null;
+    try {
+      return this.peer.call(peerId, stream, { metadata });
+    } catch {
+      return null;
+    }
+  }
+
   public toggleDeafen(): boolean {
     this.isDeafened = !this.isDeafened;
     return this.isDeafened;
@@ -1225,6 +1482,19 @@ export class NetworkService {
       try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
     }
     this.dataConns.clear();
+
+    // Phase 3A: tear down binary channels (Phase 3A video streams).
+    // Distinct from dataConns because they're not routed through
+    // handleEnvelopeFrom and don't need the JSON buffer-flush window.
+    for (const conn of this.binaryConns.values()) {
+      try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
+    }
+    this.binaryConns.clear();
+    // Pending one-shot listeners we're never going to satisfy (the
+    // peer is gone). Clear so a fresh session doesn't accidentally
+    // fire on the very first video of the new room against a peer
+    // whose peerId collides with a stale one from the previous room.
+    this.inboundBinaryListeners.clear();
 
     if (this.peer && !this.peer.destroyed) {
       // Peer.destroy() unregisters from the broker and tears down
@@ -1291,6 +1561,14 @@ export class NetworkService {
   public onStream(cb: (stream: MediaStream, peerId: string) => void): () => void {
     this.onStreamCallbacks.add(cb);
     return () => this.onStreamCallbacks.delete(cb);
+  }
+  public onVideoLiveStream(cb: (assetId: string, stream: MediaStream, peerId: string) => void): () => void {
+    this.onVideoLiveStreamCallbacks.add(cb);
+    return () => this.onVideoLiveStreamCallbacks.delete(cb);
+  }
+  public onMaterialUpdate(cb: (update: MaterialUpdate) => void): () => void {
+    this.onMaterialCallbacks.add(cb);
+    return () => this.onMaterialCallbacks.delete(cb);
   }
   public onSyncReq(cb: (fromPeerId: string) => void): () => void {
     this.onSyncReqCallbacks.add(cb);
@@ -1372,16 +1650,33 @@ const SEND_TO_MAX_QUEUED = 500;
  * than this are stripped from the broadcast and tagged with
  * `fileDataOversized: true` so receivers can render a "Too Large"
  * placeholder instead of trying to base64-decode a string the
- * Quest browser can't allocate. 5 MB is conservative — the base64
- * expansion adds ~33% overhead so a 5 MB binary becomes ~6.7 MB
- * of JSON, comfortably under any single-message SCTP ceiling.
- * Above ~10 MB JSON, the Quest browser's WebRTC data-channel path
- * can OOM the tab. Most reasonable 3D assets in this app are
- * < 2 MB after compression; 5 MB gives a comfortable headroom for
- * uncompressed glTF / FBX while still protecting the constrained
- * client.
+ * Quest browser can't allocate.
+ *
+ * 15 MB is the safe ceiling for V8 on mobile pointer-compressed
+ * builds (the Quest browser's renderer process). The base64
+ * expansion adds ~33% overhead, so a 15 MB binary becomes ~20 MB
+ * of JSON, but the chunked-envelope path also inflates as it
+ * allocates ~64 KB string slices per chunk. Empirically, a 50 MB
+ * binary on Quest triggers a tab OOM within ~30 seconds of the
+ * first acceptance because each chunk's `conn.send()` enters
+ * `pendingEnvelopes` then `JSON.stringify` allocates a transient
+ * full envelope copy plus the per-chunk `substring()` copies —
+ * ~5× the source bytes resident at peak. 15 MB keeps that peak
+ * under ~75 MB even for a worst-case multi-asset sync snapshot.
+ *
+ * Notes:
+ *   - This cap affects ONLY the broadcast side. Local imports
+ *     never go through here — AssetManager keeps the bytes in
+ *     memory (Phase 2 work makes video bytes stay as Blob refs,
+ *     irrelevant to this constant).
+ *   - Anything above this cap is sent as metadata-only with a
+ *     `streamingHint` flag. The receiver then opens a binary
+ *     DataChannel via VideoStreamingTransport to pull the bytes
+ *     incrementally (no broad cast JSON, no JS heap spike).
+ *   - GLB, OBJ, FBX are typically < 2 MB after compression, so
+ *     15 MB gives plenty of headroom for uncompressed assets too.
  */
-const MAX_INLINED_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_INLINED_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
 //
 // Trystero's run-time knows how to ferry ArrayBuffers without us touching
 // them. PeerJS DataConnections only serialize JSON natively, so any binary

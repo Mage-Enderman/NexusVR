@@ -11,6 +11,19 @@ export interface ImportConfig {
   // General
   saveToInventory: boolean;
   placement: 'in-front' | 'origin' | 'floor';
+  /**
+   * When true, bypasses the per-extension router (loadGLB / loadImage /
+   * loadVideo / /VRM loader) and treats the file/url as a generic
+   * "raw" binary — the same path that unrecognized extensions already
+   * hit. Lands as a `misc` asset (document-card icon, download +
+   * inventory actions). Always available regardless of file category
+   * so users can force any file into the raw path even when its
+   * extension would otherwise route through a type-specific loader
+   * (e.g. a video clip they want as a downloadable blob instead of a
+   * streaming texture, or a PNG that should ride across the
+   * fileData socket for sharing rather than load as a texture).
+   */
+  importAsRawFile: boolean;
   // 3D Models
   modelScaleMode: 'auto' | 'meters' | 'cm' | 'inches' | 'custom';
   customScaleMultiplier: number;
@@ -20,6 +33,7 @@ export interface ImportConfig {
   textureFiltering: 'smooth' | 'pixel-art';
   maxResolution: 'original' | '1024' | '512' | '2048';
   // Videos
+  videoSyncMode: 'persistent' | 'watch-party';
   videoAspectRatio: '16:9' | '9:16' | '1:1' | 'auto';
   videoLoop: boolean;
   videoAutoplay: boolean;
@@ -76,6 +90,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   // General settings
   const [saveToInventory, setSaveToInventory] = useState<boolean>(false);
   const [placement, setPlacement] = useState<'in-front' | 'origin' | 'floor'>('in-front');
+  // Raw-file import: opt-in per-import override that forces the file/url
+  // to be treated as an opaque binary blob and routed through the misc
+  // file pipeline (document-card icon + Download / Save-to-Inventory
+  // actions). Defaults to false so existing imports keep their
+  // type-specific behavior — a fresh checkbox in the common footer of
+  // the dialog flips it on for the current selection.
+  const [importAsRawFile, setImportAsRawFile] = useState<boolean>(false);
 
   // 3D Model settings
   const [modelScaleMode, setModelScaleMode] = useState<'auto' | 'meters' | 'cm' | 'inches' | 'custom'>('auto');
@@ -94,6 +115,7 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   // longer have to flip a dropdown to avoid a stretched preview. They
   // can still pin a fixed ratio via the buttons (which set state to
   // '1:1' / '9:16' / '16:9' on click).
+  const [videoSyncMode, setVideoSyncMode] = useState<'persistent' | 'watch-party'>('persistent');
   const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16' | '1:1' | 'auto'>('auto');
   const [videoLoop, setVideoLoop] = useState<boolean>(true);
   const [videoAutoplay, setVideoAutoplay] = useState<boolean>(true);
@@ -126,6 +148,22 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     }
   };
 
+  // Phase 1 user-warning: surface a bannered notice when a video file
+  // exceeds the local playback-friendly threshold (~50 MB). Above this,
+  // the network sync channel will refuse to ship the binary to peers
+  // (NetworkService.MAX_INLINED_FILE_BYTES), so the host imports a
+  // file that guests can't see unless the host also pastes a URL.
+  // Quest local playback continues to work past 50 MB thanks to
+  // Phase 2 work in AssetManager (File is no longer slurped into a
+  // heap ArrayBuffer); only the P2P sync is gated.
+  const VIDEO_WARN_BYTES = 50 * 1024 * 1024;
+  const showVideoTooLargeWarning =
+    !!selectedFile &&
+    (selectedFile.name.toLowerCase().endsWith('.mp4') ||
+      selectedFile.name.toLowerCase().endsWith('.webm') ||
+      selectedFile.name.toLowerCase().endsWith('.mov')) &&
+    selectedFile.size > VIDEO_WARN_BYTES;
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
@@ -154,12 +192,14 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       url: activeTab === 'url' ? urlInput.trim() : undefined,
       saveToInventory,
       placement,
+      importAsRawFile,
       modelScaleMode,
       customScaleMultiplier,
       shading,
       imageDisplayMode,
       textureFiltering,
       maxResolution,
+      videoSyncMode,
       videoAspectRatio,
       videoLoop,
       videoAutoplay,
@@ -184,16 +224,16 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       assetManager={assetManager}
       spatialPanelManager={spatialPanelManager}
       panelId="import"
-      defaultWidth={620}
-      defaultHeight={740}
+      defaultWidth={480}
+      defaultHeight={480}
       initialPinned={true}
     >
       <div
-        className={`w-full flex flex-col p-3 bg-slate-950/95 text-white overflow-hidden font-sans text-xs select-none ${
+        className={`w-full flex flex-col p-2.5 bg-slate-950/95 text-white overflow-hidden font-sans text-xs select-none pointer-events-auto ${
           !interactive ? 'opacity-90' : ''
         }`}
         onClick={(e) => e.stopPropagation()}
-        style={{ height: 'auto', minHeight: '520px', maxHeight: '90vh' }}
+        style={{ height: 'auto', maxHeight: '82vh' }}
       >
 
         {/* Read-only banner + originator header (panel-broadcast feature).
@@ -221,15 +261,7 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
           </div>
         )}
 
-        {/* Scrollable body — wraps the existing inner content (tabs, input
-            area, category options, footer). The outer modal-content stays
-            a HUD-like dialog with a fixed header; the body scrolls and the
-            footer lives inside it (keeps the diff small). The pointer-
-            events-none wrapper below blocks all click-and-drag inside the
-            body when the panel is read-only, so even though inputs are
-            technically keyboard-navigable, the user can't accidentally fire
-            changes that wouldn't broadcast anyway. */}
-        <div className={`flex-1 overflow-visible space-y-3 font-sans text-xs select-none ${
+        <div className={`flex-1 overflow-y-auto max-h-[430px] pr-1.5 space-y-2 font-sans text-xs select-none ${
           !interactive ? 'pointer-events-none' : ''
         }`}>
         {/* Source Tabs: Local File vs Direct URL */}
@@ -314,6 +346,23 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
 
         {/* Dynamic Category Options */}
         {(selectedFile || urlInput.trim()) && (
+          <>
+          {/* Phase 1 banner: warn the host when a selected video file is
+              too big for the network sync envelope. Hosts may still spawn
+              the video locally (Phase 2 keeps that working via Blob
+              references rather than slurped ArrayBuffers), but peers
+              won't receive the binary unless the host also broadcasts an
+              HTTP URL. The tooltip / banner copy mirrors the App-level
+              system chat the peer side sees on `fileDataOversized`. */}
+          {showVideoTooLargeWarning && (
+            <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/40 rounded-lg px-2.5 py-1.5 mb-1.5">
+              <Sliders className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <div className="text-[11px] text-amber-100 truncate">
+                <strong className="font-bold">Large video ({(selectedFile!.size / 1024 / 1024).toFixed(0)} MB):</strong>{' '}
+                Local playback only. Use <em>Paste Web URL</em> tab for cross-device sync.
+              </div>
+            </div>
+          )}
           <div className="space-y-3 bg-slate-900/40 p-3 rounded-2xl border border-white/5 animate-in fade-in">
             <div className="flex items-center justify-between border-b border-white/5 pb-2">
               <span className="text-xs font-bold text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
@@ -437,34 +486,60 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
 
             {/* Video Options */}
             {category === 'video' && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <span className="text-xs text-slate-300 block mb-1.5 font-semibold">Aspect Ratio</span>
-                    <div className="grid grid-cols-2 gap-1 bg-black/40 p-1 rounded-xl">
-                      {(['16:9', '9:16', '1:1', 'auto'] as const).map((ratio) => (
-                        <button
-                          key={ratio}
-                          type="button"
-                          onClick={() => setVideoAspectRatio(ratio)}
-                          className={`btn btn-glass text-xs py-1 ${videoAspectRatio === ratio ? 'active bg-cyan-500/20 text-cyan-300 font-bold' : ''}`}
-                        >
-                          {ratio}
-                        </button>
-                      ))}
-                    </div>
+              <div className="space-y-2">
+                <div>
+                  <span className="text-[11px] text-slate-300 block mb-1 font-semibold">Sync Mode (Quest 2/3 Friendly)</span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setVideoSyncMode('persistent')}
+                      className={`btn btn-glass text-left p-1.5 rounded-xl transition-all ${
+                        videoSyncMode === 'persistent'
+                          ? 'border-cyan-400/80 bg-cyan-500/20 text-cyan-200 font-bold'
+                          : 'text-slate-400 opacity-80 hover:opacity-100'
+                      }`}
+                    >
+                      <div className="text-[11px]">Persistent Chunk Stream</div>
+                      <div className="text-[9px] text-slate-400 font-normal">Independent scrub & peer cache</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVideoSyncMode('watch-party')}
+                      className={`btn btn-glass text-left p-1.5 rounded-xl transition-all ${
+                        videoSyncMode === 'watch-party'
+                          ? 'border-purple-400/80 bg-purple-500/20 text-purple-200 font-bold'
+                          : 'text-slate-400 opacity-80 hover:opacity-100'
+                      }`}
+                    >
+                      <div className="text-[11px] flex items-center gap-1">📡 Watch Party Stream</div>
+                      <div className="text-[9px] text-slate-400 font-normal">Live WebRTC track (Zero Quest RAM)</div>
+                    </button>
                   </div>
-
-                  <div className="flex flex-col justify-center space-y-2 pt-2">
-                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
-                      <input type="checkbox" checked={videoLoop} onChange={(e) => setVideoLoop(e.target.checked)} className="w-4 h-4 rounded accent-cyan-400" />
-                      <span>Loop Video Playback</span>
-                    </label>
-                    <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
-                      <input type="checkbox" checked={videoAutoplay} onChange={(e) => setVideoAutoplay(e.target.checked)} className="w-4 h-4 rounded accent-cyan-400" />
-                      <span>Autoplay Video & Audio</span>
-                    </label>
+                </div>
+                <div>
+                  <span className="text-[11px] text-slate-300 block mb-1 font-semibold">Aspect Ratio</span>
+                  <div className="grid grid-cols-4 gap-1 bg-black/40 p-1 rounded-xl">
+                    {(['16:9', '9:16', '1:1', 'auto'] as const).map((ratio) => (
+                      <button
+                        key={ratio}
+                        type="button"
+                        onClick={() => setVideoAspectRatio(ratio)}
+                        className={`btn btn-glass text-xs py-1 ${videoAspectRatio === ratio ? 'active bg-cyan-500/20 text-cyan-300 font-bold' : ''}`}
+                      >
+                        {ratio}
+                      </button>
+                    ))}
                   </div>
+                </div>
+                <div className="flex items-center gap-4 pt-1">
+                  <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-200">
+                    <input type="checkbox" checked={videoLoop} onChange={(e) => setVideoLoop(e.target.checked)} className="w-3.5 h-3.5 rounded accent-cyan-400" />
+                    <span>Loop Playback</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-200">
+                    <input type="checkbox" checked={videoAutoplay} onChange={(e) => setVideoAutoplay(e.target.checked)} className="w-3.5 h-3.5 rounded accent-cyan-400" />
+                    <span>Autoplay Video & Audio</span>
+                  </label>
                 </div>
               </div>
             )}
@@ -495,27 +570,58 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
             )}
 
             {/* Common Placement & Storage Options */}
-            <div className="pt-2 border-t border-white/5 flex items-center justify-between text-[11px]">
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400 font-semibold">Spawn Position:</span>
-                {(['in-front', 'origin', 'floor'] as const).map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => setPlacement(p)}
-                    className={`btn btn-glass text-[10px] py-1 px-2 capitalize ${placement === p ? 'active bg-slate-700 text-white font-bold' : 'text-slate-400'}`}
-                  >
-                    {p === 'in-front' ? 'In Front of Camera' : p === 'origin' ? 'Origin (0,0,0)' : 'Floor Grid'}
-                  </button>
-                ))}
+            <div className="pt-2 border-t border-white/5 space-y-2 text-[11px]">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-slate-400 font-semibold">Spawn Position:</span>
+                  {(['in-front', 'origin', 'floor'] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setPlacement(p)}
+                      className={`btn btn-glass text-[10px] py-1 px-2 capitalize ${placement === p ? 'active bg-slate-700 text-white font-bold' : 'text-slate-400'}`}
+                    >
+                      {p === 'in-front' ? 'In Front of Camera' : p === 'origin' ? 'Origin (0,0,0)' : 'Floor Grid'}
+                    </button>
+                  ))}
+                </div>
+
+                <label className="flex items-center gap-1.5 cursor-pointer text-purple-300 font-semibold text-[11px]">
+                  <input type="checkbox" checked={saveToInventory} onChange={(e) => setSaveToInventory(e.target.checked)} className="w-3.5 h-3.5 rounded accent-purple-500" />
+                  <span>Save to Inventory</span>
+                </label>
               </div>
 
-              <label className="flex items-center gap-1.5 cursor-pointer text-purple-300 font-semibold text-[11px]">
-                <input type="checkbox" checked={saveToInventory} onChange={(e) => setSaveToInventory(e.target.checked)} className="w-3.5 h-3.5 rounded accent-purple-500" />
-                <span>Save to Inventory</span>
-              </label>
+              {/* Import-as-raw toggle */}
+              {/* Universal: shown for every supported category (model, image,
+                  video, vrm) AND for unrecognized extensions so the user can
+                  always opt-in to the misc-file pipeline regardless of what
+                  AssetManager's auto-detect would otherwise do. When ON,
+                  AssetManager._loadFile / _loadFromUrl short-circuit straight
+                  to createMiscFileObject and ignore any category-specific
+                  options above — the category sections stay visible (so the
+                  user sees what they're forgoing) but dim slightly to make
+                  the override visually obvious. */}
+              <div className={`flex items-center justify-between p-2 rounded-xl border transition-colors ${
+                importAsRawFile
+                  ? 'bg-cyan-500/10 border-cyan-500/40'
+                  : 'bg-slate-900/40 border-white/5 hover:border-white/10'
+              }`}>
+                <label className="flex items-center gap-2 cursor-pointer flex-1 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={importAsRawFile}
+                    onChange={(e) => setImportAsRawFile(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded accent-cyan-500 shrink-0"
+                  />
+                  <span className={`font-semibold text-[11px] truncate ${importAsRawFile ? 'text-cyan-300' : 'text-slate-200'}`}>
+                    Import as Raw File (Local-only stash in IndexedDB, no broadcast)
+                  </span>
+                </label>
+              </div>
             </div>
           </div>
+          </>
         )}
 
         {/* Footer Actions */}

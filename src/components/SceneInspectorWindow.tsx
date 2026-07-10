@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
-import type { LoadedAsset, AssetManager } from '../engine/AssetManager.ts';
+import { AssetManager, type LoadedAsset } from '../engine/AssetManager.ts';
+import type { MaterialUpdate } from '../services/NetworkService.ts';
 import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
 import { VideoControls } from './VideoControls.tsx';
 import {
@@ -13,7 +14,9 @@ export interface SceneInspectorWindowProps {
   isOpen: boolean;
   onClose: () => void;
   selectedAsset: LoadedAsset | null;
+  onSelectAsset?: (asset: LoadedAsset | null) => void;
   onUpdateAsset: (asset: LoadedAsset) => void;
+  onBroadcastMaterial?: (update: MaterialUpdate) => void;
   onDeleteAsset: (id: string) => void;
   onJumpToAsset: (asset: LoadedAsset) => void;
   onBringAsset: (asset: LoadedAsset) => void;
@@ -88,7 +91,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   isOpen,
   onClose,
   selectedAsset,
+  onSelectAsset,
   onUpdateAsset,
+  onBroadcastMaterial,
   onDeleteAsset,
   onJumpToAsset,
   onBringAsset,
@@ -174,6 +179,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const [selectedNodeUUID, setSelectedNodeUUID] = useState<string | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [inspectorRootUUID, setInspectorRootUUID] = useState<string | null>(null);
+  const [sceneExplorerQuery, setSceneExplorerQuery] = useState('');
+  const [expandedExplorerNodes, setExpandedExplorerNodes] = useState<Set<string>>(new Set());
 
   // Collapsible component sections
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({});
@@ -399,17 +406,15 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     };
   }, [isOpen, selectedAsset?.id]);
 
-  // Auto-close when the inspected asset disappears (delete, network remove,
-  // or explicit deselect). We only close if we previously had a selection,
-  // so opening the inspector with no asset still works.
+  // Track whether we had a selection previously. When selectedAsset becomes null
+  // (deselected or deleted), we stay open showing the full Scene Hierarchy explorer.
   useEffect(() => {
     if (isOpen && selectedAsset) {
       hadSelectionRef.current = true;
-    } else if (isOpen && !selectedAsset && hadSelectionRef.current) {
+    } else if (isOpen && !selectedAsset) {
       hadSelectionRef.current = false;
-      onClose();
     }
-  }, [isOpen, selectedAsset, onClose]);
+  }, [isOpen, selectedAsset]);
 
   // Reset the left-pane tree state (highlighted UUID, expanded branches,
   // visible root) whenever the inspected asset id changes. The previous
@@ -492,39 +497,17 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setMatProps(next);
     if (!selectedAsset) return;
 
-    const allMats = getTargetMaterials();
-    const targetMats = selectedMaterialIndex >= 0 && allMats[selectedMaterialIndex]
-      ? [allMats[selectedMaterialIndex]]
-      : allMats;
+    const update: MaterialUpdate = {
+      assetId: selectedAsset.id,
+      materialIndex: selectedMaterialIndex >= 0 ? selectedMaterialIndex : undefined,
+      [key]: val
+    };
+    if (key === 'emissive') {
+      update.emissiveIntensity = next.emissiveIntensity || 1.0;
+    }
 
-    targetMats.forEach((m) => {
-      if (key === 'color') m.color.set(val);
-      if (key === 'roughness') m.roughness = val;
-      if (key === 'metalness') m.metalness = val;
-      if (key === 'emissive') {
-        m.emissive.set(val);
-        m.emissiveIntensity = next.emissiveIntensity || 1.0;
-      }
-      if (key === 'emissiveIntensity') m.emissiveIntensity = val;
-      if (key === 'opacity') {
-        m.opacity = val;
-        m.transparent = val < 1.0;
-      }
-      if (key === 'normalScale') {
-        if (!m.normalScale) m.normalScale = new THREE.Vector2(1, 1);
-        m.normalScale.set(val, val);
-        m.needsUpdate = true;
-      }
-      if (key === 'aoMapIntensity') {
-        m.aoMapIntensity = val;
-        m.needsUpdate = true;
-      }
-      if (key === 'wireframe') m.wireframe = val;
-      if (key === 'flatShading') {
-        m.flatShading = val;
-        m.needsUpdate = true;
-      }
-    });
+    AssetManager.applyMaterialUpdate(selectedAsset, update);
+    onBroadcastMaterial?.(update);
     onUpdateAsset({ ...selectedAsset });
   };
 
@@ -532,31 +515,16 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
 
   const handleApplyTextureSlot = (slotName: string, url: string | null) => {
     if (!selectedAsset) return;
-    const allMats = getTargetMaterials();
-    const targetMats = selectedMaterialIndex >= 0 && allMats[selectedMaterialIndex]
-      ? [allMats[selectedMaterialIndex]]
-      : allMats;
 
-    if (!url) {
-      targetMats.forEach((m) => {
-        (m as any)[slotName] = null;
-        m.needsUpdate = true;
-      });
-      onUpdateAsset({ ...selectedAsset });
-      return;
-    }
-    new THREE.TextureLoader().load(url, (tex) => {
-      tex.wrapS = THREE.RepeatWrapping;
-      tex.wrapT = THREE.RepeatWrapping;
-      if (slotName === 'map' || slotName === 'emissiveMap') {
-        tex.colorSpace = THREE.SRGBColorSpace;
-      }
-      targetMats.forEach((m) => {
-        (m as any)[slotName] = tex;
-        m.needsUpdate = true;
-      });
-      onUpdateAsset({ ...selectedAsset });
-    });
+    const update: MaterialUpdate = {
+      assetId: selectedAsset.id,
+      materialIndex: selectedMaterialIndex >= 0 ? selectedMaterialIndex : undefined,
+      [slotName]: url
+    };
+
+    AssetManager.applyMaterialUpdate(selectedAsset, update);
+    onBroadcastMaterial?.(update);
+    onUpdateAsset({ ...selectedAsset });
   };
 
   const targetMaterials = getTargetMaterials();
@@ -675,8 +643,218 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           </div>
         </div>
       )}
-      <div className="flex flex-col gap-3 font-sans text-xs select-none pb-4">
-        {/* COMPACT HIERARCHY / PATH BAR (Collapsible Top Section) */}
+      {!selectedAsset ? (
+        <div className="flex flex-col gap-3 font-sans text-xs select-none pb-4">
+          <div className="bg-gradient-to-r from-cyan-950/60 to-slate-900/80 border border-cyan-500/30 rounded-xl p-3.5 flex flex-col gap-1.5 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-300">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-sm font-bold text-white">Scene Hierarchy</div>
+                  <div className="text-[11px] text-cyan-300/80">Select any object in the scene to inspect & edit</div>
+                </div>
+              </div>
+              <div className="text-[11px] font-mono bg-slate-800/80 text-cyan-300 px-2.5 py-1 rounded-lg border border-slate-700">
+                {(assetManager?.assets.size ?? 0)} Asset{(assetManager?.assets.size ?? 0) !== 1 ? 's' : ''}
+              </div>
+            </div>
+          </div>
+
+          {/* Search bar */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5">
+            <input
+              type="text"
+              placeholder="Search scene objects by name or type..."
+              value={sceneExplorerQuery}
+              onChange={(e) => setSceneExplorerQuery(e.target.value)}
+              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-cyan-500 transition"
+            />
+          </div>
+
+          {/* Hierarchy list */}
+          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-1.5 max-h-[580px] overflow-y-auto custom-scrollbar">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1 mb-1">
+              Spawned Assets & Objects
+            </div>
+            {(() => {
+              const allAssets: LoadedAsset[] = assetManager ? Array.from(assetManager.assets.values()) : [];
+              const filtered = allAssets.filter((a: LoadedAsset) => {
+                if (!sceneExplorerQuery.trim()) return true;
+                const q = sceneExplorerQuery.toLowerCase();
+                return a.name.toLowerCase().includes(q) || a.type.toLowerCase().includes(q);
+              });
+
+              const renderHierarchyNode = (node: THREE.Object3D, parentAsset: LoadedAsset, depth: number): React.ReactNode => {
+                const isExpanded = expandedExplorerNodes.has(node.uuid);
+                return (
+                  <div key={node.uuid}>
+                    <div
+                      onClick={() => onSelectAsset?.(parentAsset)}
+                      style={{ paddingLeft: `${depth * 14 + 8}px` }}
+                      className="flex items-center justify-between py-1.5 pr-2 rounded-lg hover:bg-slate-900 border border-transparent hover:border-slate-800 cursor-pointer transition group"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        {node.children.length > 0 ? (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedExplorerNodes(prev => {
+                                const next = new Set(prev);
+                                if (next.has(node.uuid)) next.delete(node.uuid);
+                                else next.add(node.uuid);
+                                return next;
+                              });
+                            }}
+                            className="p-0.5 rounded hover:bg-slate-800 text-slate-400 transition shrink-0"
+                          >
+                            {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                          </button>
+                        ) : (
+                          <span className="w-3.5 h-3.5 shrink-0" />
+                        )}
+                        <Box className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span className="truncate text-slate-200 group-hover:text-cyan-300 font-medium">
+                          {node.name || node.type || 'Unnamed Node'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-slate-500 font-mono shrink-0">
+                        Object3D
+                      </span>
+                    </div>
+                    {isExpanded && (
+                      <div className="flex flex-col">
+                        {node.children.map(child => renderHierarchyNode(child, parentAsset, depth + 1))}
+                      </div>
+                    )}
+                  </div>
+                );
+              };
+
+              return (
+                <>
+                  {filtered.length === 0 ? (
+                    <div className="py-6 text-center text-slate-400 text-xs italic">
+                      {allAssets.length === 0 ? 'No objects spawned in scene yet.' : 'No matching objects found.'}
+                    </div>
+                  ) : (
+                    filtered.map((asset) => {
+                      const isExpanded = expandedExplorerNodes.has(asset.id);
+                      const hasChildren = asset.object3d.children.length > 0;
+
+                      return (
+                        <div key={asset.id} className="flex flex-col border border-slate-900 hover:border-slate-800 rounded-lg overflow-hidden transition">
+                          <div
+                            onClick={() => onSelectAsset?.(asset)}
+                            className="flex items-center justify-between p-2.5 bg-slate-900/40 hover:bg-slate-800/80 cursor-pointer transition group"
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              {hasChildren ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedExplorerNodes(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(asset.id)) next.delete(asset.id);
+                                      else next.add(asset.id);
+                                      return next;
+                                    });
+                                  }}
+                                  className="p-1 rounded hover:bg-slate-700 text-slate-400 transition shrink-0"
+                                >
+                                  {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                                </button>
+                              ) : (
+                                <span className="w-3.5 h-3.5 shrink-0" />
+                              )}
+
+                              <div className="p-1.5 rounded bg-slate-800 text-amber-400 border border-slate-700 shrink-0">
+                                {asset.type === 'video' ? <Activity className="w-3.5 h-3.5 text-pink-400" /> :
+                                 asset.type === 'image' ? <ImageIcon className="w-3.5 h-3.5 text-cyan-400" /> :
+                                 <Box className="w-3.5 h-3.5 text-amber-400" />}
+                              </div>
+
+                              <div className="min-w-0">
+                                <div className="text-slate-100 font-bold group-hover:text-cyan-300 transition truncate">
+                                  {asset.name}
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono">
+                                  Pos: {asset.object3d.position.x.toFixed(1)}, {asset.object3d.position.y.toFixed(1)}, {asset.object3d.position.z.toFixed(1)}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wider bg-slate-800 text-slate-300 border border-slate-700">
+                                {asset.type}
+                              </span>
+                              <div className="px-2.5 py-1 rounded bg-cyan-500/20 group-hover:bg-cyan-500 text-cyan-300 group-hover:text-slate-950 font-bold text-[11px] transition">
+                                Inspect
+                              </div>
+                            </div>
+                          </div>
+
+                          {isExpanded && hasChildren && (
+                            <div className="flex flex-col bg-slate-950/60 border-t border-slate-900 py-1">
+                              {asset.object3d.children.map(child => renderHierarchyNode(child, asset, 1))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {scene && scene.children.length > 0 && (
+                    <>
+                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1 mt-4 mb-1">
+                        Root Scene Nodes (THREE.Scene)
+                      </div>
+                      {scene.children.map((node) => {
+                        if (!sceneExplorerQuery.trim() || node.name?.toLowerCase().includes(sceneExplorerQuery.toLowerCase()) || node.type?.toLowerCase().includes(sceneExplorerQuery.toLowerCase())) {
+                          const matchedAsset = allAssets.find(a => a.object3d === node || a.object3d.uuid === node.uuid);
+                          return (
+                            <div
+                              key={node.uuid}
+                              onClick={() => {
+                                if (matchedAsset) {
+                                  onSelectAsset?.(matchedAsset);
+                                } else {
+                                  onSelectAsset?.({
+                                    id: node.uuid,
+                                    name: node.name || node.type || 'Scene Object',
+                                    type: '3d-model',
+                                    object3d: node,
+                                    isCollidable: false
+                                  });
+                                }
+                              }}
+                              className="flex items-center justify-between p-2 rounded-lg bg-slate-900/40 hover:bg-slate-800/80 cursor-pointer border border-slate-900 hover:border-slate-800 transition group"
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                <Box className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                                <span className="text-slate-200 group-hover:text-cyan-300 font-medium truncate">
+                                  {node.name || node.type || 'Unnamed Node'}
+                                </span>
+                              </div>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-400">
+                                {node.type}
+                              </span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })}
+                    </>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3 font-sans text-xs select-none pb-4">
+          {/* COMPACT HIERARCHY / PATH BAR (Collapsible Top Section) */}
         <div className={`bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 ${
           !interactive ? 'pointer-events-none opacity-80' : ''
         }`}>
@@ -696,6 +874,14 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
               </span>
             </div>
             <div className="flex gap-1.5 shrink-0">
+              <button
+                onClick={() => onSelectAsset?.(null)}
+                title="Return to full scene hierarchy to select another object"
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-cyan-300 font-bold text-[11px] flex items-center gap-1 transition shrink-0"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>All Objects</span>
+              </button>
               {inspectorRootUUID && (
                 <button
                   onClick={handleResetInspectorRoot}
@@ -1347,7 +1533,15 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                               style={{ display: 'none' }}
                               onChange={(e) => {
                                 const f = e.target.files?.[0];
-                                if (f) handleApplyTextureSlot(slot.key, URL.createObjectURL(f));
+                                if (f) {
+                                  const reader = new FileReader();
+                                  reader.onload = () => {
+                                    if (typeof reader.result === 'string') {
+                                      handleApplyTextureSlot(slot.key, reader.result);
+                                    }
+                                  };
+                                  reader.readAsDataURL(f);
+                                }
                               }}
                             />
                           </label>
@@ -1635,6 +1829,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           </div>
         </div>
       </div>
+      )}
 
       {/* Separate Floating Material Properties & PBR Texture Inspector Window */}
       {showMaterialModal && (
@@ -1798,7 +1993,15 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                               style={{ display: 'none' }}
                               onChange={(e) => {
                                 const f = e.target.files?.[0];
-                                if (f) handleApplyTextureSlot(slot.key, URL.createObjectURL(f));
+                                if (f) {
+                                  const reader = new FileReader();
+                                  reader.onload = () => {
+                                    if (typeof reader.result === 'string') {
+                                      handleApplyTextureSlot(slot.key, reader.result);
+                                    }
+                                  };
+                                  reader.readAsDataURL(f);
+                                }
                               }}
                             />
                           </label>

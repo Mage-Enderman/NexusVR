@@ -92,6 +92,7 @@ export class SpatialPanelManager {
   // so _buildHTMLMesh can attach the InteractiveGroup to the scene root
   // without threading the parameter through. Kept null in non-VR mode.
   private sceneRef: THREE.Scene | null = null;
+  private sharedInteractiveGroup: InteractiveGroup | null = null;
   // Per-frame scratch Vector3 reused across panels in render()'s
   // htmlMesh scale sync. Allocated once at construction to avoid
   // per-frame per-panel GC churn — earlier this was a local
@@ -502,7 +503,24 @@ export class SpatialPanelManager {
   public handleLockedScroll(deltaY: number): boolean {
     const el = this.hoveredElement;
     if (!el) return false;
-    const scrollable = this._findScrollableAncestor(el);
+    let scrollable = this._findScrollableAncestor(el);
+    if (!scrollable) {
+      for (const [, entry] of this.panels) {
+        if (entry.domContainer.contains(el)) {
+          const all = entry.domContainer.querySelectorAll('*');
+          for (let i = 0; i < all.length; i++) {
+            const candidate = all[i] as HTMLElement;
+            const cs = window.getComputedStyle(candidate);
+            const oy = cs.overflowY;
+            if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') && candidate.clientHeight > 0 && candidate.scrollHeight > candidate.clientHeight) {
+              scrollable = candidate;
+              break;
+            }
+          }
+          break;
+        }
+      }
+    }
     if (!scrollable) return false;
     scrollable.scrollTop += deltaY;
     return true;
@@ -602,11 +620,42 @@ export class SpatialPanelManager {
     for (const [, entry] of this.panels) {
       this._destroyHTMLMesh(entry);
     }
-    // Now safe to clear controller refs after the re-parenting restore.
+    if (this.sharedInteractiveGroup) {
+      const ig = this.sharedInteractiveGroup;
+      if (this.sceneRef) {
+        if (this.vrController1 && this.vrController1.parent === ig) {
+          ig.remove(this.vrController1 as unknown as THREE.Object3D);
+          this.sceneRef.add(this.vrController1 as unknown as THREE.Object3D);
+        }
+        if (this.vrController2 && this.vrController2.parent === ig) {
+          ig.remove(this.vrController2 as unknown as THREE.Object3D);
+          this.sceneRef.add(this.vrController2 as unknown as THREE.Object3D);
+        }
+        this.sceneRef.remove(ig);
+      } else if (ig.parent) {
+        ig.parent.remove(ig);
+      }
+      this.sharedInteractiveGroup = null;
+    }
     this.vrController1 = null;
     this.vrController2 = null;
     this.vrCamera = null;
     this.sceneRef = null;
+  }
+
+  private ensureSharedInteractiveGroup(): InteractiveGroup | null {
+    if (this.sharedInteractiveGroup) return this.sharedInteractiveGroup;
+    if (!this.vrRenderer) return null;
+    const ig = new InteractiveGroup();
+    const cam = this.vrCamera ?? SpatialPanelManager.DEFAULT_VR_CAMERA;
+    ig.listenToPointerEvents(this.vrRenderer, cam);
+    if (this.vrController1) ig.add(this.vrController1 as unknown as THREE.Object3D);
+    if (this.vrController2) ig.add(this.vrController2 as unknown as THREE.Object3D);
+    if (this.sceneRef) {
+      this.sceneRef.add(ig);
+    }
+    this.sharedInteractiveGroup = ig;
+    return ig;
   }
 
   // -------------------------------------------------------------------------
@@ -768,7 +817,6 @@ export class SpatialPanelManager {
   ): void {
     const renderer = this.vrRenderer;
     if (!renderer) return;
-    // HTMLMesh rasterises the DOM subtree to a CanvasTexture
     let htmlMesh: HTMLMesh;
     try {
       htmlMesh = new HTMLMesh(entry.domContainer);
@@ -777,102 +825,39 @@ export class SpatialPanelManager {
       return;
     }
 
-    // Size the mesh to match the frame (CSS pixels × cssScale)
     const w = entry.cssWidth * entry.cssScale;
     const h = entry.cssHeight * entry.cssScale;
     htmlMesh.scale.set(w, h, 1);
-    // Position slightly in front of the frame so it renders above it
     htmlMesh.position.z = 0.02;
 
-    // InteractiveGroup wires VR controller pointer events to the mesh.
-    // Camera arg: omitted (undefined). The pre-fix version cast
-    // `entry.domContainer` (HTMLDivElement) as THREE.Camera — a silent
-    // type bug; with no value the implicit cast is also impossible.
-    // In XR mode InteractiveGroup dispatches events from XR controller
-    // rays directly, without projecting through a camera, so omitting
-    // the camera is the correct behaviour when only the XR pose path
-    // is in use (this also matches the typed default in three.js'
-    // InteractiveGroup.listenToPointerEvents, whose signature is
-    // `camera?: Camera`).
-    const ig = new InteractiveGroup();
-    // this.vrCamera is populated in enterVR; fall back to a
-    // PerspectiveCamera identity in the (theoretical) case
-    // _buildHTMLMesh is called without a real camera.
-    // Fallback only fires when _buildHTMLMesh is called without
-    // enterVR having populated vrCamera; the static instance
-    // below is reused across calls to avoid per-call allocation.
-    const cam = this.vrCamera ?? SpatialPanelManager.DEFAULT_VR_CAMERA;
-    ig.listenToPointerEvents(renderer, cam);
-    // Add the XR controllers so InteractiveGroup's built-in raycaster
-    // can read their pose. We must attach `ig` to the SCENE root (below),
-    // NOT to entry.group, otherwise moving the panel drags the controllers
-    // (and their child laser-Line meshes added by SceneEngine) along —
-    // each press of the B button in App.tsx reads controller.matrixWorld
-    // and pushes spawnPos another 0.55 m forward, compounding every cycle
-    // and making the lasers drift further from the user on every toggle.
-    if (this.vrController1) ig.add(this.vrController1 as unknown as THREE.Object3D);
-    if (this.vrController2) ig.add(this.vrController2 as unknown as THREE.Object3D);
-
-    ig.add(htmlMesh);
-    // CRITICAL FIX: anchor `ig` to the SCENE root, not to entry.group.
-    // The per-frame sync in `render()` copies entry.group's world transform
-    // into htmlMesh's local transform so the panel content still appears
-    // where the panel group is positioned — without compounding drift on
-    // the controllers their pawned.
-    const scene = this.sceneRef;
-    if (scene) {
-      scene.add(ig);
+    const ig = this.ensureSharedInteractiveGroup();
+    if (ig) {
+      ig.add(htmlMesh);
+    } else if (this.sceneRef) {
+      this.sceneRef.add(htmlMesh);
     } else {
-      // Defensive fallback if enterVR wasn't called yet: attach to entry.group
-      // (old buggy behaviour). The B/Y handler in App.tsx only opens panels
-      // while renderer.xr.isPresenting is true, so this branch shouldn't fire
-      // in normal flow.
-      entry.group.add(ig);
+      entry.group.add(htmlMesh);
     }
 
     entry.htmlMesh = htmlMesh;
     entry.interactiveGroup = ig;
-
-    // Hide CSS3DObject to avoid visual conflict
     entry.css3dObject.visible = false;
   }
 
   private _destroyHTMLMesh(entry: SpatialPanelEntry): void {
     if (entry.htmlMesh) {
-      const ig = entry.interactiveGroup;
+      const ig = entry.interactiveGroup || this.sharedInteractiveGroup;
       if (ig) {
-        // The InteractiveGroup was attached to the scene root in
-        // _buildHTMLMesh; remove it from the scene (or from the panel
-        // group if the defensive fallback path was taken). The
-        // controllers we reparented into `ig` need to be lifted back
-        // onto the scene BEFORE `ig` is disposed, otherwise they would
-        // be orphaned (parented to the soon-to-be-garbage-collected
-        // InteractiveGroup) and lose their XR pose updates.
-        if (ig.parent && this.sceneRef && ig.parent === this.sceneRef) {
-          if (this.vrController1 && this.vrController1.parent === ig) {
-            ig.remove(this.vrController1);
-            this.sceneRef.add(this.vrController1);
-          }
-          if (this.vrController2 && this.vrController2.parent === ig) {
-            ig.remove(this.vrController2);
-            this.sceneRef.add(this.vrController2);
-          }
-          this.sceneRef.remove(ig);
-        } else if (ig.parent) {
-          ig.parent.remove(ig);
-        }
-        ig.traverse((child) => {
-          if ((child as THREE.Mesh).isMesh) {
-            const m = child as THREE.Mesh;
-            if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
-            else m.material?.dispose();
-            m.geometry?.dispose();
-          }
-        });
+        ig.remove(entry.htmlMesh);
+      } else if (entry.htmlMesh.parent) {
+        entry.htmlMesh.parent.remove(entry.htmlMesh);
       }
+      const m = entry.htmlMesh;
+      if (Array.isArray(m.material)) m.material.forEach(mat => mat.dispose());
+      else m.material?.dispose();
+      m.geometry?.dispose();
       entry.htmlMesh = null;
       entry.interactiveGroup = null;
-      // Restore CSS3DObject
       entry.css3dObject.visible = true;
     }
   }

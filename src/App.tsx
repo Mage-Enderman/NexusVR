@@ -10,7 +10,14 @@ import { ManipulationManager } from './engine/ManipulationManager.ts';
 import type { TransformMode } from './engine/ManipulationManager.ts';
 import { AvatarManager } from './engine/AvatarManager.ts';
 import { NetworkService } from './services/NetworkService.ts';
-import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage } from './services/NetworkService.ts';
+import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate } from './services/NetworkService.ts';
+import { VideoStreamingService } from './services/VideoStreamingService.ts';
+
+// Phase 3A: streaming threshold mirrors NetworkService.MAX_INLINED_FILE_BYTES
+// (15 MB). Anything larger strips out of the base64 JSON envelope to avoid
+// the Quest browser's renderer OOM, so peers need a streamingHint in the
+// spawn envelope to pull bytes over a binary DataChannel.
+const VIDEO_STREAMING_THRESHOLD = 15 * 1024 * 1024;
 import { InventoryService } from './services/InventoryService.ts';
 import type { InventoryItem } from './services/InventoryService.ts';
 import { UndoRedoManager } from './services/UndoRedoManager.ts';
@@ -171,6 +178,11 @@ export const App: React.FC = () => {
   const avatarManagerRef = useRef<AvatarManager | null>(null);
   const environmentManagerRef = useRef<EnvironmentManager | null>(null);
   const networkServiceRef = useRef<NetworkService>(new NetworkService());
+// Phase 3A: peer-side delivery for large videos via a binary DataChannel.
+// Constructor wires net.onPeerLeave so peer teardown is automatic.
+const videoStreamingServiceRef = useRef<VideoStreamingService>(
+  new VideoStreamingService(networkServiceRef.current)
+);
   const inventoryServiceRef = useRef<InventoryService>(new InventoryService());
   const undoRedoManagerRef = useRef<UndoRedoManager>(new UndoRedoManager());
   const vrHudRef = useRef<VRHUDManager | null>(null);
@@ -185,6 +197,16 @@ export const App: React.FC = () => {
   // and removed by registerOnAssetAdded's id-match on asset landing,
   // OR by net.onPendingCancel / net.onRemove / handleDisconnect.
   const pendingAssetsRef = useRef<Map<string, { group: THREE.Group; dispose: () => void; oversized?: boolean }>>(new Map());
+  // Phase 3A: per-asset suppress-Set for the auto-broadcast race.
+  // handleImportFile / handleImportAssetFromConfig add the asset's
+  // placeholderId to this Set BEFORE awaiting AssetManager.importFile;
+  // the registerOnAssetAdded callback's gate consults it and, if
+  // present, deletes-and-returns without firing its own broadcast.
+  // handleImportFile / handleImportAssetFromConfig do the manual
+  // broadcast AFTER the await with the streamingHint attached. A
+  // `finally` block in both handlers cleans up the entry on the
+  // error path (where registerOnAssetAdded never fires).
+  const streamingSuppressedAssetIdsRef = useRef<Set<string>>(new Set());
 
   // UV of the VR HUD's curved screen under the right controller's aim
   // ray. Updated every animate-frame while the HUD is showing in VR;
@@ -531,7 +553,7 @@ export const App: React.FC = () => {
     const sceneEngine = new SceneEngine(containerRef.current);
     sceneEngineRef.current = sceneEngine;
 
-    const assetManager = new AssetManager(sceneEngine.scene, sceneEngine.worldRoot);
+    const assetManager = new AssetManager(sceneEngine.scene, sceneEngine.worldRoot, undefined, videoStreamingServiceRef.current);
     assetManagerRef.current = assetManager;
 
     // Pass `assetManager.assets` so the manager's RMB-grab raycast can
@@ -547,6 +569,8 @@ export const App: React.FC = () => {
       assetManager.assets
     );
     manipulationManagerRef.current = manipulationManager;
+    manipulationManager.worldRoot = sceneEngine.worldRoot;
+    networkServiceRef.current.worldRoot = sceneEngine.worldRoot;
     // Wire VR input so the held-asset dolly can read the holding
     // controller's thumbstick Y. SceneEngine constructs
     // VRInputManager synchronously in its constructor (see
@@ -991,7 +1015,8 @@ const vrHud = new VRHUDManager(
                     applyTextureUrl(heldImg.url);
                     return;
                   }
-                  const am = assetManagerRef.current;
+                  // NOTE: do NOT redeclare `am` inside Priority 2/3/4 of any handler that also reads this outer `am` — use a distinct name. See Priority 4’s `amPrio4` rename.
+            const am = assetManagerRef.current;
                   const imgAssets = am
                     ? Array.from(am.assets.values()).filter(
                         (a): a is LoadedAsset & { url: string } => a.type === 'image' && typeof a.url === 'string' && a.url.length > 0
@@ -1508,13 +1533,50 @@ const vrHud = new VRHUDManager(
               }
             }
             // PRIORITY 3: HUD click (right hand).
-            // Left trigger without a co-held right trigger is a no-op
-            // (left trigger reserved for two-handed scale or future use).
             if (side === 'right') {
               const hud = vrHudRef.current;
               if (hud && (hud.isVisible || hud.activePanel)) {
                 const uv = currentVrHudUvRef.current;
-                if (uv) hud.handleRayIntersection(uv);
+                if (uv) {
+                  hud.handleRayIntersection(uv);
+                  return;
+                }
+              }
+            }
+            // PRIORITY 4: Click / select 3D asset or video in VR scene.
+            // Walks the raycast hit's parent chain to recover the original
+            // LoadedAsset via AssetManager's id->asset Map (mirrors the
+            // grip-handler's `objToAsset` lookup pattern). The previous
+            // iteration called `am.getAssetByObject3D(top)` which does not
+            // exist on AssetManager — every VR trigger pulled on an asset
+            // would throw a TypeError mid-handler, abort the rest of PRIORITY
+            // 4, and leave React's selection state undefined.
+            // `amPrio4` so this `const` doesn't shadow the outer `am` and re-trigger TS2448/TS2454 at the Priority 2 two-handed-scale read ~1474 (sibling branches in the same `if (button === 'trigger')`).
+            const amPrio4 = assetManagerRef.current;
+            const ctrl = side === 'right' ? se.vrInput.getController('right') : se.vrInput.getController('left');
+            if (amPrio4 && ctrl) {
+              const origin = new THREE.Vector3();
+              const direction = new THREE.Vector3(0, 0, -1);
+              ctrl.getWorldPosition(origin);
+              direction.transformDirection(ctrl.matrixWorld).normalize();
+              se.raycaster.set(origin, direction);
+              const assetMeshes: THREE.Object3D[] = [];
+              const objToAsset = new Map<THREE.Object3D, LoadedAsset>();
+              amPrio4.assets.forEach((a) => {
+                assetMeshes.push(a.object3d);
+                objToAsset.set(a.object3d, a);
+              });
+              const hits = se.raycaster.intersectObjects(assetMeshes, true);
+              if (hits.length > 0) {
+                let top: THREE.Object3D | null = hits[0].object;
+                while (top && !objToAsset.has(top)) top = top.parent;
+                const hitAsset = top ? objToAsset.get(top) ?? null : null;
+                if (hitAsset) {
+                  manipulationManagerRef.current?.selectAsset(hitAsset);
+                  if (hitAsset.type === 'video') {
+                    setActiveVideoAssetId((prev) => prev === hitAsset.id ? null : hitAsset.id);
+                  }
+                }
               }
             }
           }
@@ -1776,7 +1838,9 @@ const vrHud = new VRHUDManager(
           // so a guest receiving this asset restores the right
           // persisting state from the first frame — without it, the
           // inspector checkbox defaults to true regardless of send.
-          isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined
+          isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+          materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+          videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined
         };
         net.broadcastSpawn(spawnData);
       }
@@ -1796,6 +1860,17 @@ const vrHud = new VRHUDManager(
 
     net.onTransform((update) => {
       manipulationManager.applyRemoteTransform(update, assetManager.assets);
+    });
+
+    net.onMaterialUpdate((update) => {
+      const asset = assetManager.assets.get(update.assetId);
+      if (asset) {
+        AssetManager.applyMaterialUpdate(asset, update);
+        const sel = selectedAssetRef.current;
+        if (sel && sel.id === update.assetId) {
+          setSelectedAsset({ ...asset });
+        }
+      }
     });
 
     net.onAvatar((update) => {
@@ -1836,6 +1911,67 @@ const vrHud = new VRHUDManager(
       // animation loop's `oversized` skip below keeps it static (no
       // pulse) so it reads as a permanent failure indicator rather
       // than a still-loading asset.
+      if (data.streamingHint && data.type === 'video') {
+        // Phase 3A receiver: large video on a binary DataChannel.
+        // We don't go through blob -> importFile or url ->
+        // importFromUrl; instead VideoStreamingService.attachReceiver
+        // gives us a pre-wired MSE-backed <video> element streamed
+        // straight into AssetManager.loadVideoFromStreamedSource which
+        // wraps it as a THREE.VideoTexture.
+        //
+        // v4 fix: attachReceiver (sync) is wrapped in try/catch so a
+        // synchronous throw (e.g. MediaSource unsupported on iOS Safari)
+        // cleanly falls through to the fileDataOversized red-placeholder
+        // branch below instead of being swallowed inside an IIFE whose
+        // outer return had already fired. We use the existing onSpawn's
+        // `.then(...).catch(...)` pattern (mirrors the importFile
+        // chains two blocks down) for the async load step.
+        let v: HTMLVideoElement | null = null;
+        try {
+          v = videoStreamingServiceRef.current.attachReceiver(
+            data.streamingHint,
+            data.id,
+            data.senderPeerId
+          );
+        } catch (err) {
+          console.warn(
+            '[VideoStreaming] attachReceiver failed, falling through',
+            err
+          );
+          v = null;
+        }
+        if (v) {
+          const posV = new THREE.Vector3(...data.position);
+          assetManager.loadVideoFromStreamedSource(
+            data.id,
+            data.name,
+            v,
+            posV,
+            { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+          )
+            .then((loadedAsset) => {
+              if (loadedAsset) {
+                loadedAsset.object3d.rotation.set(...data.rotation);
+                loadedAsset.object3d.scale.set(...data.scale);
+                if (data.isPersistent !== undefined) {
+                  loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+                }
+              }
+            })
+            .catch((err) => {
+              console.warn(
+                '[VideoStreaming] loadVideoFromStreamedSource failed',
+                err
+              );
+            });
+          return;
+        }
+        // v null: fall through to fileDataOversized branch below so
+        // peers still see the red placeholder.
+      }
       if (data.fileDataOversized) {
         // A prior 'pending' broadcast may have already drawn a
         // "Loading" placeholder for this id (the host fires 'pending'
@@ -1872,6 +2008,9 @@ const vrHud = new VRHUDManager(
         if (data.isPersistent !== undefined) {
           prim.object3d.userData.isPersistent = data.isPersistent;
         }
+        if (data.materialState) {
+          AssetManager.applyMaterialUpdate(prim, data.materialState);
+        }
       } else if (data.fileData && data.name) {
         const blob = new Blob([data.fileData]);
         // Pass `data.id` as the AssetManager's customId so the local
@@ -1882,7 +2021,7 @@ const vrHud = new VRHUDManager(
         // placeholder the moment this asset resolves — clean
         // handoff, no separate tempId → assetId mapping required.
         const file = new File([blob], data.name);
-        assetManager.importFile(file, pos, undefined, data.id).then((asset) => {
+        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
           if (asset) {
             asset.object3d.rotation.set(...data.rotation);
             asset.object3d.scale.set(...data.scale);
@@ -1893,6 +2032,22 @@ const vrHud = new VRHUDManager(
             // timing differs).
             if (data.isPersistent !== undefined) {
               asset.object3d.userData.isPersistent = data.isPersistent;
+            }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(asset, data.materialState);
+            }
+          }
+        });
+      } else if (data.url) {
+        assetManager.importFromUrl(data.url, pos, undefined, data.id).then((asset) => {
+          if (asset) {
+            asset.object3d.rotation.set(...data.rotation);
+            asset.object3d.scale.set(...data.scale);
+            if (data.isPersistent !== undefined) {
+              asset.object3d.userData.isPersistent = data.isPersistent;
+            }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(asset, data.materialState);
             }
           }
         });
@@ -1967,6 +2122,10 @@ const vrHud = new VRHUDManager(
       avatarManager.attachPeerAudio(peerId, stream);
     }));
 
+    disposers.push(net.onVideoLiveStream((assetId, stream) => {
+      assetManager.attachLiveStreamToVideo(assetId, stream);
+    }));
+
     disposers.push(net.onRoleUpdate((data) => {
       if (data.targetPeerId === net.localPeerId) {
         setLocalRole(data.newRole);
@@ -2002,16 +2161,13 @@ const vrHud = new VRHUDManager(
     inventoryServiceRef.current.getItems().then((items) => setInventoryItems(items));
 
     disposers.push(net.onSyncReq((fromPeerId) => {
-      if (net.isHost) {
+      if (assetManager.assets.size > 0 || net.isHost) {
         const assetsList: AssetSpawnData[] = [];
         assetManager.assets.forEach((a) => {
-          // Mirror registerOnAssetAdded's broadcast above — the snapshot
-          // for late-joining guests needs primitiveType so the receiving
-          // onSyncResp handler can re-import the cube/torus/etc. without
-          // dropping them silently.
           const primitiveType = (a.object3d.userData as Record<string, unknown>)?.primitiveType as
             | 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane'
             | undefined;
+          const hint = (a.object3d.userData as Record<string, unknown>)?.streamingHint as import('./services/VideoStreamingService.ts').VideoStreamingHint | undefined;
           assetsList.push({
             id: a.id,
             name: a.name,
@@ -2023,8 +2179,21 @@ const vrHud = new VRHUDManager(
             primitiveType,
             fileData: a.fileData,
             isCollidable: a.isCollidable,
-            isPersistent: (a.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined
+            isPersistent: (a.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+            materialState: (a.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+            videoAspectRatio: (a.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+            streamingHint: hint
           });
+          if (hint && net.isHost) {
+            const syncMode = (a.object3d.userData as { videoState?: { syncMode?: string } }).videoState?.syncMode;
+            if (syncMode === 'watch-party' && a.videoElement) {
+              videoStreamingServiceRef.current.startLiveStreamToPeer(a.id, a.videoElement, fromPeerId);
+            } else {
+              videoStreamingServiceRef.current.beginStreamingToPeer(hint, fromPeerId).catch((err) => {
+                console.warn('[VideoStreaming] late-join pump failed for', fromPeerId, err);
+              });
+            }
+          }
         });
         net.sendSceneSnapshot(fromPeerId, assetsList);
       }
@@ -2032,6 +2201,65 @@ const vrHud = new VRHUDManager(
 
     disposers.push(net.onSyncResp((snapshot) => {
       snapshot.assets.forEach((data) => {
+        // Phase 3A late-join branch - MUST come BEFORE the isImporting
+        // guard because the manual broadcast path sometimes lands
+        // AFTER the local user has already placed a placeholder.
+        // We want to UPGRADE that placeholder (replace the
+        // blob/file import path) rather than short-circuit on the
+        // existence guard.
+        //
+        // Fix A: async work via IIFE - same rationale as onSpawn
+        // above; forEach's callback is plain sync so we can't use
+        // `await` directly.
+        if (data.streamingHint && data.type === 'video') {
+          // v4 fix: see onSpawn's mirror comment. Sync attachReceiver
+          // in try/catch; if it throws, fall through (in this branch
+          // the fileDataOversized fallback is below the snapshotForEach).
+          let v: HTMLVideoElement | null = null;
+          try {
+            v = videoStreamingServiceRef.current.attachReceiver(
+              data.streamingHint,
+              data.id,
+              data.senderPeerId
+            );
+          } catch (err) {
+            console.warn(
+              '[VideoStreaming] late-join attachReceiver failed, falling through',
+              err
+            );
+            v = null;
+          }
+          if (v) {
+            const posV = new THREE.Vector3(...data.position);
+            assetManager.loadVideoFromStreamedSource(
+              data.id,
+              data.name,
+              v,
+              posV,
+              { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+            )
+              .then((loadedAsset) => {
+                if (loadedAsset) {
+                  loadedAsset.object3d.rotation.set(...data.rotation);
+                  loadedAsset.object3d.scale.set(...data.scale);
+                  if (data.isPersistent !== undefined) {
+                    loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+                  }
+                  if (data.materialState) {
+                    AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+                  }
+                }
+              })
+              .catch((err) => {
+                console.warn(
+                  '[VideoStreaming] late-join loadVideoFromStreamedSource failed',
+                  err
+                );
+              });
+            return;
+          }
+          // v null: fall through to forEach's normal branches below.
+        }
         // Belt + braces: skip late-join snapshot items whose import
         // is already in-flight from a separate listener (mirrors the
         // onSpawn guard above). Without this, two near-simultaneous
@@ -2073,7 +2301,7 @@ const vrHud = new VRHUDManager(
             return;
           }
           if (data.type === 'primitive' && data.primitiveType) {
-            const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+            const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
             prim.object3d.rotation.set(...data.rotation);
             prim.object3d.scale.set(...data.scale);
             // Mirror the late-join snapshot's userData.isPersistent so
@@ -2082,20 +2310,34 @@ const vrHud = new VRHUDManager(
             if (data.isPersistent !== undefined) {
               prim.object3d.userData.isPersistent = data.isPersistent;
             }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(prim, data.materialState);
+            }
           } else if (data.fileData && data.name) {
             const blob = new Blob([data.fileData]);
             const file = new File([blob], data.name);
-            assetManager.importFile(file, pos).then((asset) => {
+            assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
               if (asset) {
                 asset.object3d.rotation.set(...data.rotation);
                 asset.object3d.scale.set(...data.scale);
-                // Snapshot receive-side parity with the live 'spawn'
-                // path above: write the persistent flag onto the
-                // importer's userData immediately so the receiver's
-                // inspector tree + checkbox reflect what the host
-                // had configured.
                 if (data.isPersistent !== undefined) {
                   asset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(asset, data.materialState);
+                }
+              }
+            });
+          } else if (data.url) {
+            assetManager.importFromUrl(data.url, pos, undefined, data.id).then((asset) => {
+              if (asset) {
+                asset.object3d.rotation.set(...data.rotation);
+                asset.object3d.scale.set(...data.scale);
+                if (data.isPersistent !== undefined) {
+                  asset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(asset, data.materialState);
                 }
               }
             });
@@ -2316,12 +2558,16 @@ const vrHud = new VRHUDManager(
       const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       lastMouseNdcRef.current.set(x, y);
     };
-    // Scroll wheel: when locked + over a panel, forward to the panel element.
+    // Scroll wheel: when locked/crosshair + pointing at a panel, scroll the panel directly.
     const onCanvasWheel = (e: WheelEvent) => {
       const spm = sceneEngine.spatialPanelManager;
-      if (document.pointerLockElement && spm?.isOverPanel) {
-        e.preventDefault();
-        spm.handleLockedScroll(e.deltaY);
+      const isLocked = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
+      if (isLocked && spm) {
+        spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+        if (spm.isOverPanel && spm.handleLockedScroll(e.deltaY)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
       }
     };
     const domElem = sceneEngine.renderer.domElement;
@@ -2576,6 +2822,8 @@ const vrHud = new VRHUDManager(
       createdAt: Date.now(),
       fileData: asset.fileData,
       url: asset.url,
+      primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as any,
+      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
       metadata:
         asset.metadata ||
         (asset.fileData ? { fileSize: asset.fileData.byteLength } : undefined),
@@ -2640,6 +2888,11 @@ const vrHud = new VRHUDManager(
         manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
+      }
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined;
+      if (matState) {
+        AssetManager.applyMaterialUpdate(newAsset, matState);
+        networkServiceRef.current.broadcastMaterialUpdate({ ...matState, assetId: newAsset.id });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -2820,10 +3073,9 @@ const vrHud = new VRHUDManager(
       } else if (e.key === 'o' || e.key === 'O') {
         // Toggle the Scene Inspector. Plain O only — modifier combos
         // (Ctrl+O for "Open File" in browsers, etc.) fall through to
-        // the browser's default. Only opens when an asset is selected
-        // so pressing O with nothing selected is a no-op rather than
-        // throwing the inspector up empty.
-        if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedAsset) {
+        // the browser's default. Opens either inspecting the selected asset
+        // or showing the full Scene Hierarchy explorer when none selected.
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
           e.preventDefault();
           setShowSceneInspector((prev) => !prev);
           return;
@@ -3012,6 +3264,8 @@ const vrHud = new VRHUDManager(
       createdAt: Date.now(),
       fileData: asset.fileData,
       url: asset.url,
+      primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as any,
+      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
       metadata:
         asset.metadata ||
         (asset.fileData ? { fileSize: asset.fileData.byteLength } : undefined),
@@ -3089,6 +3343,11 @@ const vrHud = new VRHUDManager(
         manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
+      }
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined;
+      if (matState) {
+        AssetManager.applyMaterialUpdate(newAsset, matState);
+        networkServiceRef.current.broadcastMaterialUpdate({ ...matState, assetId: newAsset.id });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -3241,7 +3500,7 @@ const vrHud = new VRHUDManager(
   // has finished so handleDeleteSelected is well-defined.
   // VideoControls isn't React.memo'd, so handler-identity churn
   // between renders doesn't cause regression.
-  const handleVideoAction = (assetId: string, kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute', payload?: number | 'global' | 'local') => {
+  const handleVideoAction = (assetId: string, kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute' | 'syncMode', payload?: number | 'global' | 'local' | 'persistent' | 'watch-party') => {
     const am = assetManagerRef.current;
     const net = networkServiceRef.current;
     if (!am) return;
@@ -3257,6 +3516,19 @@ const vrHud = new VRHUDManager(
       return Math.max(0, Math.min(Math.max(0, dur - 0.05), s));
     };
     switch (kind) {
+      case 'syncMode':
+        if (payload === 'persistent' || payload === 'watch-party') {
+          am.applyVideoState(assetId, { syncMode: payload });
+          const asset = am.getAsset(assetId);
+          if (asset && asset.metadata) asset.metadata.videoSyncMode = payload;
+          if (payload === 'watch-party' && asset && asset.videoElement && net) {
+            for (const peerId of net.peers) {
+              videoStreamingServiceRef.current.startLiveStreamToPeer(assetId, asset.videoElement, peerId);
+            }
+          }
+          net?.notifySystemChat(`Video "${asset?.name || assetId}" switched to ${payload === 'watch-party' ? 'Watch Party Stream (Live WebRTC)' : 'Persistent Chunk Stream'} mode.`);
+        }
+        break;
       case 'play':
         am.applyVideoState(assetId, { playing: true });
         net?.broadcastVideoState({ assetId, playing: true, currentTime: state.currentTime, globalVolume: state.globalVolume });
@@ -3619,13 +3891,16 @@ const vrHud = new VRHUDManager(
     }
   };
 
-  const handleImportFile = async (file: File, saveToInventory: boolean, equipVrm: boolean) => {
+  const handleImportFile = async (
+    file: File,
+    saveToInventory: boolean,
+    equipVrm: boolean,
+    videoSyncMode: 'persistent' | 'watch-party' = 'persistent'
+  ) => {
     const assetManager = assetManagerRef.current;
     if (!assetManager) return;
 
     if (file.name.toLowerCase().endsWith('.vrm') && equipVrm) {
-      // VRM-equip path doesn't spawn a world asset — no placeholder
-      // needed; the avatar manager owns its own loading state.
       const vrm = await avatarManagerRef.current?.loadLocalVRM(file);
       if (vrm) {
         if (saveToInventory) {
@@ -3645,13 +3920,6 @@ const vrHud = new VRHUDManager(
     }
 
     const pos = getSpawnPositionInFrontOfUser(2.0);
-
-    // Mint a stable id BEFORE awaiting so peers + the local user see
-    // a 'Loading' placeholder from the moment the click lands, and the
-    // placeholder id matches the eventual asset id (consumed by
-    // registerOnAssetAdded's id-match cleanup). Mirrors the same
-    // pattern in handleImportAssetFromConfig — keeping both paths
-    // aligned prevents drift if one is updated without the other.
     const placeholderId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const net = networkServiceRef.current;
     const displayName = file.name.length > 26 ? file.name.slice(0, 25) + '…' : file.name;
@@ -3666,12 +3934,14 @@ const vrHud = new VRHUDManager(
         fileSize: file.size,
       });
     }
+
     const localEntry = createLoadingPlaceholder(displayName, net.localUserName, pos);
     sceneEngineRef.current?.worldRoot.add(localEntry.group);
     pendingAssetsRef.current.set(placeholderId, localEntry);
 
+    streamingSuppressedAssetIdsRef.current.add(placeholderId);
     try {
-      const asset = await assetManager.importFile(file, pos, undefined, placeholderId);
+      const asset = await assetManager.importFile(file, pos, { videoSyncMode }, placeholderId);
       if (asset) {
         if (asset.type !== 'video') {
           manipulationManagerRef.current?.selectAsset(asset);
@@ -3680,6 +3950,40 @@ const vrHud = new VRHUDManager(
           resetVideoInactivityTimer();
         }
         recordSpawnUndo(asset);
+        if (asset.type === 'video') {
+          const vss = videoStreamingServiceRef.current;
+          const hint = file.size > VIDEO_STREAMING_THRESHOLD ? vss.registerHostFile(file, asset.id, file.type) : undefined;
+          if (hint) {
+            (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
+          }
+          if (net.mode !== 'offline') {
+            net.broadcastSpawn({
+              id: asset.id,
+              name: asset.name,
+              type: asset.type as AssetSpawnData['type'],
+              position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+              rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+              scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+              url: asset.url,
+              primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
+              fileData: file.size <= VIDEO_STREAMING_THRESHOLD ? asset.fileData : undefined,
+              isCollidable: asset.isCollidable,
+              isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+              materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+              videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+              streamingHint: hint
+            });
+            for (const peerId of net.peers) {
+              if (videoSyncMode === 'watch-party' && asset.videoElement) {
+                vss.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
+              } else if (hint) {
+                vss.beginStreamingToPeer(hint, peerId).catch((err) => {
+                  console.warn('[VideoStreaming] pump failed for', peerId, err);
+                });
+              }
+            }
+          }
+        }
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder automatically when this asset lands.
         if (saveToInventory) {
@@ -3705,6 +4009,12 @@ const vrHud = new VRHUDManager(
         net.broadcastPendingCancel(placeholderId);
       }
       console.warn('[Import] Failed:', err);
+    } finally {
+      // Phase 3A: clean up suppress-Set entry on every exit path.
+      // The gate above already delete-on-consume in the success
+      // case, but defensively delete here so an importFile that
+      // throws before _addAsset never leaves an orphan id.
+      streamingSuppressedAssetIdsRef.current.delete(placeholderId);
     }
   };
 
@@ -3757,6 +4067,8 @@ const vrHud = new VRHUDManager(
     pendingAssetsRef.current.set(placeholderId, localEntry);
 
     let asset: LoadedAsset | null = null;
+    // Phase 3A (Fix B): see handleImportFile's mirror comment above.
+    streamingSuppressedAssetIdsRef.current.add(placeholderId);
     try {
       if (config.file) {
         asset = await assetManager.importFile(config.file, pos, config, placeholderId);
@@ -3772,6 +4084,46 @@ const vrHud = new VRHUDManager(
           resetVideoInactivityTimer();
         }
         recordSpawnUndo(asset);
+        // Phase 3A: large-video streaming registration. Only the
+        // File branch - URL branch leaves the fetch to the peer's
+        // existing onSpawn url path, so we don't recursively
+        // re-stream bytes the peer's browser already pulled.
+        if (
+          config.file &&
+          asset.type === 'video' &&
+          config.file.size > VIDEO_STREAMING_THRESHOLD
+        ) {
+          const vss = videoStreamingServiceRef.current;
+          const hint = vss.registerHostFile(config.file, asset.id, config.file.type);
+          (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
+          if (net.mode !== 'offline') {
+            net.broadcastSpawn({
+              id: asset.id,
+              name: asset.name,
+              type: asset.type as AssetSpawnData['type'],
+              position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+              rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+              scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+              url: asset.url,
+              primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
+              fileData: asset.fileData,
+              isCollidable: asset.isCollidable,
+              isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+              materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+              videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+              streamingHint: hint
+            });
+            for (const peerId of net.peers) {
+              if (config.videoSyncMode === 'watch-party' && asset.videoElement) {
+                vss.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
+              } else {
+                vss.beginStreamingToPeer(hint, peerId).catch((err) => {
+                  console.warn('[VideoStreaming] pump failed for', peerId, err);
+                });
+              }
+            }
+          }
+        }
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder when this asset lands. No explicit local
         // remove needed.
@@ -3819,6 +4171,10 @@ const vrHud = new VRHUDManager(
     
     if (item.type === 'primitive' && item.primitiveType) {
       const prim = assetManager.spawnPrimitive(item.primitiveType, pos);
+      if (prim && item.materialState) {
+        AssetManager.applyMaterialUpdate(prim, item.materialState);
+        networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: prim.id });
+      }
       manipulationManagerRef.current?.selectAsset(prim);
       if (prim) recordSpawnUndo(prim);
     } else if (item.fileData) {
@@ -3826,6 +4182,10 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
+        if (item.materialState) {
+          AssetManager.applyMaterialUpdate(asset, item.materialState);
+          networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: asset.id });
+        }
         if (asset.type !== 'video') {
           manipulationManagerRef.current?.selectAsset(asset);
         } else {
@@ -3841,6 +4201,10 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
+        if (item.materialState) {
+          AssetManager.applyMaterialUpdate(asset, item.materialState);
+          networkServiceRef.current.broadcastMaterialUpdate({ ...item.materialState, assetId: asset.id });
+        }
         if (asset.type !== 'video') {
           manipulationManagerRef.current?.selectAsset(asset);
         } else {
@@ -4216,9 +4580,13 @@ const vrHud = new VRHUDManager(
         isOpen={showSceneInspector}
         onClose={() => setShowSceneInspector(false)}
         selectedAsset={selectedAsset}
+        onSelectAsset={(asset) => setSelectedAsset(asset)}
         onUpdateAsset={(updated) => {
           setSelectedAsset({ ...updated });
           networkServiceRef.current.broadcastAssetUpdate(updated);
+        }}
+        onBroadcastMaterial={(update) => {
+          networkServiceRef.current.broadcastMaterialUpdate(update);
         }}
         onDeleteAsset={handleDeleteSelected}
         onJumpToAsset={(asset) => {
@@ -4322,6 +4690,11 @@ const vrHud = new VRHUDManager(
                 }}
                 onMuteToggle={() => {
                   handleVideoAction(activeVideoAsset.id, 'mute');
+                  resetVideoInactivityTimer();
+                }}
+                syncMode={activeVideoState.syncMode || activeVideoAsset.metadata?.videoSyncMode || 'persistent'}
+                onSyncModeToggle={(mode) => {
+                  handleVideoAction(activeVideoAsset.id, 'syncMode', mode);
                   resetVideoInactivityTimer();
                 }}
                 onClose={() => setActiveVideoAssetId(null)}

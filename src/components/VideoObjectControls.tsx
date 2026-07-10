@@ -36,6 +36,10 @@ export interface VideoObjectControlsProps {
   onClose?: () => void;
   /** Destroy / remove the video asset from the scene */
   onRemoveVideo?: () => void;
+  /** Sync mode: persistent chunk stream vs live watch party stream */
+  syncMode?: 'persistent' | 'watch-party';
+  /** Toggle sync mode */
+  onSyncModeToggle?: (mode: 'persistent' | 'watch-party') => void;
 }
 
 /**
@@ -65,6 +69,8 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   onMuteToggle,
   onClose,
   onRemoveVideo,
+  syncMode,
+  onSyncModeToggle,
 }) => {
   const fillRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
@@ -173,9 +179,28 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
           <h1 className="text-3xl font-extrabold tracking-tight text-white drop-shadow-md flex items-center gap-2.5">
             <span>VideoPlayer</span>
           </h1>
-          <div className="mt-2.5 px-4 py-1.5 rounded-xl bg-[#181a20]/90 border border-slate-700/80 text-slate-300 text-sm italic inline-flex items-center gap-2 shadow-inner w-fit">
-            <Film className="w-4 h-4 text-amber-400 shrink-0" />
-            <span className="truncate max-w-[400px]">{assetName || 'Enter URL Here'}</span>
+          <div className="flex items-center gap-2 mt-2.5 flex-wrap">
+            <div className="px-4 py-1.5 rounded-xl bg-[#181a20]/90 border border-slate-700/80 text-slate-300 text-sm italic inline-flex items-center gap-2 shadow-inner w-fit">
+              <Film className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="truncate max-w-[400px]">{assetName || 'Enter URL Here'}</span>
+            </div>
+            {syncMode && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSyncModeToggle?.(syncMode === 'persistent' ? 'watch-party' : 'persistent');
+                }}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-md ${
+                  syncMode === 'watch-party'
+                    ? 'bg-purple-500/30 text-purple-200 border border-purple-400/60 hover:bg-purple-500/40'
+                    : 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/50 hover:bg-cyan-500/30'
+                }`}
+                title={syncMode === 'watch-party' ? 'Watch Party: Live WebRTC stream (Zero Quest RAM)' : 'Persistent: Independent chunk streaming & peer cache'}
+              >
+                <span>{syncMode === 'watch-party' ? '📡 Watch Party Stream (Live)' : '💾 Persistent Chunk Stream'}</span>
+              </button>
+            )}
           </div>
         </div>
 

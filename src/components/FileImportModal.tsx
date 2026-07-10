@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { X, Upload, Box, Image as ImageIcon, Video, FileText, UserCheck, HardDriveDownload } from 'lucide-react';
 
 interface FileImportModalProps {
-  onImportFile: (file: File, saveToInventory: boolean, equipVrm: boolean) => Promise<void>;
+  onImportFile: (file: File, saveToInventory: boolean, equipVrm: boolean, videoSyncMode?: 'persistent' | 'watch-party') => Promise<void>;
   onClose: () => void;
 }
 
@@ -13,6 +13,7 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [saveToInventory, setSaveToInventory] = useState(true);
   const [equipVrmIfAvatar, setEquipVrmIfAvatar] = useState(true);
+  const [videoSyncMode, setVideoSyncMode] = useState<'persistent' | 'watch-party'>('persistent');
   const [isUploading, setIsUploading] = useState(false);
   const [statusText, setStatusText] = useState('');
   
@@ -29,7 +30,7 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
       const file = files[i];
       setStatusText(`Importing ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
       try {
-        await onImportFile(file, saveToInventory, equipVrmIfAvatar);
+        await onImportFile(file, saveToInventory, equipVrmIfAvatar, videoSyncMode);
       } catch (err) {
         console.error('File import error:', err);
       }
@@ -157,6 +158,36 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
               <span>Automatically equip imported .VRM files as my Custom Avatar</span>
             </span>
           </label>
+
+          <div className="pt-2 border-t border-white/10">
+            <span className="text-[11px] text-slate-300 block mb-1.5 font-semibold">Video Import Mode</span>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setVideoSyncMode('persistent')}
+                className={`btn btn-glass text-left p-2 rounded-xl transition-all ${
+                  videoSyncMode === 'persistent'
+                    ? 'border-cyan-400/80 bg-cyan-500/20 text-cyan-200 font-bold'
+                    : 'text-slate-400 opacity-80 hover:opacity-100'
+                }`}
+              >
+                <div className="text-xs">Persistent Chunk Stream</div>
+                <div className="text-[10px] text-slate-400 font-normal">P2P File Transfer (Peers can scrub independently)</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setVideoSyncMode('watch-party')}
+                className={`btn btn-glass text-left p-2 rounded-xl transition-all ${
+                  videoSyncMode === 'watch-party'
+                    ? 'border-purple-400/80 bg-purple-500/20 text-purple-200 font-bold'
+                    : 'text-slate-400 opacity-80 hover:opacity-100'
+                }`}
+              >
+                <div className="text-xs flex items-center gap-1">📡 Watch Party Stream</div>
+                <div className="text-[10px] text-slate-400 font-normal">Live WebRTC Track (Zero Quest RAM, Instant Play)</div>
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Uploading Status Overlay */}

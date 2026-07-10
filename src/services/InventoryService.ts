@@ -1,6 +1,7 @@
 import { openDB } from 'idb';
 import type { IDBPDatabase } from 'idb';
 import type { AssetType } from '../engine/AssetManager.ts';
+import type { MaterialUpdate } from './NetworkService.ts';
 
 export interface InventoryItem {
   id: string;
@@ -11,11 +12,14 @@ export interface InventoryItem {
   url?: string;
   primitiveType?: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane';
   toolType?: 'dev' | 'material' | 'light' | 'shape' | 'brush';
+  folder?: string;
   previewUrl?: string;
+  materialState?: MaterialUpdate;
   metadata?: {
     fileSize?: number;
     mimeType?: string;
     description?: string;
+    folders?: string[];
   };
 }
 
@@ -109,6 +113,67 @@ export class InventoryService {
   public async removeItem(id: string): Promise<void> {
     const db = await this.dbPromise;
     await db.delete(STORE_NAME, id);
+  }
+
+  public async renameItem(id: string, newName: string): Promise<void> {
+    const item = await this.getItem(id);
+    if (!item) return;
+    item.name = newName;
+    await this.saveItem(item);
+  }
+
+  public async moveItemToFolder(id: string, folder?: string): Promise<void> {
+    const item = await this.getItem(id);
+    if (!item) return;
+    item.folder = folder || undefined;
+    await this.saveItem(item);
+  }
+
+  public async getFolders(): Promise<string[]> {
+    const items = await this.getItems();
+    const folderSet = new Set<string>();
+    for (const it of items) {
+      if (it.folder) folderSet.add(it.folder);
+    }
+    const sys = await this.getItem('sys-folders');
+    if (sys && Array.isArray(sys.metadata?.folders)) {
+      for (const f of sys.metadata!.folders as string[]) folderSet.add(f);
+    }
+    return Array.from(folderSet).sort();
+  }
+
+  public async createFolder(folderName: string): Promise<void> {
+    if (!folderName.trim()) return;
+    const folders = await this.getFolders();
+    if (!folders.includes(folderName.trim())) {
+      folders.push(folderName.trim());
+      await this.saveItem({
+        id: 'sys-folders',
+        name: 'System Folders',
+        type: 'system',
+        createdAt: 0,
+        metadata: { folders }
+      } as any);
+    }
+  }
+
+  public async deleteFolder(folderName: string): Promise<void> {
+    const items = await this.getItems();
+    for (const it of items) {
+      if (it.folder === folderName) {
+        it.folder = undefined;
+        await this.saveItem(it);
+      }
+    }
+    const folders = await this.getFolders();
+    const nextFolders = folders.filter(f => f !== folderName);
+    await this.saveItem({
+      id: 'sys-folders',
+      name: 'System Folders',
+      type: 'system',
+      createdAt: 0,
+      metadata: { folders: nextFolders }
+    } as any);
   }
 
   public async clearCustomItems(): Promise<void> {

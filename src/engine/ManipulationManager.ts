@@ -56,6 +56,7 @@ export class ManipulationManager {
   // when the drag ends, re-enabling orbit even in first-person mode.
   private orbitWasEnabledBeforeDrag = true;
   private orbitControls: any = null;
+  public worldRoot: THREE.Object3D | null = null;
 
   // ====== RMB-grab state (Controls-Keybinds.txt: Right Mouse Button - Grab - Move objects) ======
   // The grabbed asset and a flat "we are mid-drag" flag, distinct from
@@ -507,9 +508,10 @@ export class ManipulationManager {
     if (side === 'left' || side === 'right') {
       const grab = this._vrHandGrabs[side];
       if (!grab) return;
-      const releaseParent = grab.originalParent ?? this.scene;
+      const releaseParent = this.worldRoot ?? grab.originalParent ?? this.scene;
       releaseParent.attach(grab.asset.object3d);
       this._vrHandGrabs[side] = null;
+      this.broadcastCurrentTransform(grab.asset);
       for (const cb of this.onGrabEndCallbacks) cb(side);
 
       const remainingSide = this._vrHandGrabs.left ? 'left' : this._vrHandGrabs.right ? 'right' : null;
@@ -566,12 +568,14 @@ export class ManipulationManager {
         const grabL = this._vrHandGrabs.left;
         (grabL.originalParent ?? this.scene).attach(grabL.asset.object3d);
         this._vrHandGrabs.left = null;
+        this.broadcastCurrentTransform(grabL.asset);
         for (const cb of this.onGrabEndCallbacks) cb('left');
       }
       if (this._vrHandGrabs.right) {
         const grabR = this._vrHandGrabs.right;
         (grabR.originalParent ?? this.scene).attach(grabR.asset.object3d);
         this._vrHandGrabs.right = null;
+        this.broadcastCurrentTransform(grabR.asset);
         for (const cb of this.onGrabEndCallbacks) cb('right');
       }
       this._isVRGrabbing = false;
@@ -1404,31 +1408,22 @@ export class ManipulationManager {
     if (!asset) return;
 
     const obj = asset.object3d;
-    // CRITICAL: read WORLD transform, not local. A VR-grabbed asset is
-    // parented to the controller's gripSpace (see vrGrabWithController);
-    // gripSpace.attach(asset) preserves the world transform but the
-    // asset's LOCAL position / rotation / scale stay at the grab-time
-    // values while its worldMatrix follows the user's hand pose via
-    // parent propagation. Reading local means the broadcast always
-    // carried the grab-time rotation, so peers saw a frozen orientation
-    // while the VR user rotated the object through their hand. Reading
-    // worldMatrix is the only way to broadcast what the user actually
-    // sees. For a direct-child-of-scene asset (desktop grab, gizmo
-    // drag, two-handed scale) local == world, so the change is a
-    // no-op for those paths and the existing behavior is preserved.
     obj.updateWorldMatrix(true, false);
-    obj.matrixWorld.decompose(this._broadcastPos, this._broadcastQuat, this._broadcastScale);
-    // Reuse the asset's own rotation.order so the Euler representation
-    // matches what the receiver applies (applyRemoteTransform uses
-    // obj.rotation.set which respects obj.rotation.order on the
-    // receiver side). Decomposed-quat -> Euler through the asset's
-    // own order keeps the round-trip lossless for the common case of
-    // a non-degenerate orientation.
+
+    const grab = (this._vrHandGrabs.left?.asset === asset ? this._vrHandGrabs.left : null)
+              || (this._vrHandGrabs.right?.asset === asset ? this._vrHandGrabs.right : null);
+    const canonicalParent = this.worldRoot ?? grab?.originalParent ?? obj.parent;
+
+    if (canonicalParent) {
+      canonicalParent.updateWorldMatrix(true, false);
+      const parentInv = canonicalParent.matrixWorld.clone().invert();
+      const localMat = parentInv.multiply(obj.matrixWorld);
+      localMat.decompose(this._broadcastPos, this._broadcastQuat, this._broadcastScale);
+    } else {
+      obj.matrixWorld.decompose(this._broadcastPos, this._broadcastQuat, this._broadcastScale);
+    }
+
     this._broadcastEuler.setFromQuaternion(this._broadcastQuat, obj.rotation.order);
-    // Read persistent-state from userData (matches the SceneInspector
-    // checkbox writer at SceneInspectorWindow.tsx). Undefined falls
-    // back to "treat as persistent true" on the receiver — matches
-    // every primitive's default in this codebase.
     const isPersistent = (obj.userData as Record<string, unknown>)?.isPersistent as boolean | undefined;
     const update: TransformUpdate = {
       assetId: asset.id,
