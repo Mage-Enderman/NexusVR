@@ -203,11 +203,21 @@ export class PeerAvatar {
     this.headMesh.add(audio);
   }
 
-  public dispose(scene: THREE.Scene): void {
+  public dispose(_scene?: THREE.Scene): void {
     if (this.positionalAudio && this.positionalAudio.isPlaying) {
-      this.positionalAudio.stop();
+      try { this.positionalAudio.stop(); } catch { /* noop */ }
     }
-    scene.remove(this.group);
+    this.group.traverse((child) => {
+      if ((child as THREE.Mesh).geometry) {
+        (child as THREE.Mesh).geometry.dispose();
+      }
+      if ((child as THREE.Mesh).material) {
+        const m = (child as THREE.Mesh).material;
+        if (Array.isArray(m)) m.forEach(mat => mat.dispose());
+        else m.dispose();
+      }
+    });
+    this.group.removeFromParent();
   }
 }
 

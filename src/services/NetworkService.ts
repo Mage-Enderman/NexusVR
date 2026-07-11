@@ -216,7 +216,8 @@ type EnvelopeType =
   //                      also broadcast but ONLY by the originator —
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
-  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat';
+  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat'
+  | 'leave' | 'ping';
 
 interface Envelope {
   type: EnvelopeType;
@@ -316,6 +317,9 @@ export class NetworkService {
   // stale buffers for every chunked message ever sent.
   private readonly chunkedMessages: Map<string, { chunks: Array<string | undefined>; count: number; total: number }> = new Map();
   private hostDialTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly lastSeenPeers: Map<string, number> = new Map();
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private unloadHandlersRegistered = false;
   // Last timestamp at which `becomeHost()` actually started a host
   // claim (not the dedupe-blocked early-return). Used to throttle the
   // host/guest race loop where `unavailable-id` → guest → host-dial
@@ -423,6 +427,45 @@ export class NetworkService {
     });
 
     this.bindPeerHandlers();
+    this.registerUnloadHandlers();
+    this.startHeartbeat();
+  }
+
+  private registerUnloadHandlers(): void {
+    if (this.unloadHandlersRegistered) return;
+    this.unloadHandlersRegistered = true;
+    const handleUnload = () => {
+      if (this.localPeerId && this.peers.size > 0) {
+        try {
+          this.broadcastEnvelope(this.buildEnvelope('leave', this.localPeerId));
+        } catch { /* noop */ }
+      }
+      for (const conn of this.dataConns.values()) {
+        try { conn.close(); } catch { /* noop */ }
+      }
+      try { this.peer?.destroy(); } catch { /* noop */ }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    this.heartbeatInterval = setInterval(() => {
+      if (this.mode === 'offline' || !this.localPeerId) return;
+      try {
+        this.broadcastEnvelope(this.buildEnvelope('ping', null));
+      } catch { /* noop */ }
+
+      const now = Date.now();
+      for (const peerId of Array.from(this.peers)) {
+        const lastSeen = this.lastSeenPeers.get(peerId) || now;
+        if (now - lastSeen > 45000) {
+          console.warn('[NetworkService] Peer timed out (no heartbeat in 45s):', peerId);
+          this.removePeer(peerId);
+        }
+      }
+    }, 4000);
   }
 
   private bindPeerHandlers(): void {
@@ -685,6 +728,7 @@ export class NetworkService {
 
     const onConnOpen = () => {
       this.peers.add(conn.peer);
+      this.lastSeenPeers.set(conn.peer, Date.now());
       this.evaluateHost();
 
       const pending = this.pendingEnvelopes.get(conn.peer);
@@ -733,29 +777,44 @@ export class NetworkService {
     });
 
     conn.on('close', () => {
-      this.dataConns.delete(conn.peer);
-      this.mediaConns.delete(conn.peer);
-      // Drop any buffered envelopes — peer is gone, no point forcing them
-      // into a dead conn in a future (hypothetical) re-open.
-      this.pendingEnvelopes.delete(conn.peer);
-      this.peers.delete(conn.peer);
-      this.peerRoles.delete(conn.peer);
-      this.peerNames.delete(conn.peer);
-      this.evaluateHost();
-      for (const cb of this.onPeerLeaveCallbacks) cb(conn.peer);
-      this.notifySystemChat(`User left the room`);
+      this.removePeer(conn.peer);
     });
 
     conn.on('error', (err) => {
       console.warn('[PeerJS] DataConnection error:', conn.peer, err);
-      // PeerJS occasionally emits `'error'` without a paired `'close'`
-      // (browser tab sleep, ICE failure mid-handshake, broker hiccup).
-      // Drop any buffered envelopes so a flood of broadcasts doesn't
-      // quietly inflate `pendingEnvelopes` against a connection that
-      // will never deliver. The eventual `'close'` (if it fires) is
-      // idempotent — `Map.delete` on an absent key is a safe no-op.
-      this.pendingEnvelopes.delete(conn.peer);
+      this.removePeer(conn.peer);
     });
+  }
+
+  public removePeer(peerId: string): void {
+    if (!this.peers.has(peerId) && !this.dataConns.has(peerId)) return;
+    console.log('[NetworkService] Removing disconnected peer:', peerId);
+
+    const dataConn = this.dataConns.get(peerId);
+    if (dataConn) {
+      try { dataConn.removeAllListeners(); dataConn.close(); } catch { /* noop */ }
+    }
+    const mediaConn = this.mediaConns.get(peerId);
+    if (mediaConn) {
+      try { mediaConn.removeAllListeners(); mediaConn.close(); } catch { /* noop */ }
+    }
+    const binaryConn = this.binaryConns.get(peerId);
+    if (binaryConn) {
+      try { binaryConn.removeAllListeners(); binaryConn.close(); } catch { /* noop */ }
+    }
+
+    this.dataConns.delete(peerId);
+    this.mediaConns.delete(peerId);
+    this.binaryConns.delete(peerId);
+    this.pendingEnvelopes.delete(peerId);
+    this.peers.delete(peerId);
+    this.peerRoles.delete(peerId);
+    this.peerNames.delete(peerId);
+    this.lastSeenPeers.delete(peerId);
+
+    this.evaluateHost();
+    for (const cb of this.onPeerLeaveCallbacks) cb(peerId);
+    this.notifySystemChat(`User left the room`);
   }
 
   private acceptMediaCall(call: MediaConnection): void {
@@ -911,7 +970,15 @@ export class NetworkService {
       console.warn('[PeerJS] Ignoring invalid envelope from', fromPeerId, raw);
       return;
     }
+    this.lastSeenPeers.set(fromPeerId, Date.now());
+
     switch (env.type) {
+      case 'leave':
+        this.removePeer(fromPeerId);
+        break;
+      case 'ping':
+        // Lightweight heartbeat ping; lastSeenPeers already updated above
+        break;
       case 'trans':
         for (const cb of this.onTransformCallbacks) cb(env.payload as TransformUpdate);
         break;
@@ -1521,6 +1588,15 @@ export class NetworkService {
   // Disconnect / teardown
   // ===========================================================================
   public async disconnect(): Promise<void> {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+    if (this.localPeerId && this.peers.size > 0) {
+      try {
+        this.broadcastEnvelope(this.buildEnvelope('leave', this.localPeerId));
+      } catch { /* noop */ }
+    }
     // Cancel any pending host-dial timer FIRST so it can't fire into a
     // destroyed peer and re-create one after we've torn down.
     if (this.hostDialTimer) {
