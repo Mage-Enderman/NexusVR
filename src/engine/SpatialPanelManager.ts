@@ -103,8 +103,17 @@ export class SpatialPanelManager {
   private hoveredElement: Element | null = null;
   /** Callback fired when hover-over-panel state changes */
   private onHoverChangeCallback: ((isOver: boolean) => void) | null = null;
+  private vrOffscreenContainer: HTMLDivElement;
 
   constructor(container: HTMLElement) {
+    this.vrOffscreenContainer = document.createElement('div');
+    this.vrOffscreenContainer.style.position = 'fixed';
+    this.vrOffscreenContainer.style.left = '-9999px';
+    this.vrOffscreenContainer.style.top = '0px';
+    this.vrOffscreenContainer.style.pointerEvents = 'none';
+    this.vrOffscreenContainer.style.zIndex = '-1000';
+    document.body.appendChild(this.vrOffscreenContainer);
+
     this.css3dRenderer = new CSS3DRenderer();
     this.css3dRenderer.setSize(
       container.clientWidth || window.innerWidth,
@@ -571,6 +580,19 @@ export class SpatialPanelManager {
     }
   }
 
+  /**
+   * Return all active HTMLMesh instances for VR raycasting / click delivery.
+   */
+  public getAllHTMLMeshes(): THREE.Object3D[] {
+    const meshes: THREE.Object3D[] = [];
+    for (const [, entry] of this.panels) {
+      if (entry.htmlMesh && entry.htmlMesh.visible) {
+        meshes.push(entry.htmlMesh);
+      }
+    }
+    return meshes;
+  }
+
   // -------------------------------------------------------------------------
   // VR mode
   // -------------------------------------------------------------------------
@@ -602,6 +624,11 @@ export class SpatialPanelManager {
     // _buildHTMLMesh needs a known scene root to attach to.
     this.sceneRef = scene;
 
+    if (this.sharedInteractiveGroup) {
+      if (controller1) this.sharedInteractiveGroup.listenToXRControllerEvents(controller1 as any);
+      if (controller2) this.sharedInteractiveGroup.listenToXRControllerEvents(controller2 as any);
+    }
+
     for (const [id, entry] of this.panels) {
       this._buildHTMLMesh(id, entry);
     }
@@ -609,9 +636,6 @@ export class SpatialPanelManager {
 
   /**
    * Call when leaving a WebXR session. Disposes HTMLMesh, restores CSS3D.
-   * IMPORTANT: destroy HTMLMeshes BEFORE nulling the controllers — the
-   * destroy path re-attaches the controllers back to the scene root
-   * (see _destroyHTMLMesh).
    */
   public exitVR(): void {
     this.isVRMode = false;
@@ -622,15 +646,8 @@ export class SpatialPanelManager {
     }
     if (this.sharedInteractiveGroup) {
       const ig = this.sharedInteractiveGroup;
+      ig.disconnectXrControllerEvents();
       if (this.sceneRef) {
-        if (this.vrController1 && this.vrController1.parent === ig) {
-          ig.remove(this.vrController1 as unknown as THREE.Object3D);
-          this.sceneRef.add(this.vrController1 as unknown as THREE.Object3D);
-        }
-        if (this.vrController2 && this.vrController2.parent === ig) {
-          ig.remove(this.vrController2 as unknown as THREE.Object3D);
-          this.sceneRef.add(this.vrController2 as unknown as THREE.Object3D);
-        }
         this.sceneRef.remove(ig);
       } else if (ig.parent) {
         ig.parent.remove(ig);
@@ -649,8 +666,8 @@ export class SpatialPanelManager {
     const ig = new InteractiveGroup();
     const cam = this.vrCamera ?? SpatialPanelManager.DEFAULT_VR_CAMERA;
     ig.listenToPointerEvents(this.vrRenderer, cam);
-    if (this.vrController1) ig.add(this.vrController1 as unknown as THREE.Object3D);
-    if (this.vrController2) ig.add(this.vrController2 as unknown as THREE.Object3D);
+    if (this.vrController1) ig.listenToXRControllerEvents(this.vrController1 as any);
+    if (this.vrController2) ig.listenToXRControllerEvents(this.vrController2 as any);
     if (this.sceneRef) {
       this.sceneRef.add(ig);
     }
@@ -715,9 +732,10 @@ export class SpatialPanelManager {
         // compounds through the chain via Object3D.updateMatrixWorld().
         const __panel_gws = this._htmlMeshScaleBuf;
         entry.group.getWorldScale(__panel_gws);
+        const sf = entry.cssScale * 1000;
         entry.htmlMesh.scale.set(
-          entry.cssWidth * entry.cssScale * __panel_gws.x,
-          entry.cssHeight * entry.cssScale * __panel_gws.y,
+          sf * __panel_gws.x,
+          sf * __panel_gws.y,
           __panel_gws.z
         );
       } else {
@@ -817,6 +835,11 @@ export class SpatialPanelManager {
   ): void {
     const renderer = this.vrRenderer;
     if (!renderer) return;
+
+    if (entry.domContainer.parentNode !== this.vrOffscreenContainer) {
+      this.vrOffscreenContainer.appendChild(entry.domContainer);
+    }
+
     let htmlMesh: HTMLMesh;
     try {
       htmlMesh = new HTMLMesh(entry.domContainer);
@@ -825,9 +848,11 @@ export class SpatialPanelManager {
       return;
     }
 
-    const w = entry.cssWidth * entry.cssScale;
-    const h = entry.cssHeight * entry.cssScale;
-    htmlMesh.scale.set(w, h, 1);
+    // Three.js HTMLMesh creates a PlaneGeometry sized (width * 0.001) x (height * 0.001).
+    // To achieve world dimensions of (width * cssScale) x (height * cssScale),
+    // we scale uniformly by (cssScale / 0.001) = cssScale * 1000.
+    const scaleFactor = entry.cssScale * 1000;
+    htmlMesh.scale.set(scaleFactor, scaleFactor, 1);
     htmlMesh.position.z = 0.02;
 
     const ig = this.ensureSharedInteractiveGroup();
@@ -845,6 +870,9 @@ export class SpatialPanelManager {
   }
 
   private _destroyHTMLMesh(entry: SpatialPanelEntry): void {
+    if (entry.domContainer.parentNode === this.vrOffscreenContainer) {
+      this.vrOffscreenContainer.removeChild(entry.domContainer);
+    }
     if (entry.htmlMesh) {
       const ig = entry.interactiveGroup || this.sharedInteractiveGroup;
       if (ig) {
@@ -860,6 +888,51 @@ export class SpatialPanelManager {
       entry.interactiveGroup = null;
       entry.css3dObject.visible = true;
     }
+  }
+
+  /**
+   * Directly dispatches bubbling pointer & mouse events to the exact DOM element
+   * under the raycast UV coordinate inside the matching spatial panel.
+   * Bypasses HTMLMesh's non-bubbling dispatchDOMEvent so React SyntheticEvent
+   * root listeners reliably receive clicks on buttons and sliders in VR.
+   */
+  public dispatchDOMClickAtUV(panelMesh: THREE.Object3D, uv: THREE.Vector2): boolean {
+    for (const [, entry] of this.panels) {
+      if (entry.htmlMesh === panelMesh) {
+        const rect = entry.domContainer.getBoundingClientRect();
+        const clientX = rect.left + uv.x * rect.width;
+        const clientY = rect.top + (1 - uv.y) * rect.height;
+
+        const findElementAt = (el: Element, x: number, y: number): Element => {
+          for (let i = el.children.length - 1; i >= 0; i--) {
+            const child = el.children[i];
+            const r = child.getBoundingClientRect();
+            if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+              return findElementAt(child, x, y);
+            }
+          }
+          return el;
+        };
+
+        const targetEl = findElementAt(entry.domContainer, clientX, clientY);
+        const evtInit = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX,
+          clientY,
+          button: 0,
+          buttons: 1,
+        };
+        targetEl.dispatchEvent(new PointerEvent('pointerdown', evtInit));
+        targetEl.dispatchEvent(new MouseEvent('mousedown', evtInit));
+        targetEl.dispatchEvent(new PointerEvent('pointerup', evtInit));
+        targetEl.dispatchEvent(new MouseEvent('mouseup', evtInit));
+        targetEl.dispatchEvent(new MouseEvent('click', evtInit));
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Returns true if `el` is a descendant of any registered panel's domContainer. */

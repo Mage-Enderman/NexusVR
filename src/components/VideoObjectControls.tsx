@@ -1,19 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import type { VideoPlaybackState } from '../engine/AssetManager.ts';
-import {
-  Play,
-  Pause,
-  Volume2,
-  VolumeX,
-  Globe2,
-  User,
-  SkipBack,
-  SkipForward,
-  Film,
-  Trash2,
-  Square,
-  Repeat,
-} from 'lucide-react';
+import { Film } from 'lucide-react';
 
 export interface VideoObjectControlsProps {
   /** Live playback state mirror. Read-only — the parent drives mutations via callbacks. */
@@ -230,7 +217,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             className="btn-dark-slate"
             style={{ borderColor: 'rgba(244,63,94,0.6)', color: '#fda4af' }}
           >
-            <Trash2 className="w-5 h-5" />
+            <span className="font-bold text-base">🗑</span>
           </button>
         )}
       </div>
@@ -257,7 +244,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             className="btn-dark-slate"
             style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            {state.muted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-amber-400" />}
+            <span className="font-bold text-lg">{state.muted ? '🔇' : '🔊'}</span>
           </button>
 
           {/* Vertical Volume Slider Track (EXPLICIT INLINE STYLES FOR ZERO-TAILWIND FAILURE RISK) */}
@@ -265,6 +252,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             ref={volumeTrackRef}
             onPointerDown={beginVolumeScrub}
             onMouseDown={beginVolumeScrub as any}
+            onClick={(e) => e.stopPropagation()}
             onWheel={(e) => {
               e.stopPropagation();
               const delta = e.deltaY < 0 ? 0.06 : -0.06;
@@ -338,7 +326,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             className="btn-dark-slate"
             style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            {state.volumeMode === 'global' ? <Globe2 className="w-5 h-5 text-cyan-400" /> : <User className="w-5 h-5 text-emerald-400" />}
+            <span className="font-bold text-base">{state.volumeMode === 'global' ? '🌐' : '👤'}</span>
           </button>
         </div>
       </div>
@@ -358,49 +346,17 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             ref={timelineRef}
             onPointerDown={beginScrub}
             onMouseDown={beginScrub as any}
-            className="flex-1 relative cursor-pointer"
-            style={{
-              backgroundColor: '#0a0d14',
-              height: '14px',
-              borderRadius: '9999px',
-              border: '1px solid rgba(51, 65, 85, 0.85)',
-              boxShadow: 'inset 0 2px 4px rgba(0, 0, 0, 0.6)'
-            }}
-            title="Click or drag to seek"
+            onClick={(e) => e.stopPropagation()}
+            className="relative flex-1 h-3 bg-slate-800/80 rounded-full cursor-pointer overflow-hidden border border-slate-700/60"
           >
             <div
               ref={fillRef}
-              style={{
-                width: '0%',
-                position: 'absolute',
-                top: 0,
-                bottom: 0,
-                left: 0,
-                background: 'linear-gradient(90deg, #f59e0b, #fbbf24, #fde047)',
-                borderRadius: '9999px',
-                boxShadow: '0 0 10px rgba(251, 191, 36, 0.5)',
-                transition: 'width 75ms linear'
-              }}
-            />
-            <div
-              ref={thumbRef}
-              style={{
-                left: '0%',
-                position: 'absolute',
-                top: '50%',
-                transform: 'translate(-50%, -50%)',
-                width: '20px',
-                height: '20px',
-                backgroundColor: '#ffffff',
-                border: '3px solid #fbbf24',
-                borderRadius: '50%',
-                boxShadow: '0 0 14px rgba(251, 191, 36, 0.9)',
-                pointerEvents: 'none'
-              }}
+              className="absolute top-0 left-0 h-full bg-gradient-to-r from-amber-500 to-amber-400 rounded-full transition-all duration-75"
+              style={{ width: `${Math.min(100, Math.max(0, (state.currentTime / (state.duration || 1)) * 100))}%` }}
             />
           </div>
 
-          <span ref={durationRef} className="text-base font-mono font-medium text-slate-300 min-w-[52px] text-right">
+          <span className="text-base font-mono font-medium text-slate-400 min-w-[52px]">
             {formatTime(state.duration)}
           </span>
         </div>
@@ -418,11 +374,9 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title={state.playing ? 'Pause' : 'Play'}
               className="btn-dark-slate-lg"
             >
-              {state.playing ? (
-                <Pause className="w-6 h-6 fill-amber-300 pointer-events-none" />
-              ) : (
-                <Play className="w-6 h-6 fill-amber-300 ml-0.5 pointer-events-none" />
-              )}
+              <span className="font-extrabold text-xl text-amber-300 pointer-events-none">
+                {state.playing ? '⏸' : '▶'}
+              </span>
             </button>
 
             <button
@@ -434,7 +388,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Rewind 5 seconds"
               className="btn-dark-slate"
             >
-              <SkipBack className="w-5 h-5 pointer-events-none" />
+              <span className="font-bold text-sm text-slate-200 pointer-events-none">⏪</span>
             </button>
 
             <button
@@ -447,7 +401,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Stop playback"
               className="btn-dark-slate"
             >
-              <Square className="w-5 h-5 pointer-events-none" />
+              <span className="font-bold text-sm text-slate-200 pointer-events-none">⏹</span>
             </button>
 
             <button
@@ -459,7 +413,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Fast forward 5 seconds"
               className="btn-dark-slate"
             >
-              <SkipForward className="w-5 h-5 pointer-events-none" />
+              <span className="font-bold text-sm text-slate-200 pointer-events-none">⏩</span>
             </button>
 
             <button
@@ -470,7 +424,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               title="Restart video"
               className="btn-dark-slate"
             >
-              <Repeat className="w-5 h-5 pointer-events-none" />
+              <span className="font-bold text-sm text-slate-200 pointer-events-none">🔁</span>
             </button>
           </div>
 
@@ -486,15 +440,9 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               className="px-4 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-amber-500/60 text-slate-200 hover:text-white flex items-center gap-2.5 text-xs font-bold transition-all cursor-pointer shadow-sm"
             >
               {state.volumeMode === 'global' ? (
-                <>
-                  <Globe2 className="w-4 h-4 text-cyan-400 pointer-events-none" />
-                  <span>Global Volume Mode</span>
-                </>
+                <span>🌐 Global Volume Mode</span>
               ) : (
-                <>
-                  <User className="w-4 h-4 text-emerald-400 pointer-events-none" />
-                  <span>Local Volume Mode</span>
-                </>
+                <span>👤 Local Volume Mode</span>
               )}
             </button>
           </div>

@@ -1576,6 +1576,26 @@ const vrHud = new VRHUDManager(
                 }
               }
             }
+            // PRIORITY 3.5: Spatial UI Panel (HTMLMesh) click in VR (Video controls, dialogs).
+            // Direct raycast against active HTMLMesh panels so trigger clicks reliably
+            // dispatch DOM mousedown / mouseup / click events to React buttons & sliders.
+            const uiCtrl = se.vrInput?.getController(side);
+            if (uiCtrl && se.spatialPanelManager) {
+              const panelMeshes = se.spatialPanelManager.getAllHTMLMeshes();
+              if (panelMeshes.length > 0) {
+                uiCtrl.updateWorldMatrix(true, false);
+                const origin = new THREE.Vector3().setFromMatrixPosition(uiCtrl.matrixWorld);
+                const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(
+                  new THREE.Quaternion().setFromRotationMatrix(uiCtrl.matrixWorld)
+                ).normalize();
+                se.raycaster.set(origin, dir);
+                const hits = se.raycaster.intersectObjects(panelMeshes, true);
+                if (hits.length > 0 && hits[0].uv) {
+                  se.spatialPanelManager.dispatchDOMClickAtUV(hits[0].object, hits[0].uv);
+                  return;
+                }
+              }
+            }
             // PRIORITY 4: Click / select 3D asset or video in VR scene.
             // Walks the raycast hit's parent chain to recover the original
             // LoadedAsset via AssetManager's id->asset Map (mirrors the
@@ -1586,12 +1606,12 @@ const vrHud = new VRHUDManager(
             // 4, and leave React's selection state undefined.
             // `amPrio4` so this `const` doesn't shadow the outer `am` and re-trigger TS2448/TS2454 at the Priority 2 two-handed-scale read ~1474 (sibling branches in the same `if (button === 'trigger')`).
             const amPrio4 = assetManagerRef.current;
-            const ctrl = side === 'right' ? se.vrInput.getController('right') : se.vrInput.getController('left');
-            if (amPrio4 && ctrl) {
+            const assetCtrl = side === 'right' ? se.vrInput.getController('right') : se.vrInput.getController('left');
+            if (amPrio4 && assetCtrl) {
               const origin = new THREE.Vector3();
               const direction = new THREE.Vector3(0, 0, -1);
-              ctrl.getWorldPosition(origin);
-              direction.transformDirection(ctrl.matrixWorld).normalize();
+              assetCtrl.getWorldPosition(origin);
+              direction.transformDirection(assetCtrl.matrixWorld).normalize();
               se.raycaster.set(origin, direction);
               const assetMeshes: THREE.Object3D[] = [];
               const objToAsset = new Map<THREE.Object3D, LoadedAsset>();
@@ -1601,16 +1621,43 @@ const vrHud = new VRHUDManager(
               });
               const hits = se.raycaster.intersectObjects(assetMeshes, true);
               if (hits.length > 0) {
+                // If pointing at a spatial UI panel (HTMLMesh), let InteractiveGroup handle the button click.
+                // Do not toggle the video UI menu or clear selection.
+                let isHittingUI = false;
+                let curr: THREE.Object3D | null = hits[0].object;
+                while (curr) {
+                  if (
+                    curr.constructor?.name === 'HTMLMesh' ||
+                    curr.type === 'HTMLMesh' ||
+                    (curr as any).isHTMLMesh ||
+                    curr.constructor?.name === 'InteractiveGroup'
+                  ) {
+                    isHittingUI = true;
+                    break;
+                  }
+                  curr = curr.parent;
+                }
+                if (isHittingUI) {
+                  return;
+                }
+
                 let top: THREE.Object3D | null = hits[0].object;
                 while (top && !objToAsset.has(top)) top = top.parent;
                 const hitAsset = top ? objToAsset.get(top) ?? null : null;
                 if (hitAsset) {
-                  manipulationManagerRef.current?.selectAsset(hitAsset);
                   if (hitAsset.type === 'video') {
                     setActiveVideoAssetId((prev) => prev === hitAsset.id ? null : hitAsset.id);
                   }
+                  return;
                 }
+                // Hitting non-asset environment geometry (floor, walls) clears selection & closes video overlay
+                manipulationManagerRef.current?.selectAsset(null);
+                setActiveVideoAssetId(null);
+                return;
               }
+              // Pulling trigger in empty space clears any lingering selection & closes video overlay
+              manipulationManagerRef.current?.selectAsset(null);
+              setActiveVideoAssetId(null);
             }
           }
         },

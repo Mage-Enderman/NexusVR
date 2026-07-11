@@ -108,7 +108,7 @@ export class SceneEngine {
   private lastTime = performance.now();
   private frameCount = 0;
   private fpsTimer = 0;
-  private isVRMode = false;
+  public isVRMode = false;
   private vrButtonElement: HTMLElement | null = null;
   public environmentManager: any = null;
 
@@ -410,11 +410,13 @@ export class SceneEngine {
 
       this.renderer.xr.addEventListener('sessionstart', () => {
         this.isVRMode = true;
+        (window as any).__NEXUS_VR_PRESENTING = true;
         this.vrInput?.setEnabled(true);
         this.spatialPanelManager?.enterVR(this.controller1, this.controller2, this.renderer, this.camera);
       });
       this.renderer.xr.addEventListener('sessionend', () => {
         this.isVRMode = false;
+        (window as any).__NEXUS_VR_PRESENTING = false;
         this.vrInput?.setEnabled(false);
         // Collapse the rig back to identity in world space so desktop
         // fpMovement can keep treating `camera.position` as world

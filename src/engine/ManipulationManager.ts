@@ -469,19 +469,20 @@ export class ManipulationManager {
       return;
     }
 
+    const origParent = asset.object3d.parent ?? this.scene;
     const lockedWorldQuaternion = new THREE.Quaternion();
     asset.object3d.getWorldQuaternion(lockedWorldQuaternion);
 
+    gripSpace.attach(asset.object3d);
+
     this._vrHandGrabs[side] = {
       asset,
-      originalParent: asset.object3d.parent ?? this.scene,
+      originalParent: origParent,
       targetRaySpace: targetRaySpace ?? null,
       holdLocalOffset: asset.object3d.position.clone(),
       lockControllerRotation: true,
       lockedWorldQuaternion,
     };
-
-    gripSpace.attach(asset.object3d);
 
     this.grabbedAsset = asset;
     this.isGrabDragging = true;
@@ -981,12 +982,13 @@ export class ManipulationManager {
               );
               grab.asset.object3d.position.copy(grab.holdLocalOffset);
             }
-            const stickX = this._vrInput[side].stick.x;
-            if (Math.abs(stickX) > 1e-3) {
-              const rotAngle = -stickX * ManipulationManager.VR_HOLD_ROTATE_SPEED * delta;
-              grab.asset.object3d.rotateOnWorldAxis(this._vrUpVec, rotAngle);
-              grab.asset.object3d.getWorldQuaternion(grab.lockedWorldQuaternion);
-            }
+          }
+          const stickX = this._vrInput[side].stick.x;
+          if (Math.abs(stickX) > 1e-3) {
+            const rotAngle = -stickX * ManipulationManager.VR_HOLD_ROTATE_SPEED * delta;
+            this._tmpRotAxisQ.setFromAxisAngle(this._vrUpVec, rotAngle);
+            grab.asset.object3d.quaternion.premultiply(this._tmpRotAxisQ);
+            grab.asset.object3d.getWorldQuaternion(grab.lockedWorldQuaternion);
           }
         }
         if (grab.lockControllerRotation) {
@@ -1287,7 +1289,8 @@ export class ManipulationManager {
     if (this.selectedAsset === asset) return;
 
     this.selectedAsset = asset;
-    if (asset) {
+    const inVR = !!(window as any).__NEXUS_VR_PRESENTING;
+    if (asset && !inVR) {
       this.transformControls.attach(asset.object3d);
     } else {
       this.transformControls.detach();
