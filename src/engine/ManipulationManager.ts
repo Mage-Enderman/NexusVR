@@ -135,10 +135,6 @@ export class ManipulationManager {
   private readonly _tmpRotAxis: THREE.Vector3 = new THREE.Vector3();
   private readonly _tmpRotQuat: THREE.Quaternion = new THREE.Quaternion();
   private readonly _tmpRotAxisQ: THREE.Quaternion = new THREE.Quaternion();
-  private readonly _tmpRotVec: THREE.Vector3 = new THREE.Vector3();
-  private readonly _tmpRotNdc: THREE.Vector2 = new THREE.Vector2();
-  private readonly _tmpRotRay: THREE.Raycaster = new THREE.Raycaster();
-  private readonly _tmpRotPivot: THREE.Vector3 = new THREE.Vector3();
   // ====== DEBUG ======
   // [RMB]-prefixed console.log instrumentation for the grab flow.
   // Reset on every beginGrab; +1 on every onMouseMove RMB-grab tick.
@@ -1138,66 +1134,29 @@ export class ManipulationManager {
   private applyRotationAroundPivot(
     assetObj3d: THREE.Object3D,
     e: MouseEvent | PointerEvent,
-    pivot?: THREE.Vector3
+    _pivot?: THREE.Vector3
   ): void {
-    // Resolve pivot per-frame. Caller-supplied wins (cursor-raycast
-    // pivot in the no-RMB-grab case). For the RMB-grab case the pivot
-    // IS the cursor's current world-frame hit point on the asset,
-    // which the carry invariant guarantees: while E is held the asset
-    // position is frozen (update() skips updateGrabbedAssetPosition
-    // while isEKeyPressed === true), so this stays = the original
-    // grab hit point through the drag — no drift. After the user
-    // releases E mid-carry (RMB still held), the carry resumes and
-    // `asset.position + _grabOffsetWorld` tracks the cursor's new
-    // world point; a subsequent RE-press of E then anchors the
-    // rotation at the up-to-date cursor position instead of the
-    // stale grab-time hit point. Both invariants emerge from one
-    // expression with no extra state.
-    const pivotTarget = pivot ?? this._tmpRotPivot.copy(assetObj3d.position).add(this._grabOffsetWorld);
     const rotSpeed = 0.01;
-    const yawAmount = e.movementX * rotSpeed;
-    const pitchAmount = e.shiftKey ? 0 : e.movementY * rotSpeed;
-    if (yawAmount === 0 && pitchAmount === 0) return;
+    const dx = e.movementX * rotSpeed;
+    const dy = e.shiftKey ? 0 : e.movementY * rotSpeed;
+    if (dx === 0 && dy === 0) return;
 
-    // Build the combined Δ-quaternion. Order matches the user's
-    // intent: horizontal mouse → spin around camera-up, vertical
-    // mouse → tilt around camera-right. `premultiply` applies each
-    // axis rotation in world frame (camera-up/right are world-frame
-    // vectors), so the composition yields a single world-frame Δ that
-    // we then apply once to position-around-pivot AND to quaternion.
+    // Apply rotation around pure world-space axes so looking up or down
+    // never changes or tilts the rotation direction.
     this._tmpRotQuat.identity();
-    if (yawAmount !== 0) {
-      this._tmpRotAxis.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
-      this._normalizeAxis(this._tmpRotAxis);
-      this._tmpRotAxisQ.setFromAxisAngle(this._tmpRotAxis, yawAmount);
+
+    if (dx !== 0) {
+      this._tmpRotAxis.set(0, 1, 0);
+      this._tmpRotAxisQ.setFromAxisAngle(this._tmpRotAxis, dx);
       this._tmpRotQuat.premultiply(this._tmpRotAxisQ);
     }
-    if (pitchAmount !== 0) {
-      // Camera-right axis (world frame) = cameraForward × worldUp.
-      // Using `this.camera.up` (which defaults to (0,1,0) worldUp)
-      // keeps the pitch axis horizontal even when the camera is
-      // rolled — the user's intended "tilt up" stays aligned with
-      // the world horizon rather than the camera's tilted up vector.
-      this._tmpRotAxis.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-      this._tmpRotAxis.crossVectors(this._tmpRotAxis, this.camera.up);
-      if (this._tmpRotAxis.lengthSq() < 1e-6) {
-        // Camera pitched beyond ±90° → forward parallel to up:
-        // degenerate fallback to world-X so the user still gets
-        // *some* response rather than a visible stall.
-        this._tmpRotAxis.set(1, 0, 0);
-      } else {
-        this._normalizeAxis(this._tmpRotAxis);
-      }
-      this._tmpRotAxisQ.setFromAxisAngle(this._tmpRotAxis, pitchAmount);
+    if (dy !== 0) {
+      this._tmpRotAxis.set(1, 0, 0);
+      this._tmpRotAxisQ.setFromAxisAngle(this._tmpRotAxis, dy);
       this._tmpRotQuat.premultiply(this._tmpRotAxisQ);
     }
 
-    // Apply rotation-around-pivot transform:
-    //   relative = oldPos − pivot
-    //   newRel   = Δquat · relative
-    //   newPos   = pivot + newRel
-    this._tmpRotVec.copy(assetObj3d.position).sub(pivotTarget).applyQuaternion(this._tmpRotQuat).add(pivotTarget);
-    assetObj3d.position.copy(this._tmpRotVec);
+    // Rotate purely in place without shifting the object's center position
     assetObj3d.quaternion.premultiply(this._tmpRotQuat);
   }
 
@@ -1217,43 +1176,7 @@ export class ManipulationManager {
     return !!(asset.object3d.userData as Record<string, unknown>)?.isSpatialWindow;
   }
 
-  /**
-   * Project the cursor (pointer-lock-aware) into world space, raycast
-   * against `target`, write the hit point into `outPivot`, and return
-   * `true`. Returns `false` if the cursor misses the model so the
-   * caller can fall back to legacy origin-centered rotation.
-   *
-   * Used by the no-RMB-grab E+LMB+selected rotation path to derive a
-   * per-frame pivot (rather than relying on a stored grab-time point,
-   * which only exists in the RMB-grab case).
-   */
-  private cursorRaycastPivot(
-    target: THREE.Object3D,
-    e: MouseEvent | PointerEvent,
-    outPivot: THREE.Vector3
-  ): boolean {
-    const rect = this.domElement.getBoundingClientRect();
-    const isPointerLocked = document.pointerLockElement === this.domElement;
-    const cx = isPointerLocked ? rect.width / 2 : e.clientX - rect.left;
-    const cy = isPointerLocked ? rect.height / 2 : e.clientY - rect.top;
-    const ndcX = (cx / rect.width) * 2 - 1;
-    const ndcY = -(cy / rect.height) * 2 + 1;
-    this._tmpRotNdc.set(ndcX, ndcY);
-    this._tmpRotRay.setFromCamera(this._tmpRotNdc, this.camera);
-    // `intersectObject(target, true)` is recursive so grouped assets
-    // (e.g. imported .glb with multiple child meshes) hit correctly.
-    const hits = this._tmpRotRay.intersectObject(target, true);
-    if (hits.length === 0 || !hits[0].point) return false;
-    outPivot.copy(hits[0].point);
-    return true;
-  }
 
-  /** In-place normalize on `_tmpRotAxis`, no-op if length² < ε. */
-  private _normalizeAxis(v: THREE.Vector3): void {
-    const lenSq = v.lengthSq();
-    if (lenSq < 1e-6) return; // Caller's fallback wins on degenerate axis.
-    v.multiplyScalar(1 / Math.sqrt(lenSq));
-  }
 
   private onMouseMove = (e: MouseEvent | PointerEvent): void => {
     const rect = this.domElement.getBoundingClientRect();
@@ -1312,17 +1235,7 @@ export class ManipulationManager {
       // else replaces it (the panel has no carry-mode when
       // it's just selected, not grabbed).
       if (!this.isSpatialWindow(this.selectedAsset)) {
-        if (this.cursorRaycastPivot(this.selectedAsset.object3d, e, this._tmpRotPivot)) {
-          this.applyRotationAroundPivot(this.selectedAsset.object3d, e, this._tmpRotPivot);
-        } else {
-          const rotSpeed = 0.01;
-          if (e.shiftKey) {
-            this.selectedAsset.object3d.rotation.y += e.movementX * rotSpeed;
-          } else {
-            this.selectedAsset.object3d.rotation.y += e.movementX * rotSpeed;
-            this.selectedAsset.object3d.rotation.x += e.movementY * rotSpeed;
-          }
-        }
+        this.applyRotationAroundPivot(this.selectedAsset.object3d, e);
         this.broadcastCurrentTransform();
       }
     }
