@@ -18,7 +18,7 @@ export interface WorldToolsPanelProps {
   currentTransformMode: TransformMode;
   onSetTransformMode: (mode: TransformMode) => void;
   onSpawnPrimitive: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane', scale?: number) => void;
-  onSpawnLight: (type: 'point' | 'spot', color: string, intensity: number, distance: number) => void;
+  onSpawnLight: (type: 'point' | 'spot' | 'sun', color: string, intensity: number, distance: number) => void;
   onApplyMaterial: (color: string, roughness: number, metalness: number, wireframe: boolean, emissive: string, opacity: number, textureUrl?: string) => void;
   onToggleWireframe: () => void;
   brushColor: string;
@@ -61,7 +61,7 @@ export const WorldToolsPanel: React.FC<WorldToolsPanelProps> = ({
   const [matTextureUrl, setMatTextureUrl] = useState<string>('none');
 
   // Light state
-  const [lightType, setLightType] = useState<'point' | 'spot'>('point');
+  const [lightType, setLightType] = useState<'point' | 'spot' | 'sun'>('point');
   const [lightColor, setLightColor] = useState('#ffffff');
   const [lightIntensity, setLightIntensity] = useState(2.0);
   const [lightDistance, setLightDistance] = useState(15);
@@ -418,20 +418,27 @@ export const WorldToolsPanel: React.FC<WorldToolsPanelProps> = ({
             <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
               <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">Light Spawner Settings</span>
               
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   onClick={() => setLightType('point')}
-                  className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 font-bold transition ${lightType === 'point' ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                  className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 text-xs font-bold transition ${lightType === 'point' ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
                 >
-                  <Sun className="w-4 h-4" />
-                  <span>Point Light Bulb</span>
+                  <Lightbulb className="w-4 h-4" />
+                  <span>Point Light</span>
                 </button>
                 <button
                   onClick={() => setLightType('spot')}
-                  className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 font-bold transition ${lightType === 'spot' ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                  className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 text-xs font-bold transition ${lightType === 'spot' ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
                 >
                   <Zap className="w-4 h-4" />
-                  <span>Spot Light Beam</span>
+                  <span>Spot Light</span>
+                </button>
+                <button
+                  onClick={() => setLightType('sun')}
+                  className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 text-xs font-bold transition ${lightType === 'sun' ? 'bg-amber-500/20 border-amber-500 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}`}
+                >
+                  <Sun className="w-4 h-4" />
+                  <span>Sun Light</span>
                 </button>
               </div>
 

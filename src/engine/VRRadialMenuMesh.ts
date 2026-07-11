@@ -1,29 +1,11 @@
 import * as THREE from 'three';
-
-// ---------------------------------------------------------------------------
-// Slice definitions — mirrors RadialContextMenu.tsx geometry exactly
-// ---------------------------------------------------------------------------
-interface SliceDef {
-  id: 'top' | 'undo' | 'redo' | 'right' | 'bottom' | 'left';
-  /** Start angle in degrees (0 = up/north, clockwise). Gap-adjusted. */
-  startDeg: number;
-  endDeg: number;
-  /** Default accent colour */
-  color: string;
-  /** Label shown inside the slice */
-  label: string;
-  /** Small sub-label (state-dependent, set dynamically) */
-  subLabel?: string;
-}
-
-const BASE_SLICES: SliceDef[] = [
-  { id: 'top',    startDeg: -25,  endDeg:  25, color: '#10b981', label: 'Mic',        subLabel: 'Live' },
-  { id: 'redo',   startDeg:  35,  endDeg:  85, color: '#6366f1', label: 'Redo' },
-  { id: 'right',  startDeg:  95,  endDeg: 145, color: '#f59e0b', label: 'Locomotion', subLabel: 'Walk' },
-  { id: 'bottom', startDeg: 155,  endDeg: 205, color: '#06b6d4', label: 'Scaling',    subLabel: 'On' },
-  { id: 'left',   startDeg: 215,  endDeg: 265, color: '#06b6d4', label: 'Laser',      subLabel: 'On' },
-  { id: 'undo',   startDeg: 275,  endDeg: 325, color: '#6366f1', label: 'Undo' },
-];
+import {
+  buildActiveMenuItems,
+  computeArcSlices,
+  type ContextMenuItemDef,
+  type ComputedArcSlice,
+  type ContextMenuContext,
+} from './ContextMenuManager.ts';
 
 export interface VRRadialMenuState {
   locomotionMode: 'walk' | 'flight' | 'noclip';
@@ -32,19 +14,15 @@ export interface VRRadialMenuState {
   grabMode: 'auto' | 'precision' | 'palm' | 'laser';
   isHeld: boolean;
   isMuted?: boolean;
-  /**
-   * AssetType of the currently held asset (mirrors App.tsx's
-   * `heldAssetType` state). Drives the conditional held-tab slice labels:
-   * a misc file held in the hand replaces the "Duplicate" bottom slice
-   * with a "Download" slice — matching the desktop RadialContextMenu,
-   * since misc files are the only type that meaningfully exports raw
-   * bytes to disk. Null = nothing held.
-   *
-   * Stored as a string (not AssetType) to keep VRRadialMenuMesh
-   * independent of AssetManager's import path.
-   */
   heldAssetType: string | null;
-  activeTab: 'general' | 'grab' | 'held';
+  heldAssetCustomItems?: ContextMenuItemDef[];
+  activeTab: 'general' | 'grab' | 'held' | 'light' | 'dev';
+  activeTool?: string | null;
+  noShadows?: boolean;
+  lightColor?: string;
+  selectionMode?: 'single' | 'multi';
+  gizmoMode?: 'translate' | 'rotate' | 'scale';
+  gizmoSpace?: 'local' | 'world';
 }
 
 export interface VRRadialMenuCallbacks {
@@ -57,15 +35,22 @@ export interface VRRadialMenuCallbacks {
   onDestroy: () => void;
   onDuplicate: () => void;
   onSaveHeld: () => void;
-  /**
-   * Wire only when the held asset is a misc file; the menu hides the
-   * corresponding slice for other types so the prop is effectively
-   * unused then. Mirrors RadialContextMenu's `onDownloadHeld` prop.
-   */
   onDownloadHeld?: () => void;
   onToggleMute?: () => void;
   onClose: () => void;
   onNextTab: () => void;
+  onSpawnPointLight?: () => void;
+  onSpawnSpotLight?: () => void;
+  onSpawnSunLight?: () => void;
+  onToggleNoShadows?: () => void;
+  onChangeLightColor?: () => void;
+  onUnequipTool?: () => void;
+  onOpenInspector?: () => void;
+  onToggleSelectionMode?: () => void;
+  onDeselectAll?: () => void;
+  onSetGizmoMode?: (mode: 'translate' | 'rotate' | 'scale') => void;
+  onToggleGizmoSpace?: () => void;
+  onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
 }
 
 const SIZE = 512;      // canvas px
@@ -99,11 +84,10 @@ export class VRRadialMenuMesh {
   private mesh: THREE.Mesh;
 
   private hoveredSlice: number = -1;   // -1 = hub, ≥0 = slice index, null = nothing
-  private _activeTab: 'general' | 'grab' | 'held' = 'general';
+  private _activeTab: 'general' | 'grab' | 'held' | 'light' | 'dev' = 'general';
+  private menuStack: ContextMenuItemDef[][] = [];
   private _state: VRRadialMenuState;
   private _callbacks: VRRadialMenuCallbacks;
-
-  private _slices: SliceDef[] = BASE_SLICES.map(s => ({ ...s }));
   // Hoisted scratch refs so placeNearController is allocation-free
   // when called from a per-frame aim loop. Without these, every
   // reposition would `origin.clone()` + `clone().sub()` twice per
@@ -145,12 +129,12 @@ export class VRRadialMenuMesh {
       side: THREE.DoubleSide,
     });
     this.mesh = new THREE.Mesh(geo, mat);
-    this.mesh.name = 'VRRadialMenuMesh';
+    this.mesh.name = 'VR Radial Menu Mesh';
     this.mesh.userData.isVRRadialMenu = true;
 
     // --- Group ---
     this.group = new THREE.Group();
-    this.group.name = 'VRRadialMenuGroup';
+    this.group.name = 'VR Radial Menu';
     this.group.add(this.mesh);
     this.group.visible = false;
 
@@ -161,11 +145,12 @@ export class VRRadialMenuMesh {
   // Public API
   // -------------------------------------------------------------------------
 
-  public get activeTab(): 'general' | 'grab' | 'held' { return this._activeTab; }
+  public get activeTab(): 'general' | 'grab' | 'held' | 'light' | 'dev' { return this._activeTab; }
 
   public setVisible(v: boolean): void {
     this.group.visible = v;
     if (v) {
+      this.menuStack = [];
       this.hoveredSlice = -999; // sentinel — force draw on first aim update
       this._draw();
     }
@@ -178,7 +163,8 @@ export class VRRadialMenuMesh {
     this._draw();
   }
 
-  public setActiveTab(tab: 'general' | 'grab' | 'held'): void {
+  public setActiveTab(tab: 'general' | 'grab' | 'held' | 'light' | 'dev'): void {
+    this.menuStack = [];
     this._activeTab = tab;
     this._draw();
   }
@@ -277,48 +263,73 @@ export class VRRadialMenuMesh {
     const cb = this._callbacks;
     const debug = (window as any).__vrRadialDebug === true;
     if (this.hoveredSlice === -1) {
-      if (debug) console.log('[vr-radial] select fired (hub => onNextTab)');
-      // Hub: cycle tab
+      if (debug) console.log('[vr-radial] select fired (hub)');
+      if (this.menuStack.length > 0) {
+        this.menuStack.pop();
+        this._draw();
+        return;
+      }
       cb.onNextTab();
       return;
     }
-    if (this.hoveredSlice < 0 || this.hoveredSlice >= this._slices.length) {
+    const slices = this._buildSlices();
+    if (this.hoveredSlice < 0 || this.hoveredSlice >= slices.length) {
       if (debug) console.log('[vr-radial] select fired (silent bail; hoveredSlice=' + this.hoveredSlice + ')');
       return;
     }
-    if (debug) console.log('[vr-radial] select fired (slice=' + this._slices[this.hoveredSlice].id + ')');
-    const slice = this._slices[this.hoveredSlice];
-    switch (slice.id) {
-      case 'top':    cb.onToggleMute?.(); cb.onClose(); break;
-      case 'undo':   cb.onUndo(); cb.onClose(); break;
-      case 'redo':   cb.onRedo(); cb.onClose(); break;
-      case 'right':
-        if (this._activeTab === 'general') cb.onNextLocomotion();
-        else if (this._activeTab === 'held') { cb.onSaveHeld(); cb.onClose(); }
-        else cb.onNextGrabMode();
-        break;
-      case 'bottom':
-        if (this._activeTab === 'general') { cb.onToggleScaling(); }
-        else if (this._activeTab === 'held') {
-          // Bottom slice in held tab is conditionally Download (for misc
-          // files) or Duplicate (for everything else). Misc files are
-          // the only type that meaningfully downloads — the rest are
-          // already present in-world as renderable assets. Mirrors the
-          // icon swap in `_buildSlices` below.
-          if (this._state.heldAssetType === 'misc') {
-            if (cb.onDownloadHeld) cb.onDownloadHeld();
-          } else {
-            cb.onDuplicate();
-          }
-          cb.onClose();
-        }
-        else cb.onClose();
-        break;
-      case 'left':
-        if (this._activeTab === 'general') { cb.onToggleLaser(); }
-        else if (this._activeTab === 'held') { cb.onDestroy(); cb.onClose(); }
-        else cb.onClose();
-        break;
+    const slice = slices[this.hoveredSlice];
+    if (debug) console.log('[vr-radial] select fired (slice=' + slice.id + ')');
+
+    if (slice.id === '__back') {
+      this.menuStack.pop();
+      this._draw();
+      return;
+    }
+
+    if (slice.submenu && slice.submenu.length > 0) {
+      const submenuItems = [...slice.submenu];
+      if (!submenuItems.some(i => i.id === '__back')) {
+        submenuItems.push({
+          id: '__back',
+          label: 'Back',
+          subLabel: 'Up one level',
+          color: '#64748b',
+          icon: 'back',
+          closeOnClick: false,
+        });
+      }
+      this.menuStack.push(submenuItems);
+      this._draw();
+      return;
+    }
+
+    if (slice.action) {
+      slice.action();
+    } else {
+      switch (slice.id) {
+        case 'mute':      cb.onToggleMute?.(); break;
+        case 'undo':      cb.onUndo(); break;
+        case 'redo':      cb.onRedo(); break;
+        case 'point':     cb.onSpawnPointLight?.(); break;
+        case 'spot':      cb.onSpawnSpotLight?.(); break;
+        case 'sun':       cb.onSpawnSunLight?.(); break;
+        case 'noshadows': cb.onToggleNoShadows?.(); break;
+        case 'color':     cb.onChangeLightColor?.(); break;
+        case 'unequip':   cb.onUnequipTool?.(); break;
+        case 'locomotion': cb.onNextLocomotion(); break;
+        case 'scaling':   cb.onToggleScaling(); break;
+        case 'laser':     cb.onToggleLaser(); break;
+        case 'save':      cb.onSaveHeld(); break;
+        case 'copy':
+          if (this._state.heldAssetType === 'misc') cb.onDownloadHeld?.();
+          else cb.onDuplicate();
+          break;
+        case 'destroy':   cb.onDestroy(); break;
+      }
+    }
+
+    if (slice.closeOnClick !== false) {
+      cb.onClose();
     }
   }
 
@@ -350,16 +361,17 @@ export class VRRadialMenuMesh {
     if (dist > R_OUT + 10) return -999; // outside ring
 
     // Angle from top (north = 0°, clockwise)
-    let angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
-    if (angleDeg > 290) angleDeg -= 360;
-    else if (angleDeg < -70) angleDeg += 360;
+    const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
 
-    for (let i = 0; i < this._slices.length; i++) {
-      const s = this._slices[i];
-      if (s.startDeg <= s.endDeg) {
-        if (angleDeg >= s.startDeg && angleDeg <= s.endDeg) return i;
-      } else {
-        if (angleDeg >= s.startDeg || angleDeg <= s.endDeg) return i;
+    const slices = this._buildSlices();
+    for (let i = 0; i < slices.length; i++) {
+      const s = slices[i];
+      if (
+        (angleDeg >= s.startDeg && angleDeg <= s.endDeg) ||
+        (angleDeg - 360 >= s.startDeg && angleDeg - 360 <= s.endDeg) ||
+        (angleDeg + 360 >= s.startDeg && angleDeg + 360 <= s.endDeg)
+      ) {
+        return i;
       }
     }
     return -999;
@@ -407,7 +419,12 @@ export class VRRadialMenuMesh {
     ctx.fillStyle = '#00f0ff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    const tabLabel = this._activeTab === 'general' ? 'MENU' : this._activeTab === 'grab' ? 'GRAB' : 'HELD';
+    const tabLabel = this.menuStack.length > 0 ? 'BACK' :
+      this._activeTab === 'dev' || this._state.activeTool === 'dev'
+      ? 'DEV'
+      : this._activeTab === 'light' || this._state.activeTool === 'light'
+      ? 'LIGHT'
+      : this._activeTab === 'general' ? 'MENU' : this._activeTab === 'grab' ? 'GRAB' : 'HELD';
     ctx.fillText(tabLabel, CX, CY - 8);
     ctx.font = '13px sans-serif';
     ctx.fillStyle = 'rgba(148,163,184,0.9)';
@@ -417,67 +434,62 @@ export class VRRadialMenuMesh {
     this.texture.needsUpdate = true;
   }
 
-  private _buildSlices(): (SliceDef & { label: string; subLabel: string; color: string })[] {
+  private _getContext(): ContextMenuContext {
     const s = this._state;
-    const tab = this._activeTab;
-    return this._slices.map(slice => {
-      let label = slice.label;
-      let subLabel = '';
-      let color = slice.color;
+    const cb = this._callbacks;
+    return {
+      locomotionMode: s.locomotionMode,
+      scalingEnabled: s.scalingEnabled,
+      laserEnabled: s.laserEnabled,
+      grabMode: s.grabMode,
+      isHeld: s.isHeld,
+      heldAssetType: s.heldAssetType,
+      heldAssetCustomItems: s.heldAssetCustomItems,
+      isMuted: s.isMuted,
+      activeTool: s.activeTool,
+      noShadows: s.noShadows,
+      lightColor: s.lightColor,
+      selectionMode: s.selectionMode,
+      gizmoMode: s.gizmoMode,
+      gizmoSpace: s.gizmoSpace,
+      onUndo: cb.onUndo,
+      onRedo: cb.onRedo,
+      onToggleMute: cb.onToggleMute,
+      onNextLocomotion: cb.onNextLocomotion,
+      onToggleScaling: cb.onToggleScaling,
+      onToggleLaser: cb.onToggleLaser,
+      onNextGrabMode: cb.onNextGrabMode,
+      onSaveHeld: cb.onSaveHeld,
+      onDuplicate: cb.onDuplicate,
+      onDownloadHeld: cb.onDownloadHeld,
+      onDestroy: cb.onDestroy,
+      onSpawnPointLight: cb.onSpawnPointLight,
+      onSpawnSpotLight: cb.onSpawnSpotLight,
+      onSpawnSunLight: cb.onSpawnSunLight,
+      onToggleNoShadows: cb.onToggleNoShadows,
+      onChangeLightColor: cb.onChangeLightColor,
+      onUnequipTool: cb.onUnequipTool,
+      onOpenInspector: cb.onOpenInspector,
+      onToggleSelectionMode: cb.onToggleSelectionMode,
+      onDeselectAll: cb.onDeselectAll,
+      onSetGizmoMode: cb.onSetGizmoMode,
+      onToggleGizmoSpace: cb.onToggleGizmoSpace,
+      onSpawnPrimitive: cb.onSpawnPrimitive,
+    };
+  }
 
-      if (slice.id === 'top') {
-        label = 'Mic'; subLabel = s.isMuted ? '🔇 Muted' : '🎙 Live'; color = s.isMuted ? '#ef4444' : '#10b981';
-      } else if (slice.id === 'undo') {
-        label = 'Undo'; subLabel = '↩'; color = '#818cf8';
-      } else if (slice.id === 'redo') {
-        label = 'Redo'; subLabel = '↪'; color = '#818cf8';
-      } else if (slice.id === 'right') {
-        if (tab === 'general') {
-          label = 'Locomotion';
-          subLabel = s.locomotionMode === 'walk' ? '🚶 Walk' : s.locomotionMode === 'flight' ? '✈ Flight' : '👻 Noclip';
-          color = '#f59e0b';
-        } else if (tab === 'held') {
-          label = 'Save'; subLabel = 'to Inventory'; color = '#f59e0b';
-        } else {
-          label = 'Grab Mode';
-          subLabel = s.grabMode;
-          color = '#f59e0b';
-        }
-      } else if (slice.id === 'bottom') {
-        if (tab === 'general') {
-          label = 'Scaling';
-          subLabel = s.scalingEnabled ? '✓ On' : '✗ Off';
-          color = s.scalingEnabled ? '#10b981' : '#ef4444';
-        } else if (tab === 'held') {
-          if (s.heldAssetType === 'misc') {
-            label = 'Download';
-            subLabel = 'to device';
-            color = '#06b6d4';
-          } else {
-            label = 'Duplicate';
-            subLabel = 'Make a copy';
-            color = '#06b6d4';
-          }
-        } else {
-          label = 'Snap Grid'; subLabel = 'Toggle'; color = '#06b6d4';
-        }
-      } else if (slice.id === 'left') {
-        if (tab === 'general') {
-          label = 'Laser';
-          subLabel = s.laserEnabled ? '✓ On' : '✗ Off';
-          color = s.laserEnabled ? '#06b6d4' : '#64748b';
-        } else if (tab === 'held') {
-          label = 'Destroy'; subLabel = 'Remove'; color = '#ef4444';
-        } else {
-          label = 'Collision'; subLabel = 'Toggle'; color = '#a855f7';
-        }
-      }
-      return { ...slice, label, subLabel, color };
-    });
+  private _buildSlices(): ComputedArcSlice[] {
+    let currentItems: ContextMenuItemDef[];
+    if (this.menuStack.length > 0) {
+      currentItems = this.menuStack[this.menuStack.length - 1];
+    } else {
+      currentItems = buildActiveMenuItems(this._getContext(), this._activeTab);
+    }
+    return computeArcSlices(currentItems);
   }
 
   private _drawSlice(
-    slice: SliceDef & { label: string; subLabel: string; color: string },
+    slice: ComputedArcSlice,
     isHovered: boolean
   ): void {
     const ctx = this.ctx;
@@ -517,10 +529,11 @@ export class VRRadialMenuMesh {
     ctx.fillText(slice.label, tx, ty - 9);
 
     // Sub-label
-    if (slice.subLabel) {
+    const subText = slice.subLabel || (slice.submenu && slice.submenu.length > 0 ? '▸ Submenu' : undefined);
+    if (subText) {
       ctx.font = `12px sans-serif`;
       ctx.fillStyle = isHovered ? 'rgba(255,255,255,0.85)' : 'rgba(148,163,184,0.9)';
-      ctx.fillText(slice.subLabel, tx, ty + 9);
+      ctx.fillText(subText, tx, ty + 9);
     }
     ctx.restore();
   }

@@ -134,6 +134,7 @@ export class SceneEngine {
   private init(): void {
     // 1. Scene
     this.scene = new THREE.Scene();
+    this.scene.name = 'Default Scene';
     this.scene.background = new THREE.Color('#0b1329');
     this.scene.fog = null;
 
@@ -142,6 +143,7 @@ export class SceneEngine {
     const height = Math.max(this.container.clientHeight || window.innerHeight || 768, 1);
     const aspect = width / height;
     this.camera = new THREE.PerspectiveCamera(65, aspect, 0.1, 1000);
+    this.camera.name = 'Main Camera';
     // Start at average eye height (1.6m) so the user begins in a natural
     // standing position rather than floating at 2m looking down.
     this.camera.position.set(0, 1.6, 3);
@@ -152,11 +154,13 @@ export class SceneEngine {
     // overwriting our changes. Before VR presents, the rig is parked at
     // identity so existing desktop fpMovement that writes camera.position
     // keeps working unchanged (camera.position local == world with rig=id).
+    this.cameraRig.name = 'Camera Rig';
     this.scene.add(this.cameraRig);
     this.cameraRig.add(this.camera);
     // WorldRoot stays a sibling of the cameraRig under `scene` — see the
     // field-level docstring for why we route VR locomotion through world
     // translations instead of camera translations.
+    this.worldRoot.name = 'World Root';
     this.scene.add(this.worldRoot);
 
     // 3. Renderer
@@ -225,9 +229,11 @@ export class SceneEngine {
     // shadow ortho frustum (applyShadowSettings) continues to cover the
     // floor at worldRoot local origin.
     this.ambientLight = new THREE.AmbientLight('#ffffff', 1.2);
+    this.ambientLight.name = 'Ambient Light';
     this.worldRoot.add(this.ambientLight);
 
     this.dirLight = new THREE.DirectionalLight('#00f0ff', 1.5);
+    this.dirLight.name = 'Sun';
     this.dirLight.position.set(10, 20, 10);
     this.dirLight.castShadow = true;
     this.applyShadowSettings();
@@ -235,6 +241,7 @@ export class SceneEngine {
 
     // Secondary rim/accent light
     const purpleLight = new THREE.DirectionalLight('#a855f7', 0.8);
+    purpleLight.name = 'Accent Light';
     purpleLight.position.set(-10, 10, -10);
     this.worldRoot.add(purpleLight);
 
@@ -267,7 +274,7 @@ export class SceneEngine {
     this.floorMesh = new THREE.Mesh(floorGeo, floorMat);
     this.floorMesh.rotation.x = -Math.PI / 2;
     this.floorMesh.receiveShadow = true;
-    this.floorMesh.name = 'WorldFloor';
+    this.floorMesh.name = 'Floor';
     // Parented to worldRoot so VR locomotion (which translates worldRoot
     // inversely) carries the floor with the simulated motion. Desktop
     // modes leave worldRoot at identity so this is effectively the
@@ -277,7 +284,7 @@ export class SceneEngine {
     // Futuristic Neon Grid
     this.gridHelper = new THREE.GridHelper(60, 60, '#00f0ff', '#1e293b');
     this.gridHelper.position.y = 0.01;
-    this.gridHelper.name = 'WorldGrid';
+    this.gridHelper.name = 'Grid';
     this.worldRoot.add(this.gridHelper);
   }
 
@@ -297,17 +304,21 @@ export class SceneEngine {
 
       // Controller 1
       this.controller1 = this.renderer.xr.getController(0);
+      this.controller1.name = 'VR Controller Ray (Left)';
       this.scene.add(this.controller1);
 
       this.controllerGrip1 = this.renderer.xr.getControllerGrip(0);
+      this.controllerGrip1.name = 'VR Controller Grip (Left)';
       this.controllerGrip1.add(controllerModelFactory.createControllerModel(this.controllerGrip1));
       this.scene.add(this.controllerGrip1);
 
       // Controller 2
       this.controller2 = this.renderer.xr.getController(1);
+      this.controller2.name = 'VR Controller Ray (Right)';
       this.scene.add(this.controller2);
 
       this.controllerGrip2 = this.renderer.xr.getControllerGrip(1);
+      this.controllerGrip2.name = 'VR Controller Grip (Right)';
       this.controllerGrip2.add(controllerModelFactory.createControllerModel(this.controllerGrip2));
       this.scene.add(this.controllerGrip2);
 
@@ -315,10 +326,12 @@ export class SceneEngine {
       const handModelFactory = new XRHandModelFactory();
 
       const hand1 = this.renderer.xr.getHand(0);
+      hand1.name = 'VR Hand Tracking (Left)';
       hand1.add(handModelFactory.createHandModel(hand1, 'mesh'));
       this.scene.add(hand1);
 
       const hand2 = this.renderer.xr.getHand(1);
+      hand2.name = 'VR Hand Tracking (Right)';
       hand2.add(handModelFactory.createHandModel(hand2, 'mesh'));
       this.scene.add(hand2);
 
@@ -342,8 +355,8 @@ export class SceneEngine {
       const material = new THREE.LineBasicMaterial({ color: '#00f0ff' });
       const line1 = new THREE.Line(geometry, material);
       const line2 = new THREE.Line(geometry.clone(), material.clone());
-      line1.name = 'laser';
-      line2.name = 'laser';
+      line1.name = 'Controller Laser Ray (Left)';
+      line2.name = 'Controller Laser Ray (Right)';
       line1.scale.z = 5;
       line2.scale.z = 5;
       this.controller1.add(line1);

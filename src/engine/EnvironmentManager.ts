@@ -58,10 +58,10 @@ export class EnvironmentManager {
   private init(): void {
     // Find existing floor and grid from SceneEngine if present
     this.scene.traverse((child) => {
-      if (child.name === 'WorldFloor' && (child as THREE.Mesh).isMesh) {
+      if ((child.name === 'Floor' || child.name === 'WorldFloor') && (child as THREE.Mesh).isMesh) {
         this.floorMesh = child as THREE.Mesh;
       }
-      if (child.name === 'WorldGrid' && child instanceof THREE.GridHelper) {
+      if ((child.name === 'Grid' || child.name === 'WorldGrid') && child instanceof THREE.GridHelper) {
         this.gridHelper = child;
       }
     });
@@ -112,7 +112,7 @@ export class EnvironmentManager {
     });
 
     this.starfieldMesh = new THREE.Points(geometry, material);
-    this.starfieldMesh.name = 'WorldStarfield';
+    this.starfieldMesh.name = 'Skybox';
     this.starfieldMesh.visible = false;
     // Parented to worldRoot (not scene) so the starfield rotates with
     // the world when the VR player smooth-turns. Without this, the

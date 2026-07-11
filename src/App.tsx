@@ -48,6 +48,8 @@ import { VideoObjectControls } from './components/VideoObjectControls.tsx';
 import { RadialContextMenu } from './components/RadialContextMenu.tsx';
 import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
 import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
+import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
+import { DEFAULT_LIGHT_CONFIG } from './engine/ResoniteLightSync.ts';
 import { X } from 'lucide-react';
 
 /**
@@ -67,6 +69,7 @@ function createLoadingPlaceholder(
   isOversized: boolean = false
 ): { group: THREE.Group; dispose: () => void } {
   const group = new THREE.Group();
+  group.name = `Loading Placeholder (${name})`;
   group.position.copy(position);
 
   // Color palette: cyan = in-flight loading, red = "Too Large" indicator
@@ -235,6 +238,9 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   const [isHost, setIsHost] = useState<boolean>(true);
   const [currentTransformMode, setCurrentTransformMode] = useState<TransformMode>('translate');
   const [selectedAsset, setSelectedAsset] = useState<LoadedAsset | null>(null);
+  const [selectionMode, setSelectionMode] = useState<'single' | 'multi'>('single');
+  const selectionModeRef = useRef<'single' | 'multi'>('single');
+  useEffect(() => { selectionModeRef.current = selectionMode; }, [selectionMode]);
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
   const videoInactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -308,6 +314,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // instead of "Duplicate" when the held item is a misc file). Cleared
   // on grab-end; null while nothing is held.
   const [heldAssetType, setHeldAssetType] = useState<AssetType | null>(null);
+  const [heldAssetCustomItems, setHeldAssetCustomItems] = useState<ContextMenuItemDef[] | undefined>(undefined);
   const [radialMenuPos, setRadialMenuPos] = useState<{ x: number; y: number }>({ x: 500, y: 500 });
   // VR radial menu (canvas-textured mesh). `vrRadialOpen` tracks open
   // state; `vrRadialMenuRef` holds the lazily-constructed VRRadialMenuMesh
@@ -568,6 +575,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
         isHeld: sideIsHolding,
         isMuted: networkServiceRef.current.isMuted,
         heldAssetType: sideIsHolding && heldAssetType !== null ? String(heldAssetType) : null,
+        heldAssetCustomItems: sideIsHolding ? heldAssetCustomItems : undefined,
       });
       if (sideIsHolding) {
         mesh.setActiveTab('held');
@@ -1746,11 +1754,13 @@ const vrHud = new VRHUDManager(
       heldSideRef.current = side ?? null;
       setIsHeld(isHeldRef.current);
       setHeldAssetType(asset?.type ?? null);
+      setHeldAssetCustomItems(asset?.contextMenuItems);
       const updateHoldingMenu = (mesh: VRRadialMenuMesh | null, heldAsset: LoadedAsset | null) => {
         if (!mesh || !heldAsset) return;
         mesh.setState({
           isHeld: true,
           heldAssetType: heldAsset.type ? String(heldAsset.type) : null,
+          heldAssetCustomItems: heldAsset.contextMenuItems,
         });
         mesh.setActiveTab('held');
       };
@@ -1777,10 +1787,11 @@ const vrHud = new VRHUDManager(
         heldSideRef.current = null;
         setIsHeld(false);
         setHeldAssetType(null);
+        setHeldAssetCustomItems(undefined);
       }
       const updateReleasedMenu = (mesh: VRRadialMenuMesh | null) => {
         if (!mesh) return;
-        mesh.setState({ isHeld: false, heldAssetType: null });
+        mesh.setState({ isHeld: false, heldAssetType: null, heldAssetCustomItems: undefined });
         if (mesh.activeTab === 'held') {
           mesh.setActiveTab('general');
         }
@@ -3541,7 +3552,7 @@ const vrHud = new VRHUDManager(
 
   const handleDestroyHeld = useCallback((side?: 'left' | 'right') => {
     const mm = manipulationManagerRef.current;
-    const held = getHeldAssetForSide(side);
+    const held = getHeldAssetForSide(side) ?? selectedAssetRef.current;
     if (!held) return;
     const asset = held;
     const obj = asset.object3d;
@@ -3810,6 +3821,87 @@ const vrHud = new VRHUDManager(
   // this object once at construction; the closures stay valid for the lifetime
   // of the mesh. Functional setters are stable in React so re-creating this
   // on every render would be wasteful — build once at mount via useCallback.
+  const [lightNoShadows, setLightNoShadows] = useState<boolean>(false);
+  const lightNoShadowsRef = useRef<boolean>(false);
+  useEffect(() => { lightNoShadowsRef.current = lightNoShadows; }, [lightNoShadows]);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    setSelectionMode((prev) => (prev === 'single' ? 'multi' : 'single'));
+  }, []);
+
+  const handleDeselectAll = useCallback(() => {
+    setSelectedAsset(null);
+    manipulationManagerRef.current?.selectAsset(null);
+  }, []);
+
+  const handleSpawnPrimitiveRef = useRef<((type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void) | null>(null);
+
+  const spawnLightGizmo = useCallback((type: 'point' | 'spot' | 'sun', color = '#f59e0b', intensity = 2, distance = 25) => {
+    const pos = new THREE.Vector3(0, 2.3, -1.8);
+    const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
+    if (!lightAsset) return;
+
+    lightAsset.name = `${type.toUpperCase()} Light`;
+    lightAsset.object3d.scale.set(0.25, 0.25, 0.25);
+    const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
+    if (mesh && mesh.material) {
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      mat.color.set('#1a1a1a');
+      mat.emissive.set(color);
+      mat.emissiveIntensity = 3.5;
+      mat.roughness = 0.1;
+    }
+    const ringGeo = new THREE.RingGeometry(0.7, 0.78, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      side: THREE.DoubleSide,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    lightAsset.object3d.add(ringMesh);
+
+    const noShadows = lightNoShadowsRef.current;
+    const effectiveIntensity = intensity * 35;
+    let light: THREE.Light;
+    if (type === 'point') {
+      const pLight = new THREE.PointLight(color, effectiveIntensity, distance, 1.5);
+      pLight.castShadow = !noShadows;
+      if (!noShadows) {
+        pLight.shadow.bias = -0.001;
+        pLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = pLight;
+    } else if (type === 'spot') {
+      const sLight = new THREE.SpotLight(color, effectiveIntensity, distance, Math.PI / 3, 0.4, 1.5);
+      sLight.castShadow = !noShadows;
+      if (!noShadows) {
+        sLight.shadow.bias = -0.001;
+        sLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = sLight;
+    } else {
+      const dLight = new THREE.DirectionalLight(color, intensity * 2.0);
+      dLight.castShadow = !noShadows;
+      if (!noShadows) {
+        dLight.shadow.bias = -0.0005;
+        dLight.shadow.mapSize.set(2048, 2048);
+      }
+      light = dLight;
+    }
+    light.position.set(0, 0, 0);
+    lightAsset.object3d.add(light);
+    lightAsset.object3d.userData.resoniteLight = {
+      ...DEFAULT_LIGHT_CONFIG,
+      LightType: type === 'point' ? 'Point' : type === 'spot' ? 'Spot' : 'Directional',
+      Intensity: intensity,
+      Color: color,
+      Range: distance,
+    };
+    manipulationManagerRef.current?.selectAsset(lightAsset);
+  }, []);
+
   const closeVrRadial = useCallback((menuSide?: 'left' | 'right') => {
     if (!menuSide || menuSide === 'left') {
       vrRadialMenuLeftRef.current?.setVisible(false);
@@ -3845,12 +3937,30 @@ const vrHud = new VRHUDManager(
       if (!mesh) return;
       const cur = mesh.activeTab;
       const sideIsHolding = heldAssetsBySideRef.current[menuSide] !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
-      const next: 'general' | 'grab' | 'held' = sideIsHolding
+      const next: 'general' | 'grab' | 'held' | 'light' = sideIsHolding
         ? (cur === 'general' ? 'grab' : cur === 'grab' ? 'held' : 'general')
         : (cur === 'general' ? 'grab' : 'general');
       mesh.setActiveTab(next);
     },
-  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute]);
+    onSpawnPointLight: () => { spawnLightGizmo('point', '#f59e0b', 2, 25); closeVrRadial(menuSide); },
+    onSpawnSpotLight: () => { spawnLightGizmo('spot', '#00f0ff', 2, 25); closeVrRadial(menuSide); },
+    onSpawnSunLight: () => { spawnLightGizmo('sun', '#ffffff', 2, 25); closeVrRadial(menuSide); },
+    onToggleNoShadows: () => setLightNoShadows((prev) => !prev),
+    onChangeLightColor: () => {},
+    onUnequipTool: () => {
+      setActiveTool(null);
+      closeVrRadial(menuSide);
+    },
+    onOpenInspector: () => { setShowSceneInspector(true); closeVrRadial(menuSide); },
+    onToggleSelectionMode: () => { handleToggleSelectionMode(); },
+    onDeselectAll: () => { handleDeselectAll(); closeVrRadial(menuSide); },
+    onSetGizmoMode: (mode: 'translate' | 'rotate' | 'scale') => { manipulationManagerRef.current?.setMode(mode); closeVrRadial(menuSide); },
+    onToggleGizmoSpace: () => {
+      const cur = manipulationManagerRef.current?.getSpace() || 'local';
+      manipulationManagerRef.current?.setSpace(cur === 'local' ? 'world' : 'local');
+    },
+    onSpawnPrimitive: (type) => { handleSpawnPrimitiveRef.current?.(type); closeVrRadial(menuSide); },
+  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute, spawnLightGizmo, handleToggleSelectionMode, handleDeselectAll]);
   const buildVrRadialInitialState = useCallback((menuSide: 'left' | 'right'): VRRadialMenuState => {
     const sideHeldAsset = heldAssetsBySideRef.current[menuSide];
     const sideIsHolding = sideHeldAsset !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
@@ -3862,7 +3972,12 @@ const vrHud = new VRHUDManager(
       isHeld: sideIsHolding,
       isMuted: networkServiceRef.current.isMuted,
       heldAssetType: sideHeldAsset?.type ? String(sideHeldAsset.type) : sideIsHolding ? heldAssetTypeRef.current : null,
-      activeTab: sideIsHolding ? 'held' : 'general',
+      activeTab: activeToolRef.current === 'light' ? 'light' : activeToolRef.current === 'dev' ? 'dev' : sideIsHolding ? 'held' : 'general',
+      activeTool: activeToolRef.current,
+      noShadows: lightNoShadowsRef.current,
+      selectionMode: selectionModeRef.current,
+      gizmoMode: manipulationManagerRef.current?.getMode() || 'translate',
+      gizmoSpace: manipulationManagerRef.current?.getSpace() || 'local',
     };
   }, []);
 
@@ -4034,6 +4149,7 @@ const vrHud = new VRHUDManager(
       recordSpawnUndo(prim);
     }
   };
+  useEffect(() => { handleSpawnPrimitiveRef.current = handleSpawnPrimitive; });
 
   const handleImportFile = async (
     file: File,
@@ -4679,22 +4795,7 @@ const vrHud = new VRHUDManager(
             }
           }}
           onSpawnLight={(type, color, intensity, distance) => {
-            const pos = new THREE.Vector3(0, 2.5, -1.5);
-            const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
-            if (lightAsset) {
-              lightAsset.name = `${type.toUpperCase()} Light`;
-              const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
-              if (mesh && mesh.material) {
-                (mesh.material as THREE.MeshStandardMaterial).color.set(color);
-                (mesh.material as THREE.MeshStandardMaterial).emissive.set(color);
-                (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 1.0;
-              }
-              const light = type === 'point'
-                ? new THREE.PointLight(color, intensity, distance || 10)
-                : new THREE.SpotLight(color, intensity, distance || 15);
-              lightAsset.object3d.add(light);
-              manipulationManagerRef.current?.selectAsset(lightAsset);
-            }
+            spawnLightGizmo(type as 'point' | 'spot' | 'sun', color, intensity, distance);
           }}
           onToggleDrawing={() => {
             if (brushManagerRef.current) {
@@ -4999,12 +5100,32 @@ const vrHud = new VRHUDManager(
         onRedo={() => undoRedoManagerRef.current.redo()}
         isHeld={isHeld}
         heldAssetType={heldAssetType}
+        heldAssetCustomItems={heldAssetCustomItems}
         onDestroy={handleDestroyHeld}
         onDuplicate={handleDuplicateHeld}
         onSaveHeld={handleSaveHeldToInventory}
         onDownloadHeld={handleDownloadHeld}
         isMuted={networkServiceRef.current.isMuted}
         onToggleMute={handleToggleMute}
+        activeTool={activeTool}
+        onSpawnPointLight={() => spawnLightGizmo('point', '#ffffff', 2.0, 15)}
+        onSpawnSpotLight={() => spawnLightGizmo('spot', '#ffffff', 2.0, 15)}
+        onSpawnSunLight={() => spawnLightGizmo('sun', '#ffffff', 2.0, 15)}
+        noShadows={graphicsSettings.shadowQuality === 'off'}
+        onToggleNoShadows={() => handleUpdateGraphicsSettings({ ...graphicsSettings, shadowQuality: graphicsSettings.shadowQuality === 'off' ? 'high' : 'off' })}
+        onUnequipTool={() => setActiveTool(null)}
+        selectionMode={selectionMode}
+        onToggleSelectionMode={handleToggleSelectionMode}
+        onDeselectAll={handleDeselectAll}
+        onOpenInspector={() => setShowSceneInspector(true)}
+        gizmoMode={manipulationManagerRef.current?.getMode() || 'translate'}
+        onSetGizmoMode={(mode) => manipulationManagerRef.current?.setMode(mode)}
+        gizmoSpace={manipulationManagerRef.current?.getSpace() || 'local'}
+        onToggleGizmoSpace={() => {
+          const cur = manipulationManagerRef.current?.getSpace() || 'local';
+          manipulationManagerRef.current?.setSpace(cur === 'local' ? 'world' : 'local');
+        }}
+        onSpawnPrimitive={handleSpawnPrimitive}
       />
 
    </div>

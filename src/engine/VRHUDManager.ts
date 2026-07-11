@@ -271,7 +271,7 @@ export class VRHUDManager {
     this.registerBuiltinDrawers();
 
     this.group = new THREE.Group();
-    this.group.name = 'VRDashMenuGroup';
+    this.group.name = 'VR Dash Menu';
     this.group.visible = false;
     this.scene.add(this.group);
 
@@ -345,7 +345,7 @@ export class VRHUDManager {
 
     // ---- Construct panel sibling mesh ----
     this.panelGroup = new THREE.Group();
-    this.panelGroup.name = 'VRPanelGroup';
+    this.panelGroup.name = 'VR Dash Panels';
     this.panelGroup.visible = false;
     this.scene.add(this.panelGroup);
 

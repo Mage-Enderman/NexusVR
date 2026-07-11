@@ -6,9 +6,15 @@ import type { MaterialUpdate } from '../services/NetworkService.ts';
 import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
 import { VideoControls } from './VideoControls.tsx';
 import {
-  Trash2, RotateCcw, ArrowUpRight, Magnet, Plus,
+  Trash2, RotateCcw, ArrowUpRight, Magnet, Plus, Copy,
   Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye
 } from 'lucide-react';
+import {
+  type ResoniteLightConfig,
+  DEFAULT_LIGHT_CONFIG,
+  syncThreeLightFromConfig,
+  removeLightComponent
+} from '../engine/ResoniteLightSync.ts';
 
 export interface SceneInspectorWindowProps {
   isOpen: boolean;
@@ -128,9 +134,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
 
   // Mesh stats
   const [meshStats, setMeshStats] = useState({
-    vertices: 24,
-    triangles: 12,
-    submeshes: 1,
+    vertices: 0,
+    triangles: 0,
+    submeshes: 0,
     hasNormals: true,
     hasTangents: true,
     hasUV0: true,
@@ -166,6 +172,44 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
 
   // Custom components attached
   const [attachedComponents, setAttachedComponents] = useState<string[]>([]);
+  const [lightConfig, setLightConfig] = useState<ResoniteLightConfig>(DEFAULT_LIGHT_CONFIG);
+
+  const handleUpdateLightConfig = (updates: Partial<ResoniteLightConfig>) => {
+    if (!selectedAsset || !interactive) return;
+    const nextConfig = { ...lightConfig, ...updates };
+    setLightConfig(nextConfig);
+    syncThreeLightFromConfig(selectedAsset.object3d, nextConfig);
+    onUpdateAsset({ ...selectedAsset });
+  };
+  const [meshEnabled, setMeshEnabled] = useState(true);
+
+  const handleToggleMeshEnabled = (enabled: boolean) => {
+    setMeshEnabled(enabled);
+    if (!selectedAsset || !interactive) return;
+    selectedAsset.object3d.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        child.visible = enabled;
+      }
+    });
+    onUpdateAsset({ ...selectedAsset });
+  };
+
+  const handleDeleteMeshGizmo = () => {
+    if (!selectedAsset || !interactive) return;
+    const meshesToRemove: THREE.Object3D[] = [];
+    selectedAsset.object3d.children.forEach((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        meshesToRemove.push(child);
+      }
+    });
+    meshesToRemove.forEach((m) => {
+      m.removeFromParent();
+      if ((m as THREE.Mesh).geometry) (m as THREE.Mesh).geometry.dispose();
+    });
+    setMeshEnabled(false);
+    onUpdateAsset({ ...selectedAsset });
+  };
+
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string>('root');
 
@@ -260,6 +304,28 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     // means a guest opening the inspector on a spawn asset that hasn't
     // had isPersistent broadcast yet still shows the host's intent.
     setPersistent(((selectedAsset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined) ?? true);
+
+    const existingLight = selectedAsset.object3d.children.find((c) => (c as THREE.Light).isLight) as THREE.Light | undefined;
+    const existingLightConfig = (selectedAsset.object3d.userData as Record<string, any>)?.resoniteLight;
+    const isLightAsset = Boolean(existingLightConfig || existingLight || selectedAsset.name.toLowerCase().includes('light'));
+
+    if (isLightAsset) {
+      const config: ResoniteLightConfig = existingLightConfig || {
+        ...DEFAULT_LIGHT_CONFIG,
+        LightType: existingLight instanceof THREE.SpotLight ? 'Spot' : existingLight instanceof THREE.DirectionalLight ? 'Directional' : 'Point',
+        Intensity: existingLight ? existingLight.intensity / 35 : DEFAULT_LIGHT_CONFIG.Intensity,
+      };
+      selectedAsset.object3d.userData.resoniteLight = config;
+      setLightConfig(config);
+      setAttachedComponents((prev) => (prev.includes('Light Source') ? prev : ['Light Source', ...prev]));
+    } else {
+      setLightConfig(DEFAULT_LIGHT_CONFIG);
+      setAttachedComponents((prev) => prev.filter((c) => c !== 'Light Source'));
+    }
+
+    const hasVisibleMesh = selectedAsset.object3d.children.some((c) => (c as THREE.Mesh).isMesh && c.visible);
+    setMeshEnabled(hasVisibleMesh);
+
     const p = selectedAsset.object3d.position;
     const r = selectedAsset.object3d.rotation;
     const s = selectedAsset.object3d.scale;
@@ -295,39 +361,43 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
 
     selectedAsset.object3d.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
-        submeshes++;
         const mesh = child as THREE.Mesh;
-        if ((child as THREE.SkinnedMesh).isSkinnedMesh) {
-          isSkinned = true;
-          boneCount = (child as THREE.SkinnedMesh).skeleton?.bones?.length || 15;
-          rootBoneName = (child as THREE.SkinnedMesh).skeleton?.bones?.[0]?.name || 'RootBone';
-        }
+        let childTris = 0;
         if (mesh.geometry) {
           const posAttr = mesh.geometry.attributes.position;
           if (posAttr) verts += posAttr.count;
           if (mesh.geometry.index) {
-            tris += mesh.geometry.index.count / 3;
+            childTris = mesh.geometry.index.count / 3;
           } else if (posAttr) {
-            tris += posAttr.count / 3;
+            childTris = posAttr.count / 3;
           }
+          tris += childTris;
           if (mesh.geometry.attributes.normal) normals = true;
           if (mesh.geometry.attributes.uv) uv = true;
         }
-        if (mesh.material) {
-          const m = mesh.material as THREE.MeshStandardMaterial;
-          if (m.color && m.color.getHexString) colorHex = '#' + m.color.getHexString();
-          if (m.roughness !== undefined) rgh = m.roughness;
-          if (m.metalness !== undefined) met = m.metalness;
-          if (m.wireframe !== undefined) wire = m.wireframe;
-          if (m.flatShading !== undefined) flat = m.flatShading;
+        if (childTris > 0) {
+          submeshes++;
+          if ((child as THREE.SkinnedMesh).isSkinnedMesh) {
+            isSkinned = true;
+            boneCount = (child as THREE.SkinnedMesh).skeleton?.bones?.length || 15;
+            rootBoneName = (child as THREE.SkinnedMesh).skeleton?.bones?.[0]?.name || 'RootBone';
+          }
+          if (mesh.material) {
+            const m = mesh.material as THREE.MeshStandardMaterial;
+            if (m.color && m.color.getHexString) colorHex = '#' + m.color.getHexString();
+            if (m.roughness !== undefined) rgh = m.roughness;
+            if (m.metalness !== undefined) met = m.metalness;
+            if (m.wireframe !== undefined) wire = m.wireframe;
+            if (m.flatShading !== undefined) flat = m.flatShading;
+          }
         }
       }
     });
 
     setMeshStats({
-      vertices: verts || 24,
-      triangles: Math.floor(tris) || 12,
-      submeshes: submeshes || 1,
+      vertices: verts,
+      triangles: Math.floor(tris),
+      submeshes: submeshes,
       hasNormals: normals,
       hasTangents: normals,
       hasUV0: uv,
@@ -538,9 +608,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setShowAttachMenu(false);
 
     if (compType === 'Light Source') {
-      const light = new THREE.PointLight('#00f0ff', 2.0, 10);
-      light.position.set(0, 1.2, 0);
-      selectedAsset.object3d.add(light);
+      const config: ResoniteLightConfig = { ...DEFAULT_LIGHT_CONFIG };
+      selectedAsset.object3d.userData.resoniteLight = config;
+      setLightConfig(config);
+      syncThreeLightFromConfig(selectedAsset.object3d, config);
     } else if (compType === 'Rotator Script') {
       // Add custom userData to drive rotation in SceneEngine
       selectedAsset.object3d.userData.rotatorSpeed = { x: 0, y: 1.5, z: 0 };
@@ -805,48 +876,107 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                     })
                   )}
 
-                  {scene && scene.children.length > 0 && (
-                    <>
-                      <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1 mt-4 mb-1">
-                        Root Scene Nodes (THREE.Scene)
-                      </div>
-                      {scene.children.map((node) => {
-                        if (!sceneExplorerQuery.trim() || node.name?.toLowerCase().includes(sceneExplorerQuery.toLowerCase()) || node.type?.toLowerCase().includes(sceneExplorerQuery.toLowerCase())) {
-                          const matchedAsset = allAssets.find(a => a.object3d === node || a.object3d.uuid === node.uuid);
-                          return (
-                            <div
-                              key={node.uuid}
-                              onClick={() => {
-                                if (matchedAsset) {
-                                  onSelectAsset?.(matchedAsset);
-                                } else {
-                                  onSelectAsset?.({
-                                    id: node.uuid,
-                                    name: node.name || node.type || 'Scene Object',
-                                    type: '3d-model',
-                                    object3d: node,
-                                    isCollidable: false
-                                  });
-                                }
-                              }}
-                              className="flex items-center justify-between p-2 rounded-lg bg-slate-900/40 hover:bg-slate-800/80 cursor-pointer border border-slate-900 hover:border-slate-800 transition group"
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Box className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-                                <span className="text-slate-200 group-hover:text-cyan-300 font-medium truncate">
-                                  {node.name || node.type || 'Unnamed Node'}
-                                </span>
-                              </div>
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-400">
-                                {node.type}
+                  {scene && scene.children.length > 0 && (() => {
+                    const nodeMatchesQuery = (node: THREE.Object3D, query: string): boolean => {
+                      if (!query.trim()) return true;
+                      const q = query.toLowerCase();
+                      if ((node.name?.toLowerCase() || '').includes(q) || (node.type?.toLowerCase() || '').includes(q)) {
+                        return true;
+                      }
+                      return node.children.some(child => nodeMatchesQuery(child, query));
+                    };
+
+                    const renderSceneGraphNode = (node: THREE.Object3D, depth: number): React.ReactNode => {
+                      if (!nodeMatchesQuery(node, sceneExplorerQuery)) return null;
+                      const isDefaultExpanded = node.name === 'World Root' || node.name === 'Camera Rig';
+                      const isExpanded = isDefaultExpanded
+                        ? !expandedExplorerNodes.has(`collapsed_${node.uuid}`)
+                        : expandedExplorerNodes.has(node.uuid);
+
+                      const matchedAsset = allAssets.find(a => a.object3d === node || a.object3d.uuid === node.uuid);
+                      const hasChildren = node.children.length > 0;
+
+                      const icon = node.type.includes('Light') ? (
+                        <Sparkles className="w-3.5 h-3.5 text-yellow-400 shrink-0" />
+                      ) : node.type.includes('Camera') ? (
+                        <Eye className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      ) : node.type === 'Mesh' ? (
+                        <Box className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      ) : (
+                        <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      );
+
+                      return (
+                        <div key={node.uuid}>
+                          <div
+                            onClick={() => {
+                              if (matchedAsset) {
+                                onSelectAsset?.(matchedAsset);
+                              } else {
+                                onSelectAsset?.({
+                                  id: node.uuid,
+                                  name: node.name || node.type || 'Scene Object',
+                                  type: '3d-model',
+                                  object3d: node,
+                                  isCollidable: false
+                                });
+                              }
+                            }}
+                            style={{ paddingLeft: `${depth * 14 + 8}px` }}
+                            className="flex items-center justify-between p-2 rounded-lg bg-slate-900/40 hover:bg-slate-800/80 cursor-pointer border border-slate-900 hover:border-slate-800 transition group"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              {hasChildren ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setExpandedExplorerNodes(prev => {
+                                      const next = new Set(prev);
+                                      if (isDefaultExpanded) {
+                                        const key = `collapsed_${node.uuid}`;
+                                        if (next.has(key)) next.delete(key);
+                                        else next.add(key);
+                                      } else {
+                                        if (next.has(node.uuid)) next.delete(node.uuid);
+                                        else next.add(node.uuid);
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                  className="p-0.5 rounded hover:bg-slate-800 text-slate-400 transition shrink-0"
+                                >
+                                  {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                                </button>
+                              ) : (
+                                <span className="w-3.5 h-3.5 shrink-0" />
+                              )}
+                              {icon}
+                              <span className="text-slate-200 group-hover:text-cyan-300 font-medium truncate">
+                                {node.name || node.type || 'Unnamed Node'}
                               </span>
                             </div>
-                          );
-                        }
-                        return null;
-                      })}
-                    </>
-                  )}
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-400 shrink-0">
+                              {node.type}
+                            </span>
+                          </div>
+                          {isExpanded && hasChildren && (
+                            <div className="flex flex-col border-l border-slate-800/60 ml-2.5">
+                              {node.children.map(child => renderSceneGraphNode(child, depth + 1))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    };
+
+                    return (
+                      <>
+                        <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-1 mt-4 mb-1">
+                          Root Scene Nodes (THREE.Scene)
+                        </div>
+                        {scene.children.map(node => renderSceneGraphNode(node, 0))}
+                      </>
+                    );
+                  })()}
                 </>
               );
             })()}
@@ -1203,30 +1333,432 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>
           </div>
 
-          {/* COMPONENT 1: StaticMesh / SkinnedMeshRenderer */}
-          <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
-            <div
-              onClick={() => toggleSection('mesh')}
-              className="px-3 py-2 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-800 flex items-center justify-between cursor-pointer select-none hover:bg-slate-800/60 transition"
-            >
-              <span className="font-bold text-amber-300 flex items-center gap-2">
-                <Box className="w-4 h-4 text-amber-400" />
-                <span>{meshStats.isSkinned ? 'SkinnedMeshRenderer & Armature' : 'StaticMesh Geometry'}</span>
-              </span>
-              <div className="flex gap-1.5 items-center">
-                <span className="text-[10px] text-slate-400">Order: 0</span>
-                <label className="flex items-center gap-1 cursor-pointer ml-2" onClick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" defaultChecked className="accent-amber-500 rounded" />
-                  <span className="text-slate-300 font-bold">Enabled</span>
-                </label>
-                <button
-                  onClick={(e) => { e.stopPropagation(); toggleSection('mesh'); }}
-                  className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition ml-1"
-                >
-                  {collapsedSections['mesh'] ? <Maximize2 className="w-3 h-3" /> : <Minimize2 className="w-3 h-3" />}
-                </button>
+          {/* COMPONENT 0: Resonite Light Source Component (Shown at top for light assets) */}
+          {attachedComponents.includes('Light Source') && (
+            <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl mb-3">
+              {/* Resonite-style Light Component Header */}
+              <div
+                onClick={() => toggleSection('comp-Light Source')}
+                className="px-3 py-2 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-700 flex items-center justify-between cursor-pointer select-none hover:bg-slate-800/90 transition"
+              >
+                <div className="w-16" />
+                <span className="font-black text-yellow-400 tracking-wider text-sm">Light</span>
+                <div className="flex items-center gap-1.5 w-16 justify-end">
+                  <button
+                    title="Duplicate Light Config"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleUpdateLightConfig({ ...lightConfig });
+                    }}
+                    className="p-1 rounded bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/40 transition"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    title="Remove Light Component"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (selectedAsset) {
+                        removeLightComponent(selectedAsset.object3d);
+                        setAttachedComponents(attachedComponents.filter((c) => c !== 'Light Source'));
+                        onUpdateAsset({ ...selectedAsset });
+                      }
+                    }}
+                    className="p-1 rounded bg-rose-600/20 hover:bg-rose-600/40 text-rose-400 border border-rose-500/40 transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
+
+              {!collapsedSections['comp-Light Source'] && (
+                <div className="p-2 bg-slate-950/90 divide-y divide-slate-800/60 text-xs">
+                  {/* persistent */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">persistent:</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={lightConfig.persistent}
+                      onChange={(e) => handleUpdateLightConfig({ persistent: e.target.checked })}
+                      className="w-4 h-4 rounded bg-slate-800 border-slate-600 text-cyan-500 focus:ring-cyan-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* UpdateOrder */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-emerald-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">UpdateOrder:</span>
+                    </div>
+                    <input
+                      type="number"
+                      value={lightConfig.UpdateOrder}
+                      onChange={(e) => handleUpdateLightConfig({ UpdateOrder: parseInt(e.target.value) || 0 })}
+                      className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-right font-mono text-xs text-white"
+                    />
+                  </div>
+
+                  {/* Enabled */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Enabled:</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={lightConfig.Enabled}
+                      onChange={(e) => handleUpdateLightConfig({ Enabled: e.target.checked })}
+                      className="w-4 h-4 rounded bg-slate-800 border-slate-600 text-cyan-500 focus:ring-cyan-500 cursor-pointer"
+                    />
+                  </div>
+
+                  {/* LightType */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">LightType:</span>
+                    </div>
+                    <select
+                      value={lightConfig.LightType}
+                      onChange={(e) =>
+                        handleUpdateLightConfig({
+                          LightType: e.target.value as 'Point' | 'Directional' | 'Spot',
+                        })
+                      }
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-semibold cursor-pointer"
+                    >
+                      <option value="Point">&lt;&lt; Point &gt;&gt;</option>
+                      <option value="Directional">&lt;&lt; Directional &gt;&gt;</option>
+                      <option value="Spot">&lt;&lt; Spot &gt;&gt;</option>
+                    </select>
+                  </div>
+
+                  {/* Intensity */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Intensity:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0"
+                        max="10"
+                        step="0.1"
+                        value={lightConfig.Intensity}
+                        onChange={(e) => handleUpdateLightConfig({ Intensity: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={lightConfig.Intensity}
+                        onChange={(e) => handleUpdateLightConfig({ Intensity: parseFloat(e.target.value) || 0 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Color & Profile */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-amber-500 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-amber-200">Color:</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-400">Profile:</span>
+                      <select
+                        value={lightConfig.ColorProfile}
+                        onChange={(e) =>
+                          handleUpdateLightConfig({
+                            ColorProfile: e.target.value as 'sRGB' | 'Linear',
+                          })
+                        }
+                        className="bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[10px] text-white"
+                      >
+                        <option value="sRGB">&lt;&lt; sRGB &gt;&gt;</option>
+                        <option value="Linear">&lt;&lt; Linear &gt;&gt;</option>
+                      </select>
+                      <input
+                        type="color"
+                        value={lightConfig.Color}
+                        onChange={(e) => handleUpdateLightConfig({ Color: e.target.value })}
+                        className="w-8 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  {/* ShadowType */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowType:</span>
+                    </div>
+                    <select
+                      value={lightConfig.ShadowType}
+                      onChange={(e) =>
+                        handleUpdateLightConfig({
+                          ShadowType: e.target.value as 'None' | 'Hard' | 'Soft',
+                        })
+                      }
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-semibold cursor-pointer"
+                    >
+                      <option value="None">&lt;&lt; None &gt;&gt;</option>
+                      <option value="Hard">&lt;&lt; Hard &gt;&gt;</option>
+                      <option value="Soft">&lt;&lt; Soft &gt;&gt;</option>
+                    </select>
+                  </div>
+
+                  {/* ShadowStrength */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowStrength:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={lightConfig.ShadowStrength}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowStrength: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.05"
+                        value={lightConfig.ShadowStrength}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowStrength: parseFloat(e.target.value) || 0 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* ShadowNearPlane */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowNearPlane:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0.01"
+                        max="5"
+                        step="0.05"
+                        value={lightConfig.ShadowNearPlane}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowNearPlane: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.05"
+                        value={lightConfig.ShadowNearPlane}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowNearPlane: parseFloat(e.target.value) || 0.1 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* ShadowMapResolution */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-emerald-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowMapResolution:</span>
+                    </div>
+                    <select
+                      value={lightConfig.ShadowMapResolution}
+                      onChange={(e) =>
+                        handleUpdateLightConfig({
+                          ShadowMapResolution: parseInt(e.target.value) || 0,
+                        })
+                      }
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-semibold cursor-pointer"
+                    >
+                      <option value="0">0 (Auto)</option>
+                      <option value="512">512px</option>
+                      <option value="1024">1024px</option>
+                      <option value="2048">2048px</option>
+                      <option value="4096">4096px</option>
+                    </select>
+                  </div>
+
+                  {/* ShadowBias */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowBias:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={lightConfig.ShadowBias}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowBias: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={lightConfig.ShadowBias}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowBias: parseFloat(e.target.value) || 0 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* ShadowNormalBias */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">ShadowNormalBias:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.01"
+                        value={lightConfig.ShadowNormalBias}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowNormalBias: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={lightConfig.ShadowNormalBias}
+                        onChange={(e) => handleUpdateLightConfig({ ShadowNormalBias: parseFloat(e.target.value) || 0 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Range */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Range:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="100"
+                        step="0.5"
+                        value={lightConfig.Range}
+                        onChange={(e) => handleUpdateLightConfig({ Range: parseFloat(e.target.value) })}
+                        className="w-full accent-cyan-400 cursor-pointer"
+                      />
+                      <input
+                        type="number"
+                        step="0.5"
+                        value={lightConfig.Range}
+                        onChange={(e) => handleUpdateLightConfig({ Range: parseFloat(e.target.value) || 1 })}
+                        className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  {/* SpotAngle */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">SpotAngle:</span>
+                    </div>
+                    <div className="flex items-center gap-2 max-w-[55%] w-full">
+                      <input
+                        type="range"
+                        min="1"
+                        max="180"
+                        step="1"
+                        disabled={lightConfig.LightType !== 'Spot'}
+                        value={lightConfig.SpotAngle}
+                        onChange={(e) => handleUpdateLightConfig({ SpotAngle: parseFloat(e.target.value) })}
+                        className={`w-full accent-cyan-400 cursor-pointer ${lightConfig.LightType !== 'Spot' ? 'opacity-40' : ''}`}
+                      />
+                      <input
+                        type="number"
+                        step="1"
+                        disabled={lightConfig.LightType !== 'Spot'}
+                        value={lightConfig.SpotAngle}
+                        onChange={(e) => handleUpdateLightConfig({ SpotAngle: parseFloat(e.target.value) || 60 })}
+                        className={`w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-white ${lightConfig.LightType !== 'Spot' ? 'opacity-40' : ''}`}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Cookie */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-purple-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Cookie:</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-xs text-slate-400 italic">
+                        {lightConfig.Cookie ? 'Loaded' : 'null'}
+                      </span>
+                      {lightConfig.Cookie && (
+                        <button
+                          onClick={() => handleUpdateLightConfig({ Cookie: null })}
+                          className="text-rose-400 hover:text-rose-300 p-0.5"
+                          title="Clear Cookie Texture"
+                        >
+                          Ø
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
+          )}
+
+          {/* COMPONENT 1: StaticMesh / SkinnedMeshRenderer */}
+          {meshStats.submeshes > 0 && meshStats.triangles > 0 && (
+            <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
+              <div
+                onClick={() => toggleSection('mesh')}
+                className="px-3 py-2 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-800 flex items-center justify-between cursor-pointer select-none hover:bg-slate-800/60 transition"
+              >
+                <span className="font-bold text-amber-300 flex items-center gap-2">
+                  <Box className="w-4 h-4 text-amber-400" />
+                  <span>{meshStats.isSkinned ? 'SkinnedMeshRenderer & Armature' : 'StaticMesh Geometry'}</span>
+                </span>
+                <div className="flex gap-1.5 items-center">
+                  <span className="text-[10px] text-slate-400">Order: 0</span>
+                  <label className="flex items-center gap-1 cursor-pointer ml-2" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={meshEnabled}
+                      onChange={(e) => handleToggleMeshEnabled(e.target.checked)}
+                      className="accent-amber-500 rounded"
+                    />
+                    <span className="text-slate-300 font-bold">Enabled</span>
+                  </label>
+                  <button
+                    title="Delete Mesh Helper (Preserves Light)"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteMeshGizmo();
+                    }}
+                    className="p-1 rounded bg-rose-600/20 hover:bg-rose-600/40 text-rose-400 border border-rose-500/40 transition ml-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleSection('mesh'); }}
+                    className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition ml-1"
+                  >
+                    {collapsedSections['mesh'] ? <Maximize2 className="w-3 h-3" /> : <Minimize2 className="w-3 h-3" />}
+                  </button>
+                </div>
+              </div>
 
             {!collapsedSections['mesh'] && <div className="p-3 flex flex-col gap-3">
               <div className="grid grid-cols-2 gap-3">
@@ -1281,11 +1813,13 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 </div>
               </div>
             </div>}
-          </div>
+            </div>
+          )}
 
           {/* COMPONENT 2: MeshRenderer / Material */}
-          <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
-            <div
+          {meshStats.submeshes > 0 && meshStats.triangles > 0 && (
+            <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
+              <div
               onClick={() => toggleSection('material')}
               className="px-3 py-2 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-800 flex items-center justify-between cursor-pointer select-none hover:bg-slate-800/60 transition"
             >
@@ -1595,7 +2129,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 })}
               </div>
             </div>}
-          </div>
+            </div>
+          )}
 
           {/* COMPONENT 0: Video Controls (only rendered when the selected asset is a video).
               Positioned at the top so it's the first thing the user sees after
@@ -1626,9 +2161,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             />
           )}
 
-          {/* COMPONENT 1: StaticMesh / SkinnedMeshRenderer */}
-          <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
-            <div
+          {/* COMPONENT 3: StaticTexture2D */}
+          {meshStats.submeshes > 0 && meshStats.triangles > 0 && (
+            <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
+              <div
               onClick={() => toggleSection('texture')}
               className="px-3 py-2 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900 border-b border-slate-800 flex items-center justify-between cursor-pointer select-none hover:bg-slate-800/60 transition"
             >
@@ -1761,39 +2297,41 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 </div>
               </div>
             </div>}
-          </div>
+            </div>
+          )}
 
           {/* COMPONENT 3+: Custom Attached Components */}
-          {attachedComponents.map((comp) => (
-            <div key={comp} className="bg-slate-900/80 rounded-xl border border-purple-500/40 overflow-hidden shadow-md">
-              <div
-                onClick={() => toggleSection(`comp-${comp}`)}
-                className="px-3 py-2 bg-gradient-to-r from-purple-950/60 via-slate-900 to-purple-950/60 border-b border-purple-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-purple-950/40 transition"
-              >
-                <span className="font-bold text-purple-300 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-purple-400" />
-                  <span>Component: {comp}</span>
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleSection(`comp-${comp}`); }}
-                    className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition"
-                  >
-                    {collapsedSections[`comp-${comp}`] ? <Maximize2 className="w-3 h-3" /> : <Minimize2 className="w-3 h-3" />}
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); setAttachedComponents(attachedComponents.filter(c => c !== comp)); }} className="text-slate-400 hover:text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+          {attachedComponents
+            .filter((comp) => comp !== 'Light Source')
+            .map((comp) => (
+              <div key={comp} className="bg-slate-900/80 rounded-xl border border-purple-500/40 overflow-hidden shadow-md">
+                <div
+                  onClick={() => toggleSection(`comp-${comp}`)}
+                  className="px-3 py-2 bg-gradient-to-r from-purple-950/60 via-slate-900 to-purple-950/60 border-b border-purple-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-purple-950/40 transition"
+                >
+                  <span className="font-bold text-purple-300 flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-purple-400" />
+                    <span>Component: {comp}</span>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); toggleSection(`comp-${comp}`); }}
+                      className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition"
+                    >
+                      {collapsedSections[`comp-${comp}`] ? <Maximize2 className="w-3 h-3" /> : <Minimize2 className="w-3 h-3" />}
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); setAttachedComponents(attachedComponents.filter(c => c !== comp)); }} className="text-slate-400 hover:text-red-400"><Trash2 className="w-3.5 h-3.5" /></button>
+                  </div>
                 </div>
+                {!collapsedSections[`comp-${comp}`] && (
+                  <div className="p-3 text-slate-300 text-xs">
+                    {comp === 'Rotator Script' && <p>Rotator behavior running: Yaw +1.5 rad/sec</p>}
+                    {comp === 'Bobbing / Float' && <p>Floating hover animation active (2.0 Hz)</p>}
+                    {comp === 'Positional Audio' && <p>Audio emitter configured with 3D falloff (Ref: 2m, Max: 20m)</p>}
+                  </div>
+                )}
               </div>
-              {!collapsedSections[`comp-${comp}`] && (
-                <div className="p-3 text-slate-300 text-xs">
-                  {comp === 'Light Source' && <p>Point Light attached: #00f0ff (Intensity: 2.0, Range: 10m)</p>}
-                  {comp === 'Rotator Script' && <p>Rotator behavior running: Yaw +1.5 rad/sec</p>}
-                  {comp === 'Bobbing / Float' && <p>Floating hover animation active (2.0 Hz)</p>}
-                  {comp === 'Positional Audio' && <p>Audio emitter configured with 3D falloff (Ref: 2m, Max: 20m)</p>}
-                </div>
-              )}
-            </div>
-          ))}
+            ))}
 
           {/* ATTACH COMPONENT BUTTON */}
           <div className="relative mt-2">

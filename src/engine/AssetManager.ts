@@ -56,6 +56,8 @@ export interface VideoPlaybackState {
   syncMode?: 'persistent' | 'watch-party';
 }
 
+import type { ContextMenuItemDef } from './ContextMenuManager.ts';
+
 export interface LoadedAsset {
   id: string;
   name: string;
@@ -65,6 +67,7 @@ export interface LoadedAsset {
   fileData?: ArrayBuffer;
   isCollidable: boolean;
   videoElement?: HTMLVideoElement;
+  contextMenuItems?: ContextMenuItemDef[];
   metadata?: {
     fileSize?: number;
     mimeType?: string;

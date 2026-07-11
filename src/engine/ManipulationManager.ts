@@ -1277,6 +1277,10 @@ export class ManipulationManager {
     this.transformControls.setMode(mode);
   }
 
+  public getMode(): TransformMode {
+    return (this.transformControls.mode as TransformMode) || 'translate';
+  }
+
   public setSpace(space: 'local' | 'world'): void {
     this.transformControls.space = space;
   }

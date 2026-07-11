@@ -20,7 +20,7 @@ export class BrushManager {
   constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.group = new THREE.Group();
-    this.group.name = 'BrushStrokesGroup';
+    this.group.name = '3D Brush Strokes';
     this.scene.add(this.group);
   }
 

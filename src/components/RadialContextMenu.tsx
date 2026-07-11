@@ -7,7 +7,6 @@ import {
   Ghost,
   Maximize,
   Minimize,
-  Compass,
   Hand,
   Crosshair,
   Sparkles,
@@ -19,9 +18,31 @@ import {
   BookmarkPlus,
   Download,
   Mic,
-  MicOff
+  MicOff,
+  Sun,
+  Zap,
+  Lightbulb,
+  Palette,
+  EyeOff,
+  PlusSquare,
+  FileText,
+  Move3d,
+  Move,
+  Target,
+  BoxSelect,
+  Box,
+  CircleDot,
+  Cylinder,
+  Square
 } from 'lucide-react';
 import type { AssetType } from '../engine/AssetManager.ts';
+import {
+  buildActiveMenuItems,
+  computeArcSlices,
+  type ContextMenuItemDef,
+  type ComputedArcSlice,
+  type ContextMenuContext,
+} from '../engine/ContextMenuManager.ts';
 
 export interface RadialContextMenuProps {
   isOpen: boolean;
@@ -39,12 +60,30 @@ export interface RadialContextMenuProps {
   onRedo?: () => void;
   isHeld?: boolean;
   heldAssetType?: AssetType | null;
+  heldAssetCustomItems?: ContextMenuItemDef[];
   onDestroy?: () => void;
   onDuplicate?: () => void;
   onSaveHeld?: () => void;
   onDownloadHeld?: () => void;
   isMuted?: boolean;
   onToggleMute?: () => void;
+  activeTool?: string | null;
+  onSpawnPointLight?: () => void;
+  onSpawnSpotLight?: () => void;
+  onSpawnSunLight?: () => void;
+  noShadows?: boolean;
+  onToggleNoShadows?: () => void;
+  lightColor?: string;
+  onUnequipTool?: () => void;
+  selectionMode?: 'single' | 'multi';
+  onToggleSelectionMode?: () => void;
+  onDeselectAll?: () => void;
+  onOpenInspector?: () => void;
+  gizmoMode?: 'translate' | 'rotate' | 'scale';
+  onSetGizmoMode?: (mode: 'translate' | 'rotate' | 'scale') => void;
+  gizmoSpace?: 'local' | 'world';
+  onToggleGizmoSpace?: () => void;
+  onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
 }
 
 /**
@@ -89,6 +128,85 @@ function getSliceCenter(cx: number, cy: number, rIn: number, rOut: number, start
   };
 }
 
+function getSliceIcon(
+  slice: ComputedArcSlice,
+  locomotionMode: string,
+  scalingEnabled: boolean,
+  laserEnabled: boolean,
+  _grabMode: string,
+  isMuted: boolean,
+  noShadows: boolean,
+  _lightColor: string
+): React.ReactNode {
+  switch (slice.icon) {
+    case 'mic':
+      return isMuted ? <MicOff className="w-5 h-5 text-rose-400" /> : <Mic className="w-5 h-5 text-emerald-400" />;
+    case 'undo':
+    case 'back':
+      return <Undo2 className="w-5 h-5 text-slate-300" />;
+    case 'redo':
+      return <Redo2 className="w-5 h-5 text-slate-300" />;
+    case 'locomotion':
+      return locomotionMode === 'walk' ? <Footprints className="w-5 h-5 text-amber-400" /> :
+             locomotionMode === 'flight' ? <Plane className="w-5 h-5 text-amber-400" /> :
+             <Ghost className="w-5 h-5 text-amber-400" />;
+    case 'scaling':
+      return scalingEnabled ? <Maximize className="w-5 h-5 text-emerald-400" /> : <Minimize className="w-5 h-5 text-rose-400" />;
+    case 'laser':
+      return <Crosshair className={`w-5 h-5 ${laserEnabled ? 'text-cyan-400' : 'text-slate-400'}`} />;
+    case 'grab':
+      return <Hand className="w-5 h-5 text-amber-400" />;
+    case 'grid':
+      return <Grid className="w-5 h-5 text-cyan-400" />;
+    case 'shield':
+      return <Shield className="w-5 h-5 text-purple-400" />;
+    case 'bookmark':
+      return <BookmarkPlus className="w-5 h-5 text-amber-400" />;
+    case 'copy':
+      return <Copy className="w-5 h-5 text-cyan-400" />;
+    case 'download':
+      return <Download className="w-5 h-5 text-cyan-400" />;
+    case 'trash':
+      return <Trash2 className="w-5 h-5 text-rose-400" />;
+    case 'lightbulb':
+      return <Lightbulb className="w-5 h-5 text-amber-400" />;
+    case 'zap':
+      return <Zap className="w-5 h-5 text-cyan-400" />;
+    case 'sun':
+      return <Sun className="w-5 h-5 text-white" />;
+    case 'eyeoff':
+      return <EyeOff className={`w-5 h-5 ${noShadows ? 'text-amber-400' : 'text-slate-400'}`} />;
+    case 'palette':
+      return <Palette className="w-5 h-5 text-cyan-400" />;
+    case 'x':
+      return <X className="w-5 h-5 text-slate-400" />;
+    case 'create':
+      return <PlusSquare className="w-5 h-5 text-emerald-400" />;
+    case 'inspector':
+      return <FileText className="w-5 h-5 text-white" />;
+    case 'gizmo':
+      return <Move3d className="w-5 h-5 text-emerald-400" />;
+    case 'move':
+      return <Move className="w-5 h-5 text-emerald-400" />;
+    case 'selectionMode':
+      return <Target className="w-5 h-5 text-fuchsia-400" />;
+    case 'deselectAll':
+      return <BoxSelect className="w-5 h-5 text-orange-400" />;
+    case 'unequip':
+      return <Hand className="w-5 h-5 text-white" />;
+    case 'cube':
+      return <Box className="w-5 h-5 text-cyan-400" />;
+    case 'sphere':
+      return <CircleDot className="w-5 h-5 text-cyan-400" />;
+    case 'cylinder':
+      return <Cylinder className="w-5 h-5 text-cyan-400" />;
+    case 'plane':
+      return <Square className="w-5 h-5 text-cyan-400" />;
+    default:
+      return <Sparkles className="w-5 h-5 text-cyan-400" />;
+  }
+}
+
 export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   isOpen,
   position,
@@ -105,30 +223,47 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   onRedo,
   isHeld = false,
   heldAssetType = null,
+  heldAssetCustomItems,
   onDestroy,
   onDuplicate,
   onSaveHeld,
   onDownloadHeld,
   isMuted = false,
-  onToggleMute
+  onToggleMute,
+  activeTool = null,
+  onSpawnPointLight,
+  onSpawnSpotLight,
+  onSpawnSunLight,
+  noShadows = false,
+  onToggleNoShadows,
+  lightColor = '#00f0ff',
+  onUnequipTool,
+  selectionMode,
+  onToggleSelectionMode,
+  onDeselectAll,
+  onOpenInspector,
+  gizmoMode,
+  onSetGizmoMode,
+  gizmoSpace,
+  onToggleGizmoSpace,
+  onSpawnPrimitive,
 }) => {
-  // 'held' is a third tab only reachable when isHeld is true. The hub
-  // click handler filters it out of the cycle when isHeld is false.
-  const [activeTab, setActiveTab] = useState<'general' | 'grab' | 'held'>('general');
-  // Auto-switch to 'held' on open when carrying an object. Resets to
-  // 'general' on close so the next open (without a held object) lands
-  // on the default tab. Also re-checks when isHeld flips while the
-  // menu is open so a grab-during-open jumps the user to held.
+  const [activeTab, setActiveTab] = useState<'general' | 'grab' | 'held' | 'light' | 'dev'>('general');
+  const [menuStack, setMenuStack] = useState<ContextMenuItemDef[][]>([]);
+
   useEffect(() => {
     if (!isOpen) return;
-    if (isHeld) {
+    setMenuStack([]);
+    if (activeTool === 'dev') {
+      setActiveTab('dev');
+    } else if (activeTool === 'light') {
+      setActiveTab('light');
+    } else if (isHeld) {
       setActiveTab('held');
     } else {
-      // Don't clobber the user's explicit 'grab' selection if they
-      // already navigated there before releasing the held object.
-      setActiveTab((prev) => (prev === 'held' ? 'general' : prev));
+      setActiveTab((prev) => (prev === 'held' || prev === 'light' || prev === 'dev' ? 'general' : prev));
     }
-  }, [isOpen, isHeld]);
+  }, [isOpen, isHeld, activeTool]);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [virtualCursor, setVirtualCursor] = useState<{ x: number; y: number }>({ x: 180, y: 180 });
   const [isLocked, setIsLocked] = useState(document.pointerLockElement !== null);
@@ -194,15 +329,52 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const rIn = 45;
   const rOut = 115;
 
-  // Symmetrical 6 slices with 10 degree gap around 360 degrees
-  const slices = [
-    { id: 'top', start: -25, end: 25, label: 'Mute' },
-    { id: 'redo', start: 35, end: 85, label: 'Redo' },
-    { id: 'right', start: 95, end: 145, label: 'Right' },
-    { id: 'bottom', start: 155, end: 205, label: 'Bottom' },
-    { id: 'left', start: 215, end: 265, label: 'Left' },
-    { id: 'undo', start: 275, end: 325, label: 'Undo' },
-  ];
+  const context: ContextMenuContext = {
+    locomotionMode,
+    scalingEnabled,
+    laserEnabled,
+    grabMode,
+    isHeld,
+    heldAssetType: heldAssetType ? String(heldAssetType) : null,
+    heldAssetCustomItems,
+    isMuted,
+    activeTool,
+    noShadows,
+    lightColor,
+    onUndo,
+    onRedo,
+    onToggleMute,
+    onNextLocomotion: handleNextLocomotion,
+    onToggleScaling,
+    onToggleLaser,
+    onNextGrabMode: handleNextGrabMode,
+    onSaveHeld,
+    onDuplicate,
+    onDownloadHeld,
+    onDestroy,
+    onSpawnPointLight,
+    onSpawnSpotLight,
+    onSpawnSunLight,
+    onToggleNoShadows,
+    onUnequipTool,
+    selectionMode,
+    onToggleSelectionMode,
+    onDeselectAll,
+    onOpenInspector,
+    gizmoMode,
+    onSetGizmoMode,
+    gizmoSpace,
+    onToggleGizmoSpace,
+    onSpawnPrimitive,
+  };
+
+  const currentItems = menuStack.length > 0
+    ? menuStack[menuStack.length - 1]
+    : buildActiveMenuItems(context, activeTab);
+
+  const slices = computeArcSlices(currentItems);
+  const isLightMenu = activeTab === 'light' || activeTool === 'light';
+  const isDevMenu = activeTab === 'dev' || activeTool === 'dev';
 
   const dx = virtualCursor.x - 180;
   const dy = virtualCursor.y - 180;
@@ -210,16 +382,16 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   let computedHover: number | null = null;
 
   if (dist >= 36 && dist <= 160) {
-    let angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
-    if (angleDeg > 335) angleDeg -= 360;
-    else if (angleDeg < -35) angleDeg += 360;
-
+    const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
     for (let i = 0; i < slices.length; i++) {
       const s = slices[i];
-      if (s.start <= s.end) {
-        if (angleDeg >= s.start && angleDeg <= s.end) computedHover = i;
-      } else {
-        if (angleDeg >= s.start || angleDeg <= s.end) computedHover = i;
+      if (
+        (angleDeg >= s.startDeg && angleDeg <= s.endDeg) ||
+        (angleDeg - 360 >= s.startDeg && angleDeg - 360 <= s.endDeg) ||
+        (angleDeg + 360 >= s.startDeg && angleDeg + 360 <= s.endDeg)
+      ) {
+        computedHover = i;
+        break;
       }
     }
   } else if (dist < 36) {
@@ -229,33 +401,64 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const activeIndex = hoveredIndex !== null ? hoveredIndex : (isLocked ? computedHover : null);
 
   const triggerSliceAction = (index: number) => {
+    if (index === -1) {
+      if (menuStack.length > 0) {
+        setMenuStack(prev => prev.slice(0, -1));
+        return;
+      }
+      setActiveTab(prev => (prev === 'general' ? 'grab' : 'general'));
+      return;
+    }
     const slice = slices[index];
     if (!slice) return;
-    if (slice.id === 'top') { onToggleMute?.(); onClose(); }
-    else if (slice.id === 'undo') { onUndo?.(); onClose(); }
-    else if (slice.id === 'redo') { onRedo?.(); onClose(); }
-    else if (slice.id === 'right') {
-      if (activeTab === 'general') handleNextLocomotion();
-      else if (activeTab === 'held') { onSaveHeld?.(); onClose(); }
-      else handleNextGrabMode();
+
+    if (slice.id === '__back') {
+      setMenuStack(prev => prev.slice(0, -1));
+      return;
     }
-    else if (slice.id === 'bottom') {
-      if (activeTab === 'general') onToggleScaling();
-      else if (activeTab === 'held') {
-        // Bottom slice in the held tab is conditionally Download (for
-        // misc files) or Duplicate (for everything else). Misc files
-        // are the only type that meaningfully downloads — the rest are
-        // already in the world as renderable assets. Mirrors the icon
-        // swap in the slice render block below.
-        if (heldAssetType === 'misc') { onDownloadHeld?.(); onClose(); }
-        else { onDuplicate?.(); onClose(); }
+
+    if (slice.submenu && slice.submenu.length > 0) {
+      const submenuItems = [...slice.submenu];
+      if (!submenuItems.some(i => i.id === '__back')) {
+        submenuItems.push({
+          id: '__back',
+          label: 'Back',
+          subLabel: 'Up one level',
+          color: '#64748b',
+          icon: 'back',
+          closeOnClick: false,
+        });
       }
-      else { onClose(); }
+      setMenuStack(prev => [...prev, submenuItems]);
+      return;
     }
-    else if (slice.id === 'left') {
-      if (activeTab === 'general') onToggleLaser();
-      else if (activeTab === 'held') { onDestroy?.(); onClose(); }
-      else { onClose(); }
+
+    if (slice.action) {
+      slice.action();
+    } else {
+      switch (slice.id) {
+        case 'mute':       onToggleMute?.(); break;
+        case 'undo':       onUndo?.(); break;
+        case 'redo':       onRedo?.(); break;
+        case 'point':      onSpawnPointLight?.(); break;
+        case 'spot':       onSpawnSpotLight?.(); break;
+        case 'sun':        onSpawnSunLight?.(); break;
+        case 'noshadows':  onToggleNoShadows?.(); break;
+        case 'unequip':    onUnequipTool?.(); break;
+        case 'locomotion': handleNextLocomotion(); break;
+        case 'scaling':    onToggleScaling(); break;
+        case 'laser':      onToggleLaser(); break;
+        case 'save':       onSaveHeld?.(); break;
+        case 'copy':
+          if (heldAssetType === 'misc') onDownloadHeld?.();
+          else onDuplicate?.();
+          break;
+        case 'destroy':    onDestroy?.(); break;
+      }
+    }
+
+    if (slice.closeOnClick !== false) {
+      onClose();
     }
   };
 
@@ -329,118 +532,21 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
 
         <svg width="360" height="360" viewBox="0 0 360 360" className="overflow-visible">
           {slices.map((slice, i) => {
-            const pathD = getArcPath(cx, cy, rIn, rOut, slice.start, slice.end);
-            const center = getSliceCenter(cx, cy, rIn, rOut, slice.start, slice.end);
+            const pathD = getArcPath(cx, cy, rIn, rOut, slice.startDeg, slice.endDeg);
+            const center = getSliceCenter(cx, cy, rIn, rOut, slice.startDeg, slice.endDeg);
             const isHovered = activeIndex === i;
-
-            // Determine colors and actions per slice and tab
-            let strokeColor = '#525252'; // default gray
-            let filterStyle = '';
-            let iconElement: React.ReactNode = null;
-            let onClickAction = () => {};
-
-            if (slice.id === 'top') {
-              strokeColor = isMuted ? '#ef4444' : '#10b981';
-              filterStyle = isMuted ? 'drop-shadow(0 0 10px rgba(239, 68, 68, 0.45))' : 'drop-shadow(0 0 10px rgba(16, 185, 129, 0.45))';
-              iconElement = isMuted ? <MicOff className="w-6 h-6 text-rose-400" /> : <Mic className="w-6 h-6 text-emerald-400" />;
-              onClickAction = () => { onToggleMute?.(); onClose(); };
-            } else if (slice.id === 'undo') {
-              strokeColor = isHovered ? '#a3a3a3' : '#525252';
-              iconElement = <Undo2 className="w-6 h-6 text-slate-300" />;
-              onClickAction = () => { onUndo?.(); onClose(); };
-            } else if (slice.id === 'redo') {
-              strokeColor = isHovered ? '#a3a3a3' : '#525252';
-              iconElement = <Redo2 className="w-6 h-6 text-slate-300" />;
-              onClickAction = () => { onRedo?.(); onClose(); };
-            } else if (activeTab === 'general') {
-              if (slice.id === 'right') {
-                // Locomotion (Yellow in Resonite)
-                strokeColor = '#facc15';
-                filterStyle = 'drop-shadow(0 0 10px rgba(250, 204, 21, 0.45))';
-                iconElement =
-                  locomotionMode === 'walk' ? <Footprints className="w-6 h-6 text-amber-400" /> :
-                  locomotionMode === 'flight' ? <Plane className="w-6 h-6 text-amber-400" /> :
-                  <Ghost className="w-6 h-6 text-amber-400" />;
-                onClickAction = handleNextLocomotion;
-              } else if (slice.id === 'bottom') {
-                // Scaling (Red when disabled, Green when enabled)
-                strokeColor = scalingEnabled ? '#10b981' : '#ef4444';
-                filterStyle = scalingEnabled
-                  ? 'drop-shadow(0 0 10px rgba(16, 185, 129, 0.45))'
-                  : 'drop-shadow(0 0 10px rgba(239, 68, 68, 0.45))';
-                iconElement = scalingEnabled ? (
-                  <Maximize className="w-6 h-6 text-emerald-400" />
-                ) : (
-                  <Minimize className="w-6 h-6 text-rose-400" />
-                );
-                onClickAction = onToggleScaling;
-              } else if (slice.id === 'left') {
-                // Laser (White in Resonite)
-                strokeColor = laserEnabled ? '#ffffff' : '#94a3b8';
-                filterStyle = laserEnabled ? 'drop-shadow(0 0 10px rgba(255, 255, 255, 0.45))' : '';
-                iconElement = <Compass className={`w-6 h-6 ${laserEnabled ? 'text-white' : 'text-slate-400'}`} />;
-                onClickAction = onToggleLaser;
-              }
-            } else if (activeTab === 'held') {
-              // Held Tab Slices (only reachable when isHeld === true).
-              // Save Held / Duplicate-or-Download / Destroy. Undo/Redo
-              // slices above keep their action — they apply to any state.
-              // The middle slice is type-conditional: for misc files it
-              // becomes "Download" (the only type that meaningfully
-              // exports raw bytes to disk), for everything else it keeps
-              // the original "Duplicate" verb. Cyan for both so the
-              // visual hierarchy is preserved — only the icon + tooltip
-              // flip.
-              if (slice.id === 'right') {
-                // Save Held (BookmarkPlus, amber = "save / store")
-                strokeColor = '#f59e0b';
-                filterStyle = 'drop-shadow(0 0 10px rgba(245, 158, 11, 0.45))';
-                iconElement = <BookmarkPlus className="w-6 h-6 text-amber-400" />;
-                onClickAction = () => { onSaveHeld?.(); onClose(); };
-              } else if (slice.id === 'bottom') {
-                strokeColor = '#06b6d4';
-                filterStyle = 'drop-shadow(0 0 10px rgba(6, 182, 212, 0.45))';
-                if (heldAssetType === 'misc') {
-                  // Download (Download, cyan = "export to device")
-                  iconElement = <Download className="w-6 h-6 text-cyan-400" />;
-                  onClickAction = () => { onDownloadHeld?.(); onClose(); };
-                } else {
-                  // Duplicate (Copy, cyan = "create another")
-                  iconElement = <Copy className="w-6 h-6 text-cyan-400" />;
-                  onClickAction = () => { onDuplicate?.(); onClose(); };
-                }
-              } else if (slice.id === 'left') {
-                // Destroy (Trash2, rose = "destructive")
-                strokeColor = '#ef4444';
-                filterStyle = 'drop-shadow(0 0 10px rgba(239, 68, 68, 0.45))';
-                iconElement = <Trash2 className="w-6 h-6 text-rose-400" />;
-                onClickAction = () => { onDestroy?.(); onClose(); };
-              }
-            } else {
-              // Grab Tab Slices
-              if (slice.id === 'right') {
-                strokeColor = '#f59e0b';
-                filterStyle = 'drop-shadow(0 0 10px rgba(245, 158, 11, 0.45))';
-                iconElement =
-                  grabMode === 'auto' ? <Sparkles className="w-6 h-6 text-amber-400" /> :
-                  grabMode === 'precision' ? <Crosshair className="w-6 h-6 text-amber-400" /> :
-                  grabMode === 'palm' ? <Hand className="w-6 h-6 text-amber-400" /> :
-                  <Compass className="w-6 h-6 text-rose-400" />;
-                onClickAction = handleNextGrabMode;
-              } else if (slice.id === 'bottom') {
-                strokeColor = '#06b6d4';
-                filterStyle = 'drop-shadow(0 0 10px rgba(6, 182, 212, 0.45))';
-                iconElement = <Grid className="w-6 h-6 text-cyan-400" />;
-                onClickAction = () => { /* grid toggle */ onClose(); };
-              } else if (slice.id === 'left') {
-                strokeColor = '#a855f7';
-                filterStyle = 'drop-shadow(0 0 10px rgba(168, 85, 247, 0.45))';
-                iconElement = <Shield className="w-6 h-6 text-purple-400" />;
-                onClickAction = () => { /* collision toggle */ onClose(); };
-              }
-            }
-
-            if (!isHovered) filterStyle = '';
+            const strokeColor = isHovered ? slice.color : `${slice.color}aa`;
+            const filterStyle = isHovered ? `drop-shadow(0 0 10px ${slice.color}77)` : '';
+            const iconElement = getSliceIcon(
+              slice,
+              locomotionMode,
+              scalingEnabled,
+              laserEnabled,
+              grabMode,
+              isMuted,
+              noShadows,
+              lightColor
+            );
 
             return (
               <g
@@ -448,7 +554,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
                 className="cursor-pointer group"
                 onMouseEnter={() => setHoveredIndex(i)}
                 onMouseLeave={() => setHoveredIndex(null)}
-                onClick={onClickAction}
+                onClick={() => triggerSliceAction(i)}
               >
                 {/* Sector Background & Border */}
                 <path
@@ -506,7 +612,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
               fill="#00f0ff"
               className="text-[9px] font-black tracking-widest uppercase pointer-events-none"
             >
-              {activeTab === 'general' ? 'MENU' : activeTab === 'grab' ? 'GRAB' : 'HELD'}
+              {menuStack.length > 0 ? 'BACK' : isDevMenu ? 'DEV' : isLightMenu ? 'LIGHT' : activeTab === 'general' ? 'MENU' : activeTab === 'grab' ? 'GRAB' : 'HELD'}
             </text>
           </g>
 
@@ -526,100 +632,39 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
         </svg>
 
         {/* OUTSIDE LABELS — positioned pointing outward from each sector like Resonite */}
-        {/* Top-Left: Undo */}
-        <div style={{ position: 'absolute', top: '35px', left: '10px', textAlign: 'right', pointerEvents: 'none' }}>
-          <span className="text-sm font-bold text-slate-200 tracking-wide drop-shadow-md">Undo</span>
-        </div>
+        {slices.map((slice) => {
+          const midDeg = (slice.startDeg + slice.endDeg) / 2;
+          const midRad = (midDeg - 90) * (Math.PI / 180);
+          const rLabel = 155;
+          const labelX = 180 + rLabel * Math.cos(midRad);
+          const labelY = 180 + rLabel * Math.sin(midRad);
+          const textAlign = labelX < 150 ? 'right' : labelX > 210 ? 'left' : 'center';
 
-        {/* Top-Right: Redo */}
-        <div style={{ position: 'absolute', top: '35px', right: '10px', textAlign: 'left', pointerEvents: 'none' }}>
-          <span className="text-sm font-bold text-slate-200 tracking-wide drop-shadow-md">Redo</span>
-        </div>
-
-        {/* Right Slice Label */}
-        <div style={{ position: 'absolute', top: '135px', left: '295px', textAlign: 'left', pointerEvents: 'none', lineHeight: '1.3', whiteSpace: 'pre-line' }}>
-          {activeTab === 'general' ? (
-            <span className="text-xs font-bold text-white drop-shadow-md">
-              {"Locomotion\n"}
-              <span className="text-[11px] font-normal text-slate-300">
-                {locomotionMode === 'walk' ? 'Walk/Run (with\nclimbing)' :
-                 locomotionMode === 'flight' ? 'Flight mode\n(free-fly)' :
-                 'Noclip mode\n(no collision)'}
-              </span>
-            </span>
-          ) : activeTab === 'held' ? (
-            <span className="text-xs font-bold text-amber-400 drop-shadow-md">
-              {"Save Held\n"}
-              <span className="text-[11px] font-normal text-slate-200">
-                Add to your inventory
-              </span>
-            </span>
-          ) : (
-            <span className="text-xs font-bold text-amber-400 drop-shadow-md">
-              {"Grab Mode\n"}
-              <span className="text-[11px] font-normal text-slate-200 uppercase">
-                {grabMode}
-              </span>
-            </span>
-          )}
-        </div>
-
-        {/* Bottom Slice Label */}
-        <div style={{ position: 'absolute', top: '295px', left: '180px', transform: 'translateX(-50%)', textAlign: 'center', pointerEvents: 'none', lineHeight: '1.3' }}>
-          {activeTab === 'general' ? (
-            <span className="text-xs font-bold text-white drop-shadow-md">
-              {"Scaling\n"}
-              <span className={`text-[11px] font-semibold ${scalingEnabled ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {scalingEnabled ? 'Enabled' : 'Disabled'}
-              </span>
-            </span>
-          ) : activeTab === 'held' ? (
-            heldAssetType === 'misc' ? (
-              <span className="text-xs font-bold text-cyan-400 drop-shadow-md">
-                {"Download\n"}
-                <span className="text-[11px] font-normal text-slate-200">
-                  Save to your device
-                </span>
-              </span>
-            ) : (
-              <span className="text-xs font-bold text-cyan-400 drop-shadow-md">
-                {"Duplicate\n"}
-                <span className="text-[11px] font-normal text-slate-200">
-                  Make a copy
-                </span>
-              </span>
-            )
-          ) : (
-            <span className="text-xs font-bold text-cyan-400 drop-shadow-md">
-              {"Snap Grid\n"}
-              <span className="text-[11px] font-normal text-slate-300">Toggle</span>
-            </span>
-          )}
-        </div>
-
-        {/* Bottom-Left Slice Label */}
-        <div style={{ position: 'absolute', top: '215px', right: '295px', textAlign: 'right', pointerEvents: 'none', lineHeight: '1.3', whiteSpace: 'pre-line' }}>
-          {activeTab === 'general' ? (
-            <span className="text-xs font-bold text-white drop-shadow-md">
-              {"Laser\n"}
-              <span className={`text-[11px] font-semibold ${laserEnabled ? 'text-cyan-400' : 'text-slate-400'}`}>
-                {laserEnabled ? 'Enabled' : 'Disabled'}
-              </span>
-            </span>
-          ) : activeTab === 'held' ? (
-            <span className="text-xs font-bold text-rose-400 drop-shadow-md">
-              {"Destroy\n"}
-              <span className="text-[11px] font-normal text-slate-200">
-                Remove from world
-              </span>
-            </span>
-          ) : (
-            <span className="text-xs font-bold text-purple-400 drop-shadow-md">
-              {"Collision\n"}
-              <span className="text-[11px] font-normal text-slate-300">Toggle</span>
-            </span>
-          )}
-        </div>
+          return (
+            <div
+              key={`label-${slice.id}`}
+              style={{
+                position: 'absolute',
+                top: `${labelY - 14}px`,
+                left: textAlign === 'center' ? `${labelX}px` : textAlign === 'right' ? undefined : `${labelX}px`,
+                right: textAlign === 'right' ? `${360 - labelX}px` : undefined,
+                transform: textAlign === 'center' ? 'translateX(-50%)' : undefined,
+                textAlign,
+                pointerEvents: 'none',
+                lineHeight: '1.25',
+              }}
+            >
+              <div className="text-xs font-bold tracking-wide drop-shadow-md" style={{ color: slice.color || '#e2e8f0' }}>
+                {slice.label}
+              </div>
+              {(slice.subLabel || (slice.submenu && slice.submenu.length > 0)) && (
+                <div className="text-[11px] font-normal text-slate-300 drop-shadow-md">
+                  {slice.subLabel || '▸ Submenu'}
+                </div>
+              )}
+            </div>
+          );
+        })}
 
         {/* Close Button at top right corner */}
         <button

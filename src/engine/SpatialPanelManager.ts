@@ -219,6 +219,7 @@ export class SpatialPanelManager {
     domContainer.style.pointerEvents = 'auto';
 
     const css3dObject = new CSS3DObject(domContainer);
+    css3dObject.name = 'CSS3D UI Content';
     css3dObject.scale.setScalar(cssScale);
 
     // ---- Holographic frame mesh (WebGL) -------------------------------------
@@ -226,7 +227,7 @@ export class SpatialPanelManager {
 
     // ---- Top-level group ----------------------------------------------------
     const group = new THREE.Group();
-    group.name = `SpatialPanel_${id}`;
+    group.name = `Spatial Panel (${id})`;
     group.userData.isSpatialWindow = true;
     group.userData.spatialPanelId = id;
     group.add(css3dObject);
@@ -790,7 +791,7 @@ export class SpatialPanelManager {
 
   private _buildFrame(worldW: number, worldH: number): THREE.Group {
     const g = new THREE.Group();
-    g.name = 'holographic_frame';
+    g.name = 'Holographic Panel Frame';
 
     const depth = 0.025;
     const boxGeo = new THREE.BoxGeometry(worldW + 0.06, worldH + 0.06, depth);
@@ -804,14 +805,17 @@ export class SpatialPanelManager {
       emissiveIntensity: 0.4,
     });
     const box = new THREE.Mesh(boxGeo, boxMat);
+    box.name = 'Panel Backdrop';
     box.position.z = -depth / 2 - 0.001;
     g.add(box);
 
     // Cyan edge lines
-    g.add(new THREE.LineSegments(
+    const edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(boxGeo),
       new THREE.LineBasicMaterial({ color: '#00f0ff' })
-    ));
+    );
+    edges.name = 'Panel Border Outline';
+    g.add(edges);
 
     // Glow halo
     const glowGeo = new THREE.PlaneGeometry(worldW + 0.5, worldH + 0.5);
