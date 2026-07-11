@@ -35,6 +35,15 @@ export class PeerAvatar {
   public isSpeaking = false;
   public vrmUrl: string | null = null;
 
+  private hasReceivedFirstUpdate = false;
+  private targetHeadPos = new THREE.Vector3();
+  private targetHeadQuat = new THREE.Quaternion();
+  private targetLeftPos = new THREE.Vector3();
+  private targetLeftQuat = new THREE.Quaternion();
+  private targetRightPos = new THREE.Vector3();
+  private targetRightQuat = new THREE.Quaternion();
+  private _scratchEuler = new THREE.Euler();
+
   constructor(peerId: string, _scene: THREE.Scene, worldRoot: THREE.Object3D) {
     this.peerId = peerId;
     // Peer avatars live on worldRoot (not the raw scene) so they ride
@@ -144,33 +153,44 @@ export class PeerAvatar {
       this.group.visible = true;
     }
 
-    if (this.headMesh) {
-      this.headMesh.position.set(...transform.headPosition);
-      this.headMesh.rotation.set(...transform.headRotation);
+    this.targetHeadPos.set(...transform.headPosition);
+    this._scratchEuler.set(...transform.headRotation);
+    this.targetHeadQuat.setFromEuler(this._scratchEuler);
+
+    if (transform.leftHandPosition) {
+      this.targetLeftPos.set(...transform.leftHandPosition);
+      this._scratchEuler.set(...(transform.leftHandRotation || [0, 0, 0]));
+      this.targetLeftQuat.setFromEuler(this._scratchEuler);
+    }
+    if (transform.rightHandPosition) {
+      this.targetRightPos.set(...transform.rightHandPosition);
+      this._scratchEuler.set(...(transform.rightHandRotation || [0, 0, 0]));
+      this.targetRightQuat.setFromEuler(this._scratchEuler);
     }
 
-    if (this.leftHandMesh && transform.leftHandPosition) {
-      this.leftHandMesh.position.set(...transform.leftHandPosition);
-      this.leftHandMesh.rotation.set(...(transform.leftHandRotation || [0, 0, 0]));
+    if (!this.hasReceivedFirstUpdate) {
+      this.hasReceivedFirstUpdate = true;
+      if (this.headMesh) {
+        this.headMesh.position.copy(this.targetHeadPos);
+        this.headMesh.quaternion.copy(this.targetHeadQuat);
+      }
+      if (this.leftHandMesh && transform.leftHandPosition) {
+        this.leftHandMesh.position.copy(this.targetLeftPos);
+        this.leftHandMesh.quaternion.copy(this.targetLeftQuat);
+      }
+      if (this.rightHandMesh && transform.rightHandPosition) {
+        this.rightHandMesh.position.copy(this.targetRightPos);
+        this.rightHandMesh.quaternion.copy(this.targetRightQuat);
+      }
+    }
+
+    if (this.leftHandMesh) {
       const ring = this.leftHandMesh.getObjectByName('ring');
-      if (ring) {
-        ring.visible = transform.controllerType !== 'quest3';
-      }
+      if (ring) ring.visible = transform.controllerType !== 'quest3';
     }
-
-    if (this.rightHandMesh && transform.rightHandPosition) {
-      this.rightHandMesh.position.set(...transform.rightHandPosition);
-      this.rightHandMesh.rotation.set(...(transform.rightHandRotation || [0, 0, 0]));
+    if (this.rightHandMesh) {
       const ring = this.rightHandMesh.getObjectByName('ring');
-      if (ring) {
-        ring.visible = transform.controllerType !== 'quest3';
-      }
-    }
-
-    if (this.vrm) {
-      this.vrm.scene.position.set(...transform.headPosition);
-      this.vrm.scene.position.y -= 1.5; // Offset to feet
-      this.vrm.update(0.016);
+      if (ring) ring.visible = transform.controllerType !== 'quest3';
     }
 
     // Speaking indicator halo pulse
@@ -181,6 +201,29 @@ export class PeerAvatar {
       if (this.isSpeaking) {
         this.audioSpeakerMesh.scale.setScalar(1 + Math.sin(performance.now() * 0.01) * 0.15);
       }
+    }
+  }
+
+  public update(delta: number): void {
+    if (!this.hasReceivedFirstUpdate) return;
+    const alpha = 1 - Math.exp(-22 * Math.min(delta, 0.1));
+
+    if (this.headMesh) {
+      this.headMesh.position.lerp(this.targetHeadPos, alpha);
+      this.headMesh.quaternion.slerp(this.targetHeadQuat, alpha);
+    }
+    if (this.leftHandMesh) {
+      this.leftHandMesh.position.lerp(this.targetLeftPos, alpha);
+      this.leftHandMesh.quaternion.slerp(this.targetLeftQuat, alpha);
+    }
+    if (this.rightHandMesh) {
+      this.rightHandMesh.position.lerp(this.targetRightPos, alpha);
+      this.rightHandMesh.quaternion.slerp(this.targetRightQuat, alpha);
+    }
+    if (this.vrm) {
+      this.vrm.scene.position.lerp(this.targetHeadPos, alpha);
+      this.vrm.scene.position.y = this.targetHeadPos.y - 1.5;
+      this.vrm.update(delta);
     }
   }
 
@@ -276,6 +319,12 @@ export class AvatarManager {
     }
 
     peer.updateTransform(transform);
+  }
+
+  public update(delta: number): void {
+    for (const peer of this.peers.values()) {
+      peer.update(delta);
+    }
   }
 
   public attachPeerAudio(peerId: string, stream: MediaStream): void {

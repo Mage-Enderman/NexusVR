@@ -2372,6 +2372,7 @@ const vrHud = new VRHUDManager(
     const unbindLoop = sceneEngine.registerUpdateCallback((_delta, elapsed) => {
       manipulationManager.update(_delta);
       assetManager.update(_delta, elapsed);
+      avatarManager.update(_delta);
 
       // Pulse in-flight import placeholders so they read as "loading"
       // at a glance. Cheap: a few sin / multiplies per pending place,
@@ -2397,8 +2398,8 @@ const vrHud = new VRHUDManager(
         setStats({ ...sceneEngine.stats });
       }
 
-      // Broadcast avatar every ~60ms (approx 16 FPS network sync)
-      if (elapsed - lastBroadcast > 0.06 && net.mode !== 'offline') {
+      // Broadcast avatar every ~33ms (approx 30 FPS network sync)
+      if (elapsed - lastBroadcast > 0.033 && net.mode !== 'offline') {
         lastBroadcast = elapsed;
         const transform = avatarManager.getLocalTransform(
           sceneEngine.camera,
