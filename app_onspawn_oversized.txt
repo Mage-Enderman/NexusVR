@@ -1,0 +1,61 @@
+2180:             });
+2181:           return;
+2182:         }
+2183:         // v null: fall through to fileDataOversized branch below so
+2184:         // peers still see the red placeholder.
+2185:       }
+2186:       if (data.fileDataOversized) {
+2187:         // A prior 'pending' broadcast may have already drawn a
+2188:         // "Loading" placeholder for this id (the host fires 'pending'
+2189:         // BEFORE awaiting the import, so peers can render a loading
+2190:         // indicator during the (potentially multi-second) file load).
+2191:         // Dispose it before swapping in the permanent red "Too Large"
+2192:         // indicator - otherwise the cyan mesh orphans in worldRoot
+2193:         // with no registerOnAssetAdded cleanup ever firing for it
+2194:         // (no real asset will ever be created for an oversized spawn).
+2195:         //
+2196:         // Phase 3B: if the sender included a p2pTransferHint, try to pull
+2197:         // the bytes over the raw-binary asset channel instead of giving up.
+2198:         if (startP2PAssetTransfer(data, pos)) {
+2199:           return;
+2200:         }
+2201:         const prior = pendingAssetsRef.current.get(data.id);
+2202:         if (prior) {
+2203:           sceneEngine.worldRoot.remove(prior.group);
+2204:           prior.dispose();
+2205:           pendingAssetsRef.current.delete(data.id);
+2206:         }
+2207:         const { group, dispose } = createLoadingPlaceholder(
+2208:           data.name || 'Asset',
+2209:           'Network',
+2210:           pos,
+2211:           true  // isOversized - red palette, "Too Large" label
+2212:         );
+2213:         sceneEngine.worldRoot.add(group);
+2214:         pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
+2215:         return;
+2216:       }
+2217:       if (data.type === 'primitive' && data.primitiveType) {
+2218:         const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+2219:         prim.object3d.rotation.set(...data.rotation);
+2220:         prim.object3d.scale.set(...data.scale);
+2221:         // Restore the sender's persistent flag onto userData so the
+2222:         // inspector tree's orange-dot indicator and the checkbox state
+2223:         // both reflect what the host had. Skipped when undefined for
+2224:         // backward compat with older senders.
+2225:         if (data.isPersistent !== undefined) {
+2226:           prim.object3d.userData.isPersistent = data.isPersistent;
+2227:         }
+2228:         if (data.materialState) {
+2229:           AssetManager.applyMaterialUpdate(prim, data.materialState);
+2230:         }
+2231:       } else if (data.fileData && data.name) {
+2232:         const blob = new Blob([data.fileData]);
+2233:         // Pass `data.id` as the AssetManager's customId so the local
+2234:         // placeholder (already drawn from this asset's 'pending'
+2235:         // broadcast via onPendingSpawn above) and the actual asset
+2236:         // share the SAME id. registerOnAssetAdded's id-match cleanup
+2237:         // (top of this engine-init effect) then removes the
+2238:         // placeholder the moment this asset resolves - clean
+2239:         // handoff, no separate tempId → assetId mapping required.
+2240:         const file = new File([blob], data.name);

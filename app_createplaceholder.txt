@@ -1,0 +1,111 @@
+60:  * auto-dispose when its material is disposed (textures can be shared
+61:  * across multiple materials). Without this explicit call, every
+62:  * cancelled or resolved placeholder leaks a 512x128 RGBA backing on
+63:  * GPU until component unmount.
+64:  */
+65: function createLoadingPlaceholder(
+66:   name: string,
+67:   requesterName: string,
+68:   position: THREE.Vector3,
+69:   isOversized: boolean = false
+70: ): { group: THREE.Group; dispose: () => void; setProgress: (pct: number | null) => void } {
+71:   const group = new THREE.Group();
+72:   group.name = `Loading Placeholder (${name})`;
+73:   group.position.copy(position);
+74: 
+75:   // Color palette: cyan = in-flight loading, red = "Too Large" indicator
+76:   // (the binary was stripped from the broadcast to keep Quest's WebRTC
+77:   // data channel from OOMing on a >5MB base64 round-trip).
+78:   const primaryColor = isOversized ? 0xff3344 : 0x00f0ff;
+79:   const secondaryColor = isOversized ? 0xff5566 : 0xa855f7;
+80:   const primaryHex = isOversized ? '#ff3344' : '#00f0ff';
+81:   const nameHex = isOversized ? '#ff8899' : '#e2e8f0';
+82:   const titleText = isOversized ? 'Too Large' : 'Loading';
+83: 
+84:   // Wireframe icosahedron - pulses scale to read as "loading" or
+85:   // stays static for the "Too Large" indicator (handled by the
+86:   // animation loop's `oversized` skip below).
+87:   const icoGeo = new THREE.IcosahedronGeometry(0.4, 0);
+88:   const icoMat = new THREE.MeshBasicMaterial({
+89:     color: primaryColor,
+90:     wireframe: true,
+91:     transparent: true,
+92:     opacity: 0.7,
+93:   });
+94:   group.add(new THREE.Mesh(icoGeo, icoMat));
+95: 
+96:   // Counter-rotation ring, matches the app's palette (purple for
+97:   // loading, bright red for the oversized indicator).
+98:   const ringGeo = new THREE.TorusGeometry(0.55, 0.02, 16, 32);
+99:   const ringMat = new THREE.MeshBasicMaterial({
+100:     color: secondaryColor,
+101:     transparent: true,
+102:     opacity: 0.65,
+103:   });
+104:   const ring = new THREE.Mesh(ringGeo, ringMat);
+105:   ring.rotation.x = Math.PI / 2;
+106:   group.add(ring);
+107: 
+108:   // Floating canvas-textured sprite label: "Loading / <name> / by <>".
+109:   const canvas = document.createElement('canvas');
+110:   canvas.width = 512;
+111:   canvas.height = 128;
+112:   const ctx = canvas.getContext('2d');
+113:   // Live progress percentage (null = indeterminate). Held on a stable
+114:   // closure-captured cell so setProgress can mutate it without
+115:   // triggering React re-renders.
+116:   let currentPct: number | null = null;
+117:   let disposed = false;
+118:   let lastRedrawAt = 0;
+119: 
+120:   const redraw = (force = false) => {
+121:     if (!ctx || disposed) return;
+122:     const now = (performance.now && performance.now()) || Date.now();
+123:     // ~10 Hz throttle; force=true bypasses (used on the first call,
+124:     // and on the final 100% so the Settled state lands immediately).
+125:     if (!force && now - lastRedrawAt < 100) return;
+126:     lastRedrawAt = now;
+127:     ctx.fillStyle = 'rgba(7, 9, 14, 0.78)';
+128:     ctx.fillRect(0, 0, canvas.width, canvas.height);
+129:     ctx.strokeStyle = primaryHex;
+130:     ctx.lineWidth = 4;
+131:     ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+132:     ctx.font = 'bold 36px sans-serif';
+133:     ctx.fillStyle = primaryHex;
+134:     ctx.textAlign = 'center';
+135:     ctx.textBaseline = 'middle';
+136:     // Append " 45%" only when progress is a real number; omit for null
+137:     // (indeterminate) and the "Too Large" failure case.
+138:     const titleWithPct =
+139:       isOversized || currentPct === null
+140:         ? titleText
+141:         : `${titleText}… ${currentPct}%`;
+142:     ctx.fillText(titleWithPct, canvas.width / 2, canvas.height / 2 - 28);
+143:     ctx.font = 'bold 26px sans-serif';
+144:     ctx.fillStyle = nameHex;
+145:     const maxLen = 26;
+146:     const displayName = name.length > maxLen ? name.slice(0, maxLen - 1) + '…' : name;
+147:     ctx.fillText(displayName, canvas.width / 2, canvas.height / 2 + 8);
+148:     // For oversized the requester line is suppressed - the user already
+149:     // knows why they can't see it, and dropping the line keeps the
+150:     // label visually focused on the failure mode.
+151:     if (!isOversized) {
+152:       ctx.font = '20px sans-serif';
+153:       ctx.fillStyle = '#a855f7';
+154:       ctx.fillText(`by ${requesterName}`, canvas.width / 2, canvas.height / 2 + 44);
+155:     }
+156:     spriteTexture.needsUpdate = true;
+157:   };
+158: 
+159:   const spriteTexture = new THREE.CanvasTexture(canvas);
+160:   spriteTexture.colorSpace = THREE.SRGBColorSpace;
+161:   // First paint happens synchronously so the placeholder looks correct
+162:   // before any progress ticks arrive.
+163:   redraw(true);
+164: 
+165:   const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
+166:   const sprite = new THREE.Sprite(spriteMat);
+167:   sprite.scale.set(1.6, 0.4, 1);
+168:   sprite.position.y = 0.9;
+169:   group.add(sprite);
+170: 

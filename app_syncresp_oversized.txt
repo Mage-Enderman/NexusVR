@@ -1,0 +1,71 @@
+2400:             materialState: (a.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+2401:             videoAspectRatio: (a.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+2402:             streamingHint: hint
+2403:           });
+2404:           if (hint && net.isHost) {
+2405:             const syncMode = (a.object3d.userData as { videoState?: { syncMode?: string } }).videoState?.syncMode;
+2406:             if (syncMode === 'watch-party' && a.videoElement) {
+2407:               videoStreamingServiceRef.current.startLiveStreamToPeer(a.id, a.videoElement, fromPeerId);
+2408:             } else {
+2409:               videoStreamingServiceRef.current.beginStreamingToPeer(hint, fromPeerId).catch((err) => {
+2410:                 console.warn('[VideoStreaming] late-join pump failed for', fromPeerId, err);
+2411:               });
+2412:             }
+2413:           }
+2414:         });
+2415:         net.sendSceneSnapshot(fromPeerId, assetsList);
+2416:       }
+2417:     }));
+2418: 
+2419:     disposers.push(net.onSyncResp((snapshot) => {
+2420:       snapshot.assets.forEach((data) => {
+2421:         // Phase 3A late-join branch - MUST come BEFORE the isImporting
+2422:         // guard because the manual broadcast path sometimes lands
+2423:         // AFTER the local user has already placed a placeholder.
+2424:         // We want to UPGRADE that placeholder (replace the
+2425:         // blob/file import path) rather than short-circuit on the
+2426:         // existence guard.
+2427:         //
+2428:         // Fix A: async work via IIFE - same rationale as onSpawn
+2429:         // above; forEach's callback is plain sync so we can't use
+2430:         // `await` directly.
+2431:         if (data.streamingHint && data.type === 'video') {
+2432:           // v4 fix: see onSpawn's mirror comment. Sync attachReceiver
+2433:           // in try/catch; if it throws, fall through (in this branch
+2434:           // the fileDataOversized fallback is below the snapshotForEach).
+2435:           let v: HTMLVideoElement | null = null;
+2436:           try {
+2437:             v = videoStreamingServiceRef.current.attachReceiver(
+2438:               data.streamingHint,
+2439:               data.id,
+2440:               data.senderPeerId
+2441:             );
+2442:           } catch (err) {
+2443:             console.warn(
+2444:               '[VideoStreaming] late-join attachReceiver failed, falling through',
+2445:               err
+2446:             );
+2447:             v = null;
+2448:           }
+2449:           if (v) {
+2450:             const posV = new THREE.Vector3(...data.position);
+2451:             assetManager.loadVideoFromStreamedSource(
+2452:               data.id,
+2453:               data.name,
+2454:               v,
+2455:               posV,
+2456:               { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+2457:             )
+2458:               .then((loadedAsset) => {
+2459:                 if (loadedAsset) {
+2460:                   loadedAsset.object3d.rotation.set(...data.rotation);
+2461:                   loadedAsset.object3d.scale.set(...data.scale);
+2462:                   if (data.isPersistent !== undefined) {
+2463:                     loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+2464:                   }
+2465:                   if (data.materialState) {
+2466:                     AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+2467:                   }
+2468:                 }
+2469:               })
+2470:               .catch((err) => {

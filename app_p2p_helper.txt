@@ -1,0 +1,131 @@
+2050:       if (prior) {
+2051:         sceneEngine.worldRoot.remove(prior.group);
+2052:         prior.dispose();
+2053:         pendingAssetsRef.current.delete(data.id);
+2054:       }
+2055: 
+2056: 
+2057:       const { group, dispose, setProgress } = createLoadingPlaceholder(
+2058:         data.name || 'Asset',
+2059:         'Network',
+2060:         pos,
+2061:         false // in-flight download, not a permanent failure
+2062:       );
+2063:       sceneEngine.worldRoot.add(group);
+2064:       pendingAssetsRef.current.set(data.id, { group, dispose, setProgress, oversized: false });
+2065: 
+2066:       const assetId = hint.id;
+2067:       const size = hint.size;
+2068:       const CHUNK_SIZE = 256 * 1024;
+2069:       const chunks: ArrayBuffer[] = [];
+2070:       // Pre-size the array so we can place out-of-order chunks by index.
+2071:       chunks.length = Math.ceil(size / CHUNK_SIZE);
+2072:       let receivedBytes = 0;
+2073:       let completed = false;
+2074: 
+2075:       const finishIfDone = () => {
+2076:         if (completed) return;
+2077:         // Verify every slot is filled.
+2078:         for (let i = 0; i < chunks.length; i++) {
+2079:           if (!chunks[i]) return;
+2080:         }
+2081:         completed = true;
+2082:         netUnsub();
+2083:         // Concatenate chunks in order.
+2084:         const fullBlob = new Blob(chunks as ArrayBuffer[]);
+2085:         const file = new File([fullBlob], data.name || 'Asset');
+2086:         assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
+2087:           if (asset) {
+2088:             asset.object3d.rotation.set(...data.rotation);
+2089:             asset.object3d.scale.set(...data.scale);
+2090:             if (data.isPersistent !== undefined) {
+2091:               asset.object3d.userData.isPersistent = data.isPersistent;
+2092:             }
+2093:             if (data.materialState) {
+2094:               // @ts-ignore
+2095:               AssetManager.applyMaterialUpdate(asset, data.materialState);
+2096:             }
+2097:           }
+2098:         });
+2099:       };
+2100: 
+2101:       const onData = (chunkData: { id: string; start: number; end: number; data: ArrayBuffer }) => {
+2102:         if (chunkData.id !== assetId) return;
+2103:         const index = Math.floor(chunkData.start / CHUNK_SIZE);
+2104:         if (chunks[index]) return; // duplicate
+2105:         chunks[index] = chunkData.data;
+2106:         receivedBytes += chunkData.data.byteLength;
+2107:         setProgress(Math.min(100, (receivedBytes / size) * 100));
+2108: 
+2109:         // Request the next chunk if there are still bytes to fetch.
+2110:         if (chunkData.end < size) {
+2111:           const nextEnd = Math.min(chunkData.end + CHUNK_SIZE, size);
+2112:           net.requestAssetChunk(assetId, senderPeerId, chunkData.end, nextEnd);
+2113:         }
+2114:         finishIfDone();
+2115:       };
+2116:       const netUnsub = net.onP2PChunkData(onData);
+2117: 
+2118:       // Kick off the first chunk.
+2119:       const firstEnd = Math.min(CHUNK_SIZE, size);
+2120:       net.requestAssetChunk(assetId, senderPeerId, 0, firstEnd);
+2121:       return true;
+2122:     };
+2123: 
+2124: 
+2125:     net.onSpawn((data) => {
+2126:       // If asset is already loaded, skip
+2127:       if (assetManager.assets.has(data.id)) return;
+2128: 
+2129:       const pos = new THREE.Vector3(...data.position);
+2130:       // Oversized file broadcast: buildEnvelope's MAX_INLINED_FILE_BYTES
+2131:       // cap stripped the binary payload so the Quest doesn't OOM on a
+2132:       // 100MB+ base64 round-trip. Render a red "Too Large" placeholder
+2133:       // instead of trying to import - no fileData will ever land, so
+2134:       // this entry stays in pendingAssetsRef indefinitely. The
+2135:       // animation loop's `oversized` skip below keeps it static (no
+2136:       // pulse) so it reads as a permanent failure indicator rather
+2137:       // than a still-loading asset.
+2138:       if (data.type === 'video' && (data.streamingHint || (!data.fileData && !data.url))) {
+2139:         const hint = data.streamingHint || { id: data.id, fileSize: 0, mimeHint: 'video/mp4' };
+2140:         let v: HTMLVideoElement | null = null;
+2141:         try {
+2142:           v = videoStreamingServiceRef.current.attachReceiver(
+2143:             hint,
+2144:             data.id,
+2145:             data.senderPeerId
+2146:           );
+2147:         } catch (err) {
+2148:           console.warn(
+2149:             '[VideoStreaming] attachReceiver failed, falling through',
+2150:             err
+2151:           );
+2152:           v = null;
+2153:         }
+2154:         if (v) {
+2155:           const posV = new THREE.Vector3(...data.position);
+2156:           assetManager.loadVideoFromStreamedSource(
+2157:             data.id,
+2158:             data.name,
+2159:             v,
+2160:             posV,
+2161:             { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+2162:           )
+2163:             .then((loadedAsset) => {
+2164:               if (loadedAsset) {
+2165:                 loadedAsset.object3d.rotation.set(...data.rotation);
+2166:                 loadedAsset.object3d.scale.set(...data.scale);
+2167:                 if (data.isPersistent !== undefined) {
+2168:                   loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+2169:                 }
+2170:                 if (data.materialState) {
+2171:                   AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+2172:                 }
+2173:               }
+2174:             })
+2175:             .catch((err) => {
+2176:               console.warn(
+2177:                 '[VideoStreaming] loadVideoFromStreamedSource failed',
+2178:                 err
+2179:               );
+2180:             });
