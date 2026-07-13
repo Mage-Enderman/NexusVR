@@ -148,6 +148,11 @@ export class SceneEngine {
   
   public isVRHandGrabbing?: (side: 'left' | 'right') => boolean;
   private updateCallbacks: Set<SceneUpdateCallback> = new Set();
+  // Callbacks fired after `renderer.render()` completes each frame.
+  // Used for operations that must run after the camera/HMD pose has
+  // been finalized by the WebXR manager, such as syncing the Web Audio
+  // listener position with the current camera transform.
+  private postRenderCallbacks: Set<SceneUpdateCallback> = new Set();
   // Listeners notified after every successful settings apply (e.g.
   // the on-VR-entry 200k splat default, plus user-driven changes
   // routed through updateSettings). Powers the one-way engine→React
@@ -552,6 +557,16 @@ export class SceneEngine {
   }
 
   /**
+   * Register a callback that fires AFTER `renderer.render()` each frame.
+   * Use this for work that depends on the camera's final world transform
+   * (e.g. syncing the Web Audio listener with the HMD pose).
+   */
+  public registerPostRenderCallback(callback: SceneUpdateCallback): () => void {
+    this.postRenderCallbacks.add(callback);
+    return () => this.postRenderCallbacks.delete(callback);
+  }
+
+  /**
    * Register a callback fired after every successful settings apply
    * (including the post-VR-entry default cap, see sessionstart).
    * Used by App.tsx to mirror engine settings into React state so
@@ -764,6 +779,12 @@ export class SceneEngine {
     }
 
     this.renderer.render(this.scene, this.camera);
+
+    // Fire post-render callbacks after the camera/HMD pose is finalized.
+    for (const callback of this.postRenderCallbacks) {
+      callback(delta, time / 1000);
+    }
+
     // CSS3DRenderer overlay — renders after WebGL so panels appear in front
     this.spatialPanelManager?.render(this.scene, this.camera);
     // Crosshair hover: find panel element under screen center while locked

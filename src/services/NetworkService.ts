@@ -974,9 +974,17 @@ export class NetworkService {
 
   /**
    * Parse a raw asset-binary message. String payloads carry JSON control
-   * messages (`p2preq`); ArrayBuffer payloads carry a chunked data header
+   * messages (`p2preq`); binary payloads carry a chunked data header
    * followed by raw bytes. Fires `onP2PChunkDataCallbacks` on the
    * receiving side.
+   *
+   * PeerJS's `serialization: 'binary'` channel can deliver the bytes in
+   * several forms depending on the browser / RTCDataChannel binaryType:
+   *   - ArrayBuffer (most desktop browsers)
+   *   - Blob (some Chromium builds when binaryType is 'blob')
+   *   - Uint8Array / other TypedArray / DataView wrappers
+   * We normalize all of those to an ArrayBuffer before decoding so the
+   * framing parser always sees the same shape.
    */
   private handleAssetBinaryMessage(conn: DataConnection, raw: unknown): void {
     if (typeof raw === 'string') {
@@ -990,16 +998,31 @@ export class NetworkService {
       }
       return;
     }
-    if (raw instanceof ArrayBuffer) {
-      try {
-        const chunk = decodeAssetBinaryChunk(raw);
-        for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
-      } catch (err) {
-        console.warn('[PeerJS] asset-binary chunk decode error from', conn.peer, err);
-      }
+    // Blob payloads must be converted asynchronously. All other binary
+    // shapes are normalized synchronously to an ArrayBuffer.
+    if (raw instanceof Blob) {
+      blobToArrayBuffer(raw).then((buf) => {
+        if (buf) this.processAssetBinaryChunk(conn, buf);
+      }).catch((err) => {
+        console.warn('[PeerJS] asset-binary Blob read error from', conn.peer, err);
+      });
       return;
     }
-    console.warn('[PeerJS] unexpected asset-binary message type from', conn.peer, typeof raw);
+    const buf = normalizeBinaryPayload(raw);
+    if (!buf) {
+      console.warn('[PeerJS] unexpected asset-binary message type from', conn.peer, typeof raw);
+      return;
+    }
+    this.processAssetBinaryChunk(conn, buf);
+  }
+
+  private processAssetBinaryChunk(conn: DataConnection, buf: ArrayBuffer): void {
+    try {
+      const chunk = decodeAssetBinaryChunk(buf);
+      for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
+    } catch (err) {
+      console.warn('[PeerJS] asset-binary chunk decode error from', conn.peer, err);
+    }
   }
 
   /**
@@ -1940,7 +1963,11 @@ export class NetworkService {
     try {
       if (!this.localAudioStream) {
         this.localAudioStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          // Force mono capture so the Web Audio PannerNode can spatialize
+          // the microphone stream correctly. Stereo input streams are not
+          // panned by the PannerNode and would sound "inside the head" or
+          // flat regardless of the peer's 3D position.
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: false
         });
       }
@@ -1984,6 +2011,7 @@ export class NetworkService {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           deviceId: deviceId ? { exact: deviceId } : undefined,
+          channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
@@ -2384,4 +2412,47 @@ function decodeAssetBinaryChunk(buf: ArrayBuffer): P2PChunkData {
   offset += idLen;
   const data = buf.slice(offset);
   return { id, start, end, data };
+}
+
+/**
+ * Normalize a raw binary payload from PeerJS into a usable ArrayBuffer.
+ * PeerJS's `serialization: 'binary'` DataConnection can deliver bytes as
+ * ArrayBuffer, Blob, Uint8Array, or other TypedArray/DataView wrappers
+ * depending on the browser's RTCDataChannel binaryType. This helper
+ * converts all of those into a plain ArrayBuffer so the asset-binary
+ * framing parser only has to deal with one shape.
+ */
+function normalizeBinaryPayload(raw: unknown): ArrayBuffer | null {
+  if (raw instanceof ArrayBuffer) return raw;
+  if (ArrayBuffer.isView(raw)) {
+    // TypedArrays and DataViews both implement ArrayBuffer.isView.
+    // Slice the underlying buffer to get a standalone ArrayBuffer.
+    return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
+  }
+  return null;
+}
+
+/**
+ * Convert a Blob to an ArrayBuffer. Uses the native `blob.arrayBuffer()`
+ * when available, falling back to FileReader for older browsers (e.g.
+ * Safari < 14). Returns null if the read fails so callers can log and
+ * continue rather than throwing.
+ */
+function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer | null> {
+  if (typeof blob.arrayBuffer === 'function') {
+    return blob.arrayBuffer().catch(() => null);
+  }
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result;
+      if (result instanceof ArrayBuffer) {
+        resolve(result);
+      } else {
+        resolve(null);
+      }
+    };
+    reader.onerror = () => resolve(null);
+    reader.readAsArrayBuffer(blob);
+  });
 }

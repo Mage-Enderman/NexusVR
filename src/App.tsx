@@ -158,6 +158,11 @@ function createLoadingPlaceholder(
 
   const spriteTexture = new THREE.CanvasTexture(canvas);
   spriteTexture.colorSpace = THREE.SRGBColorSpace;
+  // Flip the canvas texture vertically so the label reads correctly in
+  // VR (matches the VRRadialMenuMesh fix). Without this the Sprite's
+  // default UV mapping renders the canvas upside-down in-headset.
+  spriteTexture.repeat.y = -1;
+  spriteTexture.offset.y = 1;
   // First paint happens synchronously so the placeholder looks correct
   // before any progress ticks arrive.
   redraw(true);
@@ -2572,6 +2577,14 @@ const vrHud = new VRHUDManager(
     // Animation Loop sync
     let lastBroadcast = 0;
     let lastCenterRay = 0;
+    // Post-render: sync the Web Audio listener with the final camera/HMD
+    // pose AFTER renderer.render() has applied the WebXR camera matrix.
+    // This is the authoritative spatial-audio sync; the per-frame update
+    // callback above is a fallback for non-VR/desktop mode.
+    const unbindPostRender = sceneEngine.registerPostRenderCallback(() => {
+      avatarManager.updateAudioListener();
+    });
+
     const unbindLoop = sceneEngine.registerUpdateCallback((_delta, elapsed) => {
       manipulationManager.update(_delta);
       assetManager.update(_delta, elapsed);
@@ -2827,6 +2840,7 @@ const vrHud = new VRHUDManager(
     }
 
     return () => {
+      unbindPostRender();
       unbindLoop();
       domElem.removeEventListener('click', onCanvasClick);
       domElem.removeEventListener('contextmenu', onCanvasContextMenu);

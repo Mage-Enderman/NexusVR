@@ -256,9 +256,16 @@ export class PeerAvatar {
     const audio = new THREE.PositionalAudio(listener);
     const audioNode = audio.context.createMediaStreamSource(stream);
     audio.setNodeSource(audioNode as any);
-    audio.setRefDistance(2);
-    audio.setMaxDistance(20);
-    audio.setRolloffFactor(1.5);
+    // Tighter distance attenuation so voices get noticeably quieter with
+    // distance and directional cues are perceptible at conversational range.
+    audio.setRefDistance(0.8);
+    audio.setMaxDistance(40);
+    audio.setRolloffFactor(1.2);
+    audio.setDistanceModel('inverse');
+    // Slight directionality: a peer facing away is a little quieter, which
+    // reinforces the "voice comes from the head" illusion without muting
+    // anyone when they turn around.
+    audio.setDirectionalCone(180, 230, 0.15);
 
     this.positionalAudio = audio;
     this.headMesh.add(audio);
@@ -356,6 +363,19 @@ export class AvatarManager {
       this.peers.set(peerId, peer);
     }
     peer.attachAudioStream(stream, this.audioListener);
+  }
+
+  /**
+   * Update the AudioListener's world matrix so it tracks the camera/HMD
+   * pose each frame. Three.js updates the camera matrix during
+   * `renderer.render()`, but the AudioListener (a child of the camera)
+   * needs its own `updateMatrixWorld()` call to push the new transform
+   * into the Web Audio PannerNode listener. Without this, spatial voice
+   * uses a stale listener position and peers' voices don't pan/attentuate
+   * correctly as the local user moves or turns.
+   */
+  public updateAudioListener(): void {
+    this.audioListener.updateMatrixWorld();
   }
 
   public removePeerAvatar(peerId: string): void {

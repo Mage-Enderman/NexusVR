@@ -297,8 +297,11 @@ export class VRHUDManager {
       const y = posAttr.getY(i);
       const angle = x / radius;
       const newX = Math.sin(angle) * radius;
+      // Curve toward the viewer so the front face becomes -Z; Object3D.lookAt
+      // makes -Z point at the camera, so the user sees the canvas right-side
+      // up instead of the mirrored back face.
       const newZ = (1 - Math.cos(angle)) * radius;
-      posAttr.setXYZ(i, newX, y, -newZ);
+      posAttr.setXYZ(i, newX, y, newZ);
     }
     planeGeo.computeVertexNormals();
 
@@ -375,8 +378,10 @@ export class VRHUDManager {
       const y = pPosAttr.getY(i);
       const angle = x / pRadius;
       const newX = Math.sin(angle) * pRadius;
+      // Same facing fix as the dash: curve toward the viewer so the
+      // front face (-Z after lookAt) is visible.
       const newZ = (1 - Math.cos(angle)) * pRadius;
-      pPosAttr.setXYZ(i, newX, y, -newZ);
+      pPosAttr.setXYZ(i, newX, y, newZ);
     }
     pPlaneGeo.computeVertexNormals();
 
