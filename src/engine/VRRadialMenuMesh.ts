@@ -119,6 +119,8 @@ export class VRRadialMenuMesh {
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.minFilter = THREE.LinearFilter;
     this.texture.magFilter = THREE.LinearFilter;
+    this.texture.repeat.y = -1;
+    this.texture.offset.y = 1;
 
     // --- Mesh ---
     const geo = new THREE.PlaneGeometry(WORLD_SIZE, WORLD_SIZE);
@@ -173,16 +175,45 @@ export class VRRadialMenuMesh {
    * Place the menu panel 0.35 m along `laserDir` from `origin`,
    * then +0.05 m up (slight bust so the panel sits at wrist
    * height instead of face height — matches typical Resonite VR
-   * workflow), facing back toward `origin`.
+   * workflow), with its +Z (front-face) normal oriented toward
+   * the user.
+   *
+   * `userHeadPos` is the camera/HMD world position used to compute
+   * the panel's facing direction. It is OPTIONAL — when omitted
+   * the function falls back to `origin` (the controller position).
+   *
+   * The fallback is the source of the "upside down text" bug:
+   *   - When the user holds the controller out to the side (which
+   *     is the natural VR pose — controllers don't sit at the
+   *     head), the panel is anchored to the hand and rotated to
+   *     face the hand.
+   *   - The user's HEAD is somewhere else, so they end up looking
+   *     at the plane's -Z (back) side.
+   *   - With `side: THREE.DoubleSide`, the back face of a
+   *     `PlaneGeometry` shows the canvas LEFT-RIGHT MIRRORED. The
+   *     plane's UVs are identical on both sides, so the canvas's
+   *     top is still mapped to the world +Y vertex (which the
+   *     viewer sees as UP — world +Y is up regardless of viewing
+   *     position). But the canvas's right is mapped to the
+   *     plane's +X vertex, and when the viewer looks at the back
+   *     of the plane the world +X direction is to their LEFT
+   *     (right-hand rule: camera's -Z is world +Z, camera's +Y
+   *     is world +Y → camera's +X is world -X). So the canvas's
+   *     right is on the viewer's left, swapping every glyph
+   *     horizontally. The user reads this as "the text is wrong"
+   *     (and colloquially as "upside down" because mirrored
+   *     Latin script is unreadable).
+   * Passing the HMD position as `userHeadPos` rotates the panel
+   * so its +Z normal points at the user's head, putting the
+   * canvas-correct front face toward them — the canvas's right
+   * lines up with the viewer's right and the text reads
+   * normally.
    *
    * Allocation-free: uses internal hoisted scratch refs so it is
-   * safe to call from a per-frame aim loop (App.tsx's tick now
-   * re-positions every frame so the menu follows the active
-   * controller — otherwise wrist motion drifts the aim ray off
-   * the panel and the buttons feel "non-interactive" despite the
-   * action plumbing being correct). Reads `origin` and `laserDir`
-   * but does NOT mutate them; the previous `.clone()`-based
-   * implementation allocated ~180 vec3s/sec at 90 Hz.
+   * safe to call from a per-frame aim loop. Reads `origin`,
+   * `laserDir` and `userHeadPos` but does NOT mutate them; the
+   * previous `.clone()`-based implementation allocated ~180
+   * vec3s/sec at 90 Hz.
    *
    * Also forces `this.group.updateMatrixWorld(true)` after writing
    * position/rotation. Without this the same-frame `updateAim()`
@@ -195,13 +226,22 @@ export class VRRadialMenuMesh {
    * the raycaster (which reads mesh.matrixWorld) sees the same pose
    * that the renderer is about to draw.
    */
-  public placeNearController(origin: THREE.Vector3, laserDir: THREE.Vector3): void {
+  public placeNearController(
+    origin: THREE.Vector3,
+    laserDir: THREE.Vector3,
+    userHeadPos?: THREE.Vector3
+  ): void {
     const pos = this._scratchPos.copy(origin).addScaledVector(laserDir, 0.35);
     pos.y += 0.05;
     this.group.position.copy(pos);
 
-    // Face the panel's -Z toward the user (origin) so it's readable
-    const toUser = this._scratchToUser.copy(origin).sub(pos);
+    // Face the panel's +Z toward the USER (HMD/camera), not the
+    // controller. If we used the controller (origin) as the user
+    // anchor, the panel would face the hand; with the head a metre
+    // or so away from the hand, the user ends up viewing the panel
+    // from the back (where DoubleSide renders the canvas inverted).
+    const userPos = userHeadPos ?? origin;
+    const toUser = this._scratchToUser.copy(userPos).sub(pos);
     toUser.y = 0;
     if (toUser.lengthSq() > 1e-6) {
       toUser.normalize();

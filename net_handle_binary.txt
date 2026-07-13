@@ -1,0 +1,71 @@
+960:     conn.on('close', () => {
+961:       if (this.assetBinaryConns.get(peerId) === conn) {
+962:         this.assetBinaryConns.delete(peerId);
+963:       }
+964:     });
+965:     conn.on('error', (err) => {
+966:       console.warn('[PeerJS] asset-binary outbound conn error:', peerId, err);
+967:       if (this.assetBinaryConns.get(peerId) === conn) {
+968:         this.assetBinaryConns.delete(peerId);
+969:       }
+970:     });
+971:     conn.on('data', (raw) => { this.handleAssetBinaryMessage(conn, raw); });
+972:     return conn;
+973:   }
+974: 
+975:   /**
+976:    * Parse a raw asset-binary message. String payloads carry JSON control
+977:    * messages (`p2preq`); ArrayBuffer payloads carry a chunked data header
+978:    * followed by raw bytes. Fires `onP2PChunkDataCallbacks` on the
+979:    * receiving side.
+980:    */
+981:   private handleAssetBinaryMessage(conn: DataConnection, raw: unknown): void {
+982:     if (typeof raw === 'string') {
+983:       try {
+984:         const msg = JSON.parse(raw) as { type: string; id: string; start: number; end: number };
+985:         if (msg.type === 'p2preq') {
+986:           this.handleAssetBinaryRequest(conn, msg);
+987:         }
+988:       } catch (err) {
+989:         console.warn('[PeerJS] asset-binary control parse error from', conn.peer, err);
+990:       }
+991:       return;
+992:     }
+993:     if (raw instanceof ArrayBuffer) {
+994:       try {
+995:         const chunk = decodeAssetBinaryChunk(raw);
+996:         for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
+997:       } catch (err) {
+998:         console.warn('[PeerJS] asset-binary chunk decode error from', conn.peer, err);
+999:       }
+1000:       return;
+1001:     }
+1002:     console.warn('[PeerJS] unexpected asset-binary message type from', conn.peer, typeof raw);
+1003:   }
+1004: 
+1005:   /**
+1006:    * Host-side handler for a chunk request received over the asset-binary
+1007:    * channel. Reads the requested slice from `hostedAssets` and sends it
+1008:    * back as a raw binary message on the same DataConnection so the reply
+1009:    * cannot be routed to a stale or overwritten conn.
+1010:    */
+1011:   private handleAssetBinaryRequest(conn: DataConnection, req: { id: string; start: number; end: number }): void {
+1012:     if (this.bannedPeers.has(conn.peer)) return;
+1013:     const buffer = this.hostedAssets.get(req.id);
+1014:     if (!buffer) return;
+1015:     // Clamp the chunk size so a single reply never exceeds the
+1016:     // WebRTC message comfort zone, even if a peer asks for the
+1017:     // whole file at once.
+1018:     let end = Math.min(req.end, req.start + MAX_ASSET_BINARY_CHUNK_BYTES);
+1019:     end = Math.min(end, buffer.byteLength);
+1020:     const chunkLength = end - req.start;
+1021:     if (chunkLength <= 0 || req.start < 0) {
+1022:       console.warn('[PeerJS] invalid asset-binary request range from', conn.peer, req);
+1023:       return;
+1024:     }
+1025:     const encoded = encodeAssetBinaryChunk(req.id, req.start, end, buffer, req.start, chunkLength);
+1026:     if (conn.open) {
+1027:       conn.send(encoded);
+1028:     }
+1029:   }
+1030: 

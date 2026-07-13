@@ -1,0 +1,126 @@
+1995:       }
+1996:       vrHudRef.current?.redrawPanel();
+1997:     });
+1998: 
+1999:     net.onSpawn((data) => {
+2000:       // If asset is already loaded, skip
+2001:       if (assetManager.assets.has(data.id)) return;
+2002: 
+2003:       const pos = new THREE.Vector3(...data.position);
+2004:       // Oversized file broadcast: buildEnvelope's MAX_INLINED_FILE_BYTES
+2005:       // cap stripped the binary payload so the Quest doesn't OOM on a
+2006:       // 100MB+ base64 round-trip. Render a red "Too Large" placeholder
+2007:       // instead of trying to import — no fileData will ever land, so
+2008:       // this entry stays in pendingAssetsRef indefinitely. The
+2009:       // animation loop's `oversized` skip below keeps it static (no
+2010:       // pulse) so it reads as a permanent failure indicator rather
+2011:       // than a still-loading asset.
+2012:       if (data.type === 'video' && (data.streamingHint || (!data.fileData && !data.url))) {
+2013:         const hint = data.streamingHint || { id: data.id, fileSize: 0, mimeHint: 'video/mp4' };
+2014:         let v: HTMLVideoElement | null = null;
+2015:         try {
+2016:           v = videoStreamingServiceRef.current.attachReceiver(
+2017:             hint,
+2018:             data.id,
+2019:             data.senderPeerId
+2020:           );
+2021:         } catch (err) {
+2022:           console.warn(
+2023:             '[VideoStreaming] attachReceiver failed, falling through',
+2024:             err
+2025:           );
+2026:           v = null;
+2027:         }
+2028:         if (v) {
+2029:           const posV = new THREE.Vector3(...data.position);
+2030:           assetManager.loadVideoFromStreamedSource(
+2031:             data.id,
+2032:             data.name,
+2033:             v,
+2034:             posV,
+2035:             { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+2036:           )
+2037:             .then((loadedAsset) => {
+2038:               if (loadedAsset) {
+2039:                 loadedAsset.object3d.rotation.set(...data.rotation);
+2040:                 loadedAsset.object3d.scale.set(...data.scale);
+2041:                 if (data.isPersistent !== undefined) {
+2042:                   loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+2043:                 }
+2044:                 if (data.materialState) {
+2045:                   AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+2046:                 }
+2047:               }
+2048:             })
+2049:             .catch((err) => {
+2050:               console.warn(
+2051:                 '[VideoStreaming] loadVideoFromStreamedSource failed',
+2052:                 err
+2053:               );
+2054:             });
+2055:           return;
+2056:         }
+2057:         // v null: fall through to fileDataOversized branch below so
+2058:         // peers still see the red placeholder.
+2059:       }
+2060:       if (data.fileDataOversized) {
+2061:         // A prior 'pending' broadcast may have already drawn a
+2062:         // "Loading" placeholder for this id (the host fires 'pending'
+2063:         // BEFORE awaiting the import, so peers can render a loading
+2064:         // indicator during the (potentially multi-second) file load).
+2065:         // Dispose it before swapping in the permanent red "Too Large"
+2066:         // indicator — otherwise the cyan mesh orphans in worldRoot
+2067:         // with no registerOnAssetAdded cleanup ever firing for it
+2068:         // (no real asset will ever be created for an oversized spawn).
+2069:         const prior = pendingAssetsRef.current.get(data.id);
+2070:         if (prior) {
+2071:           sceneEngine.worldRoot.remove(prior.group);
+2072:           prior.dispose();
+2073:           pendingAssetsRef.current.delete(data.id);
+2074:         }
+2075:         const { group, dispose } = createLoadingPlaceholder(
+2076:           data.name || 'Asset',
+2077:           'Network',
+2078:           pos,
+2079:           true  // isOversized — red palette, "Too Large" label
+2080:         );
+2081:         sceneEngine.worldRoot.add(group);
+2082:         pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
+2083:         return;
+2084:       }
+2085:       if (data.type === 'primitive' && data.primitiveType) {
+2086:         const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+2087:         prim.object3d.rotation.set(...data.rotation);
+2088:         prim.object3d.scale.set(...data.scale);
+2089:         // Restore the sender's persistent flag onto userData so the
+2090:         // inspector tree's orange-dot indicator and the checkbox state
+2091:         // both reflect what the host had. Skipped when undefined for
+2092:         // backward compat with older senders.
+2093:         if (data.isPersistent !== undefined) {
+2094:           prim.object3d.userData.isPersistent = data.isPersistent;
+2095:         }
+2096:         if (data.materialState) {
+2097:           AssetManager.applyMaterialUpdate(prim, data.materialState);
+2098:         }
+2099:       } else if (data.fileData && data.name) {
+2100:         const blob = new Blob([data.fileData]);
+2101:         // Pass `data.id` as the AssetManager's customId so the local
+2102:         // placeholder (already drawn from this asset's 'pending'
+2103:         // broadcast via onPendingSpawn above) and the actual asset
+2104:         // share the SAME id. registerOnAssetAdded's id-match cleanup
+2105:         // (top of this engine-init effect) then removes the
+2106:         // placeholder the moment this asset resolves — clean
+2107:         // handoff, no separate tempId → assetId mapping required.
+2108:         const file = new File([blob], data.name);
+2109:         assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
+2110:           if (asset) {
+2111:             asset.object3d.rotation.set(...data.rotation);
+2112:             asset.object3d.scale.set(...data.scale);
+2113:             // Mirror the persistent flag onto the just-imported mesh's
+2114:             // userData so the inspector tree + checkbox reflect the
+2115:             // host's intent from the first frame (same write block as
+2116:             // the primitive branch above; only the import vs spawn
+2117:             // timing differs).
+2118:             if (data.isPersistent !== undefined) {
+2119:               asset.object3d.userData.isPersistent = data.isPersistent;
+2120:             }

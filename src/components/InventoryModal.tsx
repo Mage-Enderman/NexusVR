@@ -11,7 +11,8 @@ import {
   FolderPlus,
   Edit3,
   Check,
-  FolderOpen
+  FolderOpen,
+  Camera
 } from 'lucide-react';
 import { InventoryService } from '../services/InventoryService.ts';
 import type { InventoryItem } from '../services/InventoryService.ts';
@@ -21,6 +22,7 @@ interface InventoryModalProps {
   onClose: () => void;
   onSpawnItem: (item: InventoryItem) => void;
   onEquipVrm: (item: InventoryItem) => void;
+  onGenerateThumbnail?: (item: InventoryItem) => Promise<void>;
 }
 
 export const InventoryModal: React.FC<InventoryModalProps> = ({
@@ -28,6 +30,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   onClose,
   onSpawnItem,
   onEquipVrm,
+  onGenerateThumbnail,
 }) => {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [folders, setFolders] = useState<string[]>([]);
@@ -46,6 +49,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
   // Item Move folder state
   const [movingId, setMovingId] = useState<string | null>(null);
   const [moveTargetFolder, setMoveTargetFolder] = useState<string>('');
+  const [generatingThumbnailId, setGeneratingThumbnailId] = useState<string | null>(null);
 
   const loadData = async () => {
     const data = await inventoryService.getItems();
@@ -307,8 +311,44 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                 filteredItems.map((item) => (
                   <div
                     key={item.id}
-                    className="glass-card flex flex-col justify-between p-4 rounded-2xl border border-white/10 hover:border-purple-500/40 relative overflow-hidden transition-all duration-200 bg-slate-900/60 shadow-lg"
+                    className="group glass-card flex flex-col justify-between p-4 rounded-2xl border border-white/10 hover:border-purple-500/40 relative overflow-hidden transition-all duration-200 bg-slate-900/60 shadow-lg"
                   >
+                    {/* Item Card Visual Preview Thumbnail */}
+                    {item.previewUrl ? (
+                      <div className="w-full h-36 rounded-xl mb-3 bg-slate-950/80 border border-white/5 overflow-hidden relative group-hover:border-purple-500/30 transition-all flex items-center justify-center">
+                        <img
+                          src={item.previewUrl}
+                          alt={item.name}
+                          className="w-full h-full object-contain p-2 filter drop-shadow-md group-hover:scale-105 transition-transform duration-300"
+                        />
+                      </div>
+                    ) : onGenerateThumbnail && (item.type === '3d-model' || item.type === 'primitive' || item.type === 'vrm' || item.fileData || item.url) ? (
+                      <div className="w-full h-28 rounded-xl mb-3 bg-slate-950/70 border border-white/10 flex flex-col items-center justify-center gap-2 p-3 text-center">
+                        <button
+                          type="button"
+                          disabled={generatingThumbnailId === item.id}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            setGeneratingThumbnailId(item.id);
+                            try {
+                              await onGenerateThumbnail(item);
+                              await loadData();
+                            } finally {
+                              setGeneratingThumbnailId(null);
+                            }
+                          }}
+                          className="btn btn-secondary text-xs py-1.5 px-3 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/20 flex items-center gap-1.5 font-bold transition shadow-md"
+                        >
+                          <Camera className="w-3.5 h-3.5 text-cyan-400" />
+                          <span>
+                            {generatingThumbnailId === item.id
+                              ? 'Generating...'
+                              : 'Generate Thumbnail'}
+                          </span>
+                        </button>
+                      </div>
+                    ) : null}
+
                     {/* Item Card Header */}
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-2">

@@ -1,0 +1,180 @@
+1: import React, { useEffect, useRef, useState, useCallback } from 'react';
+2: import * as THREE from 'three';
+3: import confetti from 'canvas-confetti';
+4: 
+5: import { SceneEngine } from './engine/SceneEngine.ts';
+6: import type { GraphicsSettings } from './engine/SceneEngine.ts';
+7: import { AssetManager } from './engine/AssetManager.ts';
+8: import type { AssetType, LoadedAsset } from './engine/AssetManager.ts';
+9: import { ManipulationManager } from './engine/ManipulationManager.ts';
+10: import type { TransformMode } from './engine/ManipulationManager.ts';
+11: import { AvatarManager } from './engine/AvatarManager.ts';
+12: import { NetworkService } from './services/NetworkService.ts';
+13: import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate } from './services/NetworkService.ts';
+14: import { VideoStreamingService } from './services/VideoStreamingService.ts';
+15: 
+16: // Phase 3A: streaming threshold mirrors NetworkService.MAX_INLINED_FILE_BYTES
+17: // (15 MB). Anything larger strips out of the base64 JSON envelope to avoid
+18: // the Quest browser's renderer OOM, so peers need a streamingHint in the
+19: // spawn envelope to pull bytes over a binary DataChannel.
+20: const VIDEO_STREAMING_THRESHOLD = 15 * 1024 * 1024;
+21: import { InventoryService } from './services/InventoryService.ts';
+22: import type { InventoryItem } from './services/InventoryService.ts';
+23: import { UndoRedoManager } from './services/UndoRedoManager.ts';
+24: import type { TransformSnapshot, AssetSnapshot } from './services/UndoRedoManager.ts';
+25: 
+26: import { Navbar } from './components/Navbar.tsx';
+27: import { Toolbar } from './components/Toolbar.tsx';
+28: import { InventoryModal } from './components/InventoryModal.tsx';
+29: import { ShareModal } from './components/ShareModal.tsx';
+30: import { ChatPanel } from './components/ChatPanel.tsx';
+31: import { SettingsModal } from './components/SettingsModal.tsx';
+32: import { FileImportModal } from './components/FileImportModal.tsx';
+33: import { type AtmospherePreset,  EnvironmentManager } from './engine/EnvironmentManager.ts';
+34: import type { EnvironmentSettings } from './engine/EnvironmentManager.ts';
+35: import { WorldEnvironmentModal } from './components/WorldEnvironmentModal.tsx';
+36: import { AssetImportDialog } from './components/AssetImportDialog.tsx';
+37: import type { ImportConfig } from './components/AssetImportDialog.tsx';
+38: import type { UserRole, DefaultPermissionsConfig } from './types/permissions.ts';
+39: import { ROLE_PERMISSIONS } from './types/permissions.ts';
+40: import { DashMenu } from './components/DashMenu.tsx';
+41: import { VRHUDManager } from './engine/VRHUDManager.ts';
+42: import { BrushManager } from './engine/BrushManager.ts';
+43: import { WorldToolsPanel } from './components/WorldToolsPanel.tsx';
+44: import type { ToolType } from './components/WorldToolsPanel.tsx';
+45: import { SceneInspectorWindow } from './components/SceneInspectorWindow.tsx';
+46: import { SpatialPopUpWrapper } from './components/SpatialPopUpWrapper.tsx';
+47: import { VideoObjectControls } from './components/VideoObjectControls.tsx';
+48: import { RadialContextMenu } from './components/RadialContextMenu.tsx';
+49: import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
+50: import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
+51: import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
+52: import { DEFAULT_LIGHT_CONFIG } from './engine/ResoniteLightSync.ts';
+53: import { X } from 'lucide-react';
+54: 
+55: /**
+56:  * Build a small 3D loading placeholder at the given world position.
+57:  * Returns the THREE.Group (already positioned, NOT yet parented) plus
+58:  * a `dispose()` cleanup callback that releases all GPU resources —
+59:  * including the Sprite's `CanvasTexture`, which Three.js does NOT
+60:  * auto-dispose when its material is disposed (textures can be shared
+61:  * across multiple materials). Without this explicit call, every
+62:  * cancelled or resolved placeholder leaks a 512x128 RGBA backing on
+63:  * GPU until component unmount.
+64:  */
+65: function createLoadingPlaceholder(
+66:   name: string,
+67:   requesterName: string,
+68:   position: THREE.Vector3,
+69:   isOversized: boolean = false
+70: ): { group: THREE.Group; dispose: () => void } {
+71:   const group = new THREE.Group();
+72:   group.name = `Loading Placeholder (${name})`;
+73:   group.position.copy(position);
+74: 
+75:   // Color palette: cyan = in-flight loading, red = "Too Large" indicator
+76:   // (the binary was stripped from the broadcast to keep Quest's WebRTC
+77:   // data channel from OOMing on a >5MB base64 round-trip).
+78:   const primaryColor = isOversized ? 0xff3344 : 0x00f0ff;
+79:   const secondaryColor = isOversized ? 0xff5566 : 0xa855f7;
+80:   const primaryHex = isOversized ? '#ff3344' : '#00f0ff';
+81:   const nameHex = isOversized ? '#ff8899' : '#e2e8f0';
+82:   const titleText = isOversized ? 'Too Large' : 'Loading';
+83: 
+84:   // Wireframe icosahedron — pulses scale to read as "loading" or
+85:   // stays static for the "Too Large" indicator (handled by the
+86:   // animation loop's `oversized` skip below).
+87:   const icoGeo = new THREE.IcosahedronGeometry(0.4, 0);
+88:   const icoMat = new THREE.MeshBasicMaterial({
+89:     color: primaryColor,
+90:     wireframe: true,
+91:     transparent: true,
+92:     opacity: 0.7,
+93:   });
+94:   group.add(new THREE.Mesh(icoGeo, icoMat));
+95: 
+96:   // Counter-rotation ring, matches the app's palette (purple for
+97:   // loading, bright red for the oversized indicator).
+98:   const ringGeo = new THREE.TorusGeometry(0.55, 0.02, 16, 32);
+99:   const ringMat = new THREE.MeshBasicMaterial({
+100:     color: secondaryColor,
+101:     transparent: true,
+102:     opacity: 0.65,
+103:   });
+104:   const ring = new THREE.Mesh(ringGeo, ringMat);
+105:   ring.rotation.x = Math.PI / 2;
+106:   group.add(ring);
+107: 
+108:   // Floating canvas-textured sprite label: "Loading / <name> / by <>".
+109:   const canvas = document.createElement('canvas');
+110:   canvas.width = 512;
+111:   canvas.height = 128;
+112:   const ctx = canvas.getContext('2d');
+113:   if (ctx) {
+114:     ctx.fillStyle = 'rgba(7, 9, 14, 0.78)';
+115:     ctx.fillRect(0, 0, canvas.width, canvas.height);
+116:     ctx.strokeStyle = primaryHex;
+117:     ctx.lineWidth = 4;
+118:     ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+119:     ctx.font = 'bold 36px sans-serif';
+120:     ctx.fillStyle = primaryHex;
+121:     ctx.textAlign = 'center';
+122:     ctx.textBaseline = 'middle';
+123:     ctx.fillText(titleText, canvas.width / 2, canvas.height / 2 - 28);
+124:     ctx.font = 'bold 26px sans-serif';
+125:     ctx.fillStyle = nameHex;
+126:     const maxLen = 26;
+127:     const displayName = name.length > maxLen ? name.slice(0, maxLen - 1) + '…' : name;
+128:     ctx.fillText(displayName, canvas.width / 2, canvas.height / 2 + 8);
+129:     // For oversized the requester line is suppressed — the user already
+130:     // knows why they can't see it, and dropping the line keeps the
+131:     // label visually focused on the failure mode.
+132:     if (!isOversized) {
+133:       ctx.font = '20px sans-serif';
+134:       ctx.fillStyle = '#a855f7';
+135:       ctx.fillText(`by ${requesterName}`, canvas.width / 2, canvas.height / 2 + 44);
+136:     }
+137:   }
+138:   const spriteTexture = new THREE.CanvasTexture(canvas);
+139:   spriteTexture.colorSpace = THREE.SRGBColorSpace;
+140:   spriteTexture.needsUpdate = true;
+141:   const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
+142:   const sprite = new THREE.Sprite(spriteMat);
+143:   sprite.scale.set(1.6, 0.4, 1);
+144:   sprite.position.y = 0.9;
+145:   group.add(sprite);
+146: 
+147:   const dispose = () => {
+148:     icoGeo.dispose();
+149:     icoMat.dispose();
+150:     ringGeo.dispose();
+151:     ringMat.dispose();
+152:     // CRITICAL: explicit texture dispose to release GPU backing.
+153:     spriteTexture.dispose();
+154:     spriteMat.dispose();
+155:   };
+156: 
+157:   return { group, dispose };
+158: }
+159: 
+160: /**
+161:  * Light-weight file-extension → AssetType mapping so the loading
+162:  * placeholder's broadcast carries an accurate `type` field (peers
+163:  * can render category-appropriate styling or skip irrelevant fields).
+164:  */
+165: function guessAssetType(filename: string): AssetType {
+166:   const lower = filename.toLowerCase();
+167:   if (lower.endsWith('.vrm')) return 'vrm';
+168:   if (lower.endsWith('.glb') || lower.endsWith('.gltf') || lower.endsWith('.obj') || lower.endsWith('.fbx')) return '3d-model';
+169:   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp') || lower.endsWith('.gif')) return 'image';
+170:   if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov')) return 'video';
+171:   return 'misc';
+172: }
+173: 
+174: export const App: React.FC = () => {
+175:   const containerRef = useRef<HTMLDivElement>(null);
+176:   
+177:   // Engine references
+178:   const sceneEngineRef = useRef<SceneEngine | null>(null);
+179:   const assetManagerRef = useRef<AssetManager | null>(null);
+180:   const manipulationManagerRef = useRef<ManipulationManager | null>(null);

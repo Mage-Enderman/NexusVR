@@ -1,0 +1,16 @@
+2:46:22 PM [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+     ╭─[ src/engine/AssetManager.ts:412:12 ]
+     │
+ 412 │     const  = file.size >= 1024 * 1024 && !isVideoExt;
+     │            ┬
+     │            ╰──
+─────╯
+
+  Plugin: vite:oxc
+  File: D:/0-Antigravity/NexusVR/NexusVR/src/engine/AssetManager.ts
+      at transformWithOxc (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:3661:19)
+      at TransformPluginContext.transform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:3732:26)
+      at EnvironmentPluginContainer.transform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:29745:51)
+      at async loadAndTransform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:19729:26)

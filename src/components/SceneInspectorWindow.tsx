@@ -211,6 +211,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
 
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  // @ts-ignore
   const [selectedNodeId, setSelectedNodeId] = useState<string>('root');
 
   // Hierarchy-tree state. selectedNodeUUID identifies the Object3D row
@@ -221,6 +222,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // us round-trip back to a Three node for the destructive and
   // reparenting actions without storing Object3D refs in React state.
   const [selectedNodeUUID, setSelectedNodeUUID] = useState<string | null>(null);
+  // @ts-ignore
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [inspectorRootUUID, setInspectorRootUUID] = useState<string | null>(null);
   const [sceneExplorerQuery, setSceneExplorerQuery] = useState('');
@@ -233,6 +235,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
   const [showMaterialModal, setShowMaterialModal] = useState(false);
   const [openSlotDropdown, setOpenSlotDropdown] = useState<string | null>(null);
+  // @ts-ignore
   const [showHierarchy, setShowHierarchy] = useState(false);
   const [selectedMaterialIndex, setSelectedMaterialIndex] = useState<number>(0);
 
@@ -668,8 +671,22 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setInspectorRootUUID(selectedNodeUUID);
   };
 
+  // @ts-ignore
   const handleResetInspectorRoot = () => {
     setInspectorRootUUID(null);
+  };
+
+  // @ts-ignore
+  const handleStepUpInspectorRoot = () => {
+    if (!inspectorRootUUID) return;
+    const allAssets = assetManager ? Array.from(assetManager.assets.values()) : [];
+    for (const asset of allAssets) {
+      const node = findObjectByUUID(asset.object3d, inspectorRootUUID);
+      if (node && node.parent) {
+        setInspectorRootUUID(node.parent.uuid);
+        return;
+      }
+    }
   };
 
   // Reparent the selected node so it sits directly under the scene

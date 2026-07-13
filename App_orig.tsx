@@ -55,7 +55,7 @@ import { X } from 'lucide-react';
 /**
  * Build a small 3D loading placeholder at the given world position.
  * Returns the THREE.Group (already positioned, NOT yet parented) plus
- * a `dispose()` cleanup callback that releases all GPU resources -
+ * a `dispose()` cleanup callback that releases all GPU resources —
  * including the Sprite's `CanvasTexture`, which Three.js does NOT
  * auto-dispose when its material is disposed (textures can be shared
  * across multiple materials). Without this explicit call, every
@@ -67,7 +67,7 @@ function createLoadingPlaceholder(
   requesterName: string,
   position: THREE.Vector3,
   isOversized: boolean = false
-): { group: THREE.Group; dispose: () => void; setProgress: (pct: number | null) => void } {
+): { group: THREE.Group; dispose: () => void } {
   const group = new THREE.Group();
   group.name = `Loading Placeholder (${name})`;
   group.position.copy(position);
@@ -81,7 +81,7 @@ function createLoadingPlaceholder(
   const nameHex = isOversized ? '#ff8899' : '#e2e8f0';
   const titleText = isOversized ? 'Too Large' : 'Loading';
 
-  // Wireframe icosahedron - pulses scale to read as "loading" or
+  // Wireframe icosahedron — pulses scale to read as "loading" or
   // stays static for the "Too Large" indicator (handled by the
   // animation loop's `oversized` skip below).
   const icoGeo = new THREE.IcosahedronGeometry(0.4, 0);
@@ -110,20 +110,7 @@ function createLoadingPlaceholder(
   canvas.width = 512;
   canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  // Live progress percentage (null = indeterminate). Held on a stable
-  // closure-captured cell so setProgress can mutate it without
-  // triggering React re-renders.
-  let currentPct: number | null = null;
-  let disposed = false;
-  let lastRedrawAt = 0;
-
-  const redraw = (force = false) => {
-    if (!ctx || disposed) return;
-    const now = (performance.now && performance.now()) || Date.now();
-    // ~10 Hz throttle; force=true bypasses (used on the first call,
-    // and on the final 100% so the Settled state lands immediately).
-    if (!force && now - lastRedrawAt < 100) return;
-    lastRedrawAt = now;
+  if (ctx) {
     ctx.fillStyle = 'rgba(7, 9, 14, 0.78)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.strokeStyle = primaryHex;
@@ -133,19 +120,13 @@ function createLoadingPlaceholder(
     ctx.fillStyle = primaryHex;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    // Append " 45%" only when progress is a real number; omit for null
-    // (indeterminate) and the "Too Large" failure case.
-    const titleWithPct =
-      isOversized || currentPct === null
-        ? titleText
-        : `${titleText}… ${currentPct}%`;
-    ctx.fillText(titleWithPct, canvas.width / 2, canvas.height / 2 - 28);
+    ctx.fillText(titleText, canvas.width / 2, canvas.height / 2 - 28);
     ctx.font = 'bold 26px sans-serif';
     ctx.fillStyle = nameHex;
     const maxLen = 26;
     const displayName = name.length > maxLen ? name.slice(0, maxLen - 1) + '…' : name;
     ctx.fillText(displayName, canvas.width / 2, canvas.height / 2 + 8);
-    // For oversized the requester line is suppressed - the user already
+    // For oversized the requester line is suppressed — the user already
     // knows why they can't see it, and dropping the line keeps the
     // label visually focused on the failure mode.
     if (!isOversized) {
@@ -153,15 +134,10 @@ function createLoadingPlaceholder(
       ctx.fillStyle = '#a855f7';
       ctx.fillText(`by ${requesterName}`, canvas.width / 2, canvas.height / 2 + 44);
     }
-    spriteTexture.needsUpdate = true;
-  };
-
+  }
   const spriteTexture = new THREE.CanvasTexture(canvas);
   spriteTexture.colorSpace = THREE.SRGBColorSpace;
-  // First paint happens synchronously so the placeholder looks correct
-  // before any progress ticks arrive.
-  redraw(true);
-
+  spriteTexture.needsUpdate = true;
   const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
   const sprite = new THREE.Sprite(spriteMat);
   sprite.scale.set(1.6, 0.4, 1);
@@ -169,7 +145,6 @@ function createLoadingPlaceholder(
   group.add(sprite);
 
   const dispose = () => {
-    disposed = true;
     icoGeo.dispose();
     icoMat.dispose();
     ringGeo.dispose();
@@ -179,22 +154,7 @@ function createLoadingPlaceholder(
     spriteMat.dispose();
   };
 
-  // setProgress is the public hook callers use to push new percentages.
-  // null resets to indeterminate. We round to integer percentage to avoid
-  // the throttled redraw chewing CPU when the loader emits sub-frame deltas.
-  const setProgress = (pct: number | null) => {
-    if (disposed) return;
-    if (pct === null) {
-      if (currentPct !== null) { currentPct = null; redraw(true); }
-      return;
-    }
-    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
-    if (currentPct === clamped) return;
-    currentPct = clamped;
-    redraw(clamped === 100);
-  };
-
-  return { group, dispose, setProgress };
+  return { group, dispose };
 }
 
 /**
@@ -239,7 +199,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // OR when a remote peer's 'pending' broadcast arrives (net.onPendingSpawn),
   // and removed by registerOnAssetAdded's id-match on asset landing,
   // OR by net.onPendingCancel / net.onRemove / handleDisconnect.
-  const pendingAssetsRef = useRef<Map<string, { group: THREE.Group; dispose: () => void; setProgress?: (pct: number | null) => void; oversized?: boolean }>>(new Map());
+  const pendingAssetsRef = useRef<Map<string, { group: THREE.Group; dispose: () => void; oversized?: boolean }>>(new Map());
   // Phase 3A: per-asset suppress-Set for the auto-broadcast race.
   // handleImportFile / handleImportAssetFromConfig add the asset's
   // placeholderId to this Set BEFORE awaiting AssetManager.importFile;
@@ -362,7 +322,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // texture / geometry aren't churned). `vrRadialActiveSideRef` records
   // which controller placed the mesh so the per-frame aim loop can poll
   // the correct XRTargetRaySpace. We use VRRadialMenuMesh's canvas
-  // texture for VR - pure immersive WebXR can't rasterise the
+  // texture for VR — pure immersive WebXR can't rasterise the
   // React-DOM <svg>-based RadialContextMenu through HTMLMesh's
   // html2canvas path, so any radial menu mounted into SpatialPanelManager
   // came out blank. The desktop <RadialContextMenu> overlay path
@@ -513,7 +473,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // a slice (analogous to the desktop onPanelAction stale-closure
   // fix that introduced locomotionModeRef). Mirrors update synchronously
   // in a useEffect after each render commit, so the NEXT event tick
-  // already sees fresh values - no per-frame lag.
+  // already sees fresh values — no per-frame lag.
   const grabModeRef = useRef<'auto' | 'precision' | 'palm' | 'laser'>('auto');
   const isHeldRef = useRef<boolean>(false);
   const heldAssetTypeRef = useRef<string | null>(null);
@@ -639,7 +599,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
 
     // Pass `assetManager.assets` so the manager's RMB-grab raycast can
     // hit-detect on the same live Map App.tsx spawns into (the Map is
-    // mutated in place - single reference is always current). The 5th
+    // mutated in place — single reference is always current). The 5th
     // arg is what enables the Right-Mouse-Button grab feature called out
     // in Controls-Keybinds.txt.
     const manipulationManager = new ManipulationManager(
@@ -657,7 +617,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     // VRInputManager synchronously in its constructor (see
     // SceneEngine.setupXR), so this ref is already live by the
     // time the engine-init useEffect wires it. Null safety
-    // guaranteed - the dolly path early-returns without input.
+    // guaranteed — the dolly path early-returns without input.
     manipulationManager.setVRInput(sceneEngine.vrInput);
     sceneEngine.isVRHandGrabbing = (side) => manipulationManager.isVRHandGrabbing(side);
 
@@ -1096,7 +1056,7 @@ const vrHud = new VRHUDManager(
                     applyTextureUrl(heldImg.url);
                     return;
                   }
-                  // NOTE: do NOT redeclare `am` inside Priority 2/3/4 of any handler that also reads this outer `am` - use a distinct name. See Priority 4’s `amPrio4` rename.
+                  // NOTE: do NOT redeclare `am` inside Priority 2/3/4 of any handler that also reads this outer `am` — use a distinct name. See Priority 4’s `amPrio4` rename.
             const am = assetManagerRef.current;
                   const imgAssets = am
                     ? Array.from(am.assets.values()).filter(
@@ -1307,7 +1267,7 @@ const vrHud = new VRHUDManager(
           const mm = manipulationManagerRef.current;
           const am = assetManagerRef.current;
 
-          // A button (either hand): jump / ascend per locomotion mode -
+          // A button (either hand): jump / ascend per locomotion mode —
           // mirrors the desktop Space-key handler in SceneEngine.
           if (button === 'a') {
             se.triggerVRJump();
@@ -1320,13 +1280,13 @@ const vrHud = new VRHUDManager(
             const se = sceneEngineRef.current;
             if (se && se.renderer.xr.isPresenting) {
               // VR path: lazy-create VRRadialMenuMesh on first open, then
-              // toggle visibility. Canvas-textured radial - slices and slice
+              // toggle visibility. Canvas-textured radial — slices and slice
               // labels are drawn with Canvas2D, so they render correctly in
               // pure immersive WebXR. The previous approach tried to use
               // SpatialPanelManager + React portal + SVG <RadialContextMenu>;
               // SVG is invisible through HTMLMesh's html2canvas path, the
               // menu came out blank. Plus _buildHTMLMesh reparents the XR
-              // controllers under the moving panel - now anchored to scene.
+              // controllers under the moving panel — now anchored to scene.
               setVrRadialRightOpen((prev) => {
                 const next = !prev;
                 const ctr = se.vrInput?.getController('right');
@@ -1425,7 +1385,7 @@ const vrHud = new VRHUDManager(
           // Per VRControls.txt: "X button - Open/Close Dash (Left
           // controller)". Previously the LEFT GRIP opened the dash,
           // but the spec says BOTH grips should grab and X opens the
-          // dash - see FIX 1 above. Same toggle pattern as the desktop
+          // dash — see FIX 1 above. Same toggle pattern as the desktop
           // Tab key handler.
           if (button === 'x') {
             inventoryServiceRef.current.getItems().then((items) => {
@@ -1440,7 +1400,7 @@ const vrHud = new VRHUDManager(
             // Per VRControls.txt: BOTH grips grab. The dash is opened
             // by the X button (left controller) further down. Shared
             // raycast+grab helper used by both left and right grips
-            // - keeps HUD-priority + parent-chain walk logic single-
+            // — keeps HUD-priority + parent-chain walk logic single-
             // sourced so the two sides can't drift.
             const tryVrGrab = (grabSide: 'left' | 'right') => {
               if (!mm || !am) return false;
@@ -1512,7 +1472,7 @@ const vrHud = new VRHUDManager(
               return;
             }
           }
-          // Trigger - handles VR radial menu select (both sides),
+          // Trigger — handles VR radial menu select (both sides),
           // two-handed scale grab detection, and HUD click (right side).
           if (button === 'trigger') {
             if (side === 'left' || side === 'right') {
@@ -1528,11 +1488,11 @@ const vrHud = new VRHUDManager(
             // Reason: VRInputManager.update() sets pressedThisFrame for
             // exactly ONE XR frame. The aim rAF loop is a SEPARATE
             // requestAnimationFrame that runs independently of the XR
-            // frame loop - by the time the rAF tick executes, the XR
+            // frame loop — by the time the rAF tick executes, the XR
             // loop has already advanced and cleared pressedThisFrame on
             // its next frame, so the trigger press is always missed.
-            // Handling it here - which fires synchronously inside the
-            // same XR frame that detected the edge - guarantees the
+            // Handling it here — which fires synchronously inside the
+            // same XR frame that detected the edge — guarantees the
             // select() call is never dropped.
             const leftMesh = vrRadialMenuLeftRef.current;
             const rightMesh = vrRadialMenuRightRef.current;
@@ -1649,7 +1609,7 @@ const vrHud = new VRHUDManager(
             // LoadedAsset via AssetManager's id->asset Map (mirrors the
             // grip-handler's `objToAsset` lookup pattern). The previous
             // iteration called `am.getAssetByObject3D(top)` which does not
-            // exist on AssetManager - every VR trigger pulled on an asset
+            // exist on AssetManager — every VR trigger pulled on an asset
             // would throw a TypeError mid-handler, abort the rest of PRIORITY
             // 4, and leave React's selection state undefined.
             // `amPrio4` so this `const` doesn't shadow the outer `am` and re-trigger TS2448/TS2454 at the Priority 2 two-handed-scale read ~1474 (sibling branches in the same `if (button === 'trigger')`).
@@ -1765,13 +1725,6 @@ const vrHud = new VRHUDManager(
     // receives subsequent `applyRemoteTransform` updates so the FIRST
     // visually stays put during host drag.
     const disposers: Array<() => void> = [];
-    // Resume the WebAudio context on the first user gesture; browsers
-    // suspend it until a user interaction, which would silence peer voice.
-    const resumeAudioContext = () => {
-      avatarManager.audioListener.context.resume().catch(() => {});
-    };
-    window.addEventListener('pointerdown', resumeAudioContext, { once: true });
-    disposers.push(() => window.removeEventListener('pointerdown', resumeAudioContext));
 
     // Connect selection events
     disposers.push(manipulationManager.registerOnSelectionChange((asset) => {
@@ -1783,7 +1736,7 @@ const vrHud = new VRHUDManager(
     }));
 
     // Preserve the misc-file auto-inspect convenience that USED TO ride
-    // on `selectAsset` from inside `beginGrab` - but routed here through
+    // on `selectAsset` from inside `beginGrab` — but routed here through
     // a dedicated grab-only listener so RMB-grab no longer mirrors the
     // dev tool's secondary action (R) in the gizmo-flash + selection-
     // chip UI. RMB still opens the misc preview; LMB/R-toggle selection
@@ -1940,7 +1893,7 @@ const vrHud = new VRHUDManager(
       // asset's id was registered (either by the LOCAL host on Import
       // click OR by a remote peer on receipt of the corresponding
       // 'pending' broadcast), remove it and dispose now that the real
-      // asset has landed. Idempotent - any non-placeholder registration
+      // asset has landed. Idempotent — any non-placeholder registration
       // is a no-op.
       const placeholder = pendingAssetsRef.current.get(asset.id);
       if (placeholder) {
@@ -1950,13 +1903,13 @@ const vrHud = new VRHUDManager(
       }
       if (net.mode !== 'offline') {
         // The `primitiveType` tag is sourced from `asset.object3d.userData`
-        // - `AssetManager.spawnPrimitive` sets it there in the same edit
+        // — `AssetManager.spawnPrimitive` sets it there in the same edit
         // cycle so this distributed-spawn path has it. Without this, the
         // receiver's `if (data.type === 'primitive' && data.primitiveType)`
         // branch never fires and the asset is silently dropped on every
         // joining guest (the host's default cube + torus pre-broadcast
         // bug). File/url-spawned assets don't carry primitiveType so the
-        // field is `undefined` for those - still safe, since the receiver
+        // field is `undefined` for those — still safe, since the receiver
         // only consults primitiveType on the 'primitive'-type branch.
         const primitiveType = (asset.object3d.userData as Record<string, unknown>)?.primitiveType as
           | 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane'
@@ -1974,7 +1927,7 @@ const vrHud = new VRHUDManager(
           isCollidable: asset.isCollidable,
           // Mirror the host's userData.isPersistent on the spawn envelope
           // so a guest receiving this asset restores the right
-          // persisting state from the first frame - without it, the
+          // persisting state from the first frame — without it, the
           // inspector checkbox defaults to true regardless of send.
           isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
           materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
@@ -2036,92 +1989,6 @@ const vrHud = new VRHUDManager(
       vrHudRef.current?.redrawPanel();
     });
 
-    // Phase 3B: pull an oversized asset from the sender peer via the
-    // raw-binary asset channel. Replaces the old "Too Large" red
-    // placeholder with a live progress indicator and imports the file
-    // once all chunks arrive.
-    const startP2PAssetTransfer = (data: AssetSpawnData, pos: THREE.Vector3) => {
-      const hint = data.p2pTransferHint;
-      const senderPeerId = data.senderPeerId;
-      if (!hint || !senderPeerId) return false;
-
-      // Dispose any existing placeholder for this id.
-      const prior = pendingAssetsRef.current.get(data.id);
-      if (prior) {
-        sceneEngine.worldRoot.remove(prior.group);
-        prior.dispose();
-        pendingAssetsRef.current.delete(data.id);
-      }
-
-
-      const { group, dispose, setProgress } = createLoadingPlaceholder(
-        data.name || 'Asset',
-        'Network',
-        pos,
-        false // in-flight download, not a permanent failure
-      );
-      sceneEngine.worldRoot.add(group);
-      pendingAssetsRef.current.set(data.id, { group, dispose, setProgress, oversized: false });
-
-      const assetId = hint.id;
-      const size = hint.size;
-      const CHUNK_SIZE = 256 * 1024;
-      const chunks: ArrayBuffer[] = [];
-      // Pre-size the array so we can place out-of-order chunks by index.
-      chunks.length = Math.ceil(size / CHUNK_SIZE);
-      let receivedBytes = 0;
-      let completed = false;
-
-      const finishIfDone = () => {
-        if (completed) return;
-        // Verify every slot is filled.
-        for (let i = 0; i < chunks.length; i++) {
-          if (!chunks[i]) return;
-        }
-        completed = true;
-        netUnsub();
-        // Concatenate chunks in order.
-        const fullBlob = new Blob(chunks as ArrayBuffer[]);
-        const file = new File([fullBlob], data.name || 'Asset');
-        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
-          if (asset) {
-            asset.object3d.rotation.set(...data.rotation);
-            asset.object3d.scale.set(...data.scale);
-            if (data.isPersistent !== undefined) {
-              asset.object3d.userData.isPersistent = data.isPersistent;
-            }
-            if (data.materialState) {
-              // @ts-ignore
-              AssetManager.applyMaterialUpdate(asset, data.materialState);
-            }
-          }
-        });
-      };
-
-      const onData = (chunkData: { id: string; start: number; end: number; data: ArrayBuffer }) => {
-        if (chunkData.id !== assetId) return;
-        const index = Math.floor(chunkData.start / CHUNK_SIZE);
-        if (chunks[index]) return; // duplicate
-        chunks[index] = chunkData.data;
-        receivedBytes += chunkData.data.byteLength;
-        setProgress(Math.min(100, (receivedBytes / size) * 100));
-
-        // Request the next chunk if there are still bytes to fetch.
-        if (chunkData.end < size) {
-          const nextEnd = Math.min(chunkData.end + CHUNK_SIZE, size);
-          net.requestAssetChunk(assetId, senderPeerId, chunkData.end, nextEnd);
-        }
-        finishIfDone();
-      };
-      const netUnsub = net.onP2PChunkData(onData);
-
-      // Kick off the first chunk.
-      const firstEnd = Math.min(CHUNK_SIZE, size);
-      net.requestAssetChunk(assetId, senderPeerId, 0, firstEnd);
-      return true;
-    };
-
-
     net.onSpawn((data) => {
       // If asset is already loaded, skip
       if (assetManager.assets.has(data.id)) return;
@@ -2130,7 +1997,7 @@ const vrHud = new VRHUDManager(
       // Oversized file broadcast: buildEnvelope's MAX_INLINED_FILE_BYTES
       // cap stripped the binary payload so the Quest doesn't OOM on a
       // 100MB+ base64 round-trip. Render a red "Too Large" placeholder
-      // instead of trying to import - no fileData will ever land, so
+      // instead of trying to import — no fileData will ever land, so
       // this entry stays in pendingAssetsRef indefinitely. The
       // animation loop's `oversized` skip below keeps it static (no
       // pulse) so it reads as a permanent failure indicator rather
@@ -2189,15 +2056,9 @@ const vrHud = new VRHUDManager(
         // BEFORE awaiting the import, so peers can render a loading
         // indicator during the (potentially multi-second) file load).
         // Dispose it before swapping in the permanent red "Too Large"
-        // indicator - otherwise the cyan mesh orphans in worldRoot
+        // indicator — otherwise the cyan mesh orphans in worldRoot
         // with no registerOnAssetAdded cleanup ever firing for it
         // (no real asset will ever be created for an oversized spawn).
-        //
-        // Phase 3B: if the sender included a p2pTransferHint, try to pull
-        // the bytes over the raw-binary asset channel instead of giving up.
-        if (startP2PAssetTransfer(data, pos)) {
-          return;
-        }
         const prior = pendingAssetsRef.current.get(data.id);
         if (prior) {
           sceneEngine.worldRoot.remove(prior.group);
@@ -2208,7 +2069,7 @@ const vrHud = new VRHUDManager(
           data.name || 'Asset',
           'Network',
           pos,
-          true  // isOversized - red palette, "Too Large" label
+          true  // isOversized — red palette, "Too Large" label
         );
         sceneEngine.worldRoot.add(group);
         pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
@@ -2235,7 +2096,7 @@ const vrHud = new VRHUDManager(
         // broadcast via onPendingSpawn above) and the actual asset
         // share the SAME id. registerOnAssetAdded's id-match cleanup
         // (top of this engine-init effect) then removes the
-        // placeholder the moment this asset resolves - clean
+        // placeholder the moment this asset resolves — clean
         // handoff, no separate tempId → assetId mapping required.
         const file = new File([blob], data.name);
         assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
@@ -2501,12 +2362,6 @@ const vrHud = new VRHUDManager(
             // "Too Large" indicator. Without this the cyan mesh
             // orphans in worldRoot with no registerOnAssetAdded
             // cleanup ever firing.
-            //
-            // Phase 3B: if the sender included a p2pTransferHint, try to pull
-            // the bytes over the raw-binary asset channel instead of giving up.
-            if (startP2PAssetTransfer(data, pos)) {
-              return;
-            }
             const prior = pendingAssetsRef.current.get(data.id);
             if (prior) {
               sceneEngine.worldRoot.remove(prior.group);
@@ -2517,7 +2372,7 @@ const vrHud = new VRHUDManager(
               data.name || 'Asset',
               'Network',
               pos,
-              true  // isOversized - red palette, "Too Large" label
+              true  // isOversized — red palette, "Too Large" label
             );
             sceneEngine.worldRoot.add(group);
             pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
@@ -2584,7 +2439,7 @@ const vrHud = new VRHUDManager(
       if (pendingMap.size > 0) {
         for (const [, entry] of pendingMap) {
           // Oversized ("Too Large") placeholders are static failure
-          // indicators - pulsing them would suggest they're still
+          // indicators — pulsing them would suggest they're still
           // loading. Skipping the pulse makes the read unambiguous
           // and also avoids unnecessary transform work for entries
           // that will never resolve into a real asset.
@@ -2742,9 +2597,9 @@ const vrHud = new VRHUDManager(
     // Per Controls-Keybinds.txt: Right Mouse Button = Grab (NOT context
     // menu). The ManipulationManager pointerdown handler captures RMB
     // and either initiates a grab or no-ops. The contextmenu event still
-    // fires here on right-mouse-down - we preventDefault to suppress the
+    // fires here on right-mouse-down — we preventDefault to suppress the
     // browser's native menu but no longer auto-open the radial menu on
-    // RMB (that override was the bug the user reported - it shadowed the
+    // RMB (that override was the bug the user reported — it shadowed the
     // grab feature).
     const onCanvasContextMenu = (e: MouseEvent) => {
       e.preventDefault();
@@ -2858,7 +2713,7 @@ const vrHud = new VRHUDManager(
   }, []);
   // Push fresh PanelContext to VRHUDManager whenever any state underlying
   // the active panel changes. setDataContext triggers a redraw ONLY if
-  // activePanel !== null - no cost when no panel is showing. Runs after
+  // activePanel !== null — no cost when no panel is showing. Runs after
   // the engine-init effect has mounted vrHudRef.current.
   useEffect(() => {
     const vrHud = vrHudRef.current;
@@ -3061,7 +2916,7 @@ const vrHud = new VRHUDManager(
     // already-selected asset deselects it. The registered
     // onSelectionChange callback in the engine-init effect already
     // fans out to setSelectedAsset + setInspectedMiscAsset on every
-    // selection change - we deliberately do not mirror it here to
+    // selection change — we deliberately do not mirror it here to
     // avoid a double setState that would still settle to the same
     // value but cost an extra render.
     if (mm.selectedAsset?.id === found.id) {
@@ -3082,7 +2937,7 @@ const vrHud = new VRHUDManager(
   // TypeScript is happy (avoids TS2454 “used before being assigned” / TDZ on
   // these useCallback blocks). The keydown useEffect already depends on
   // selectedAsset, so re-binding whenever that changes costs nothing extra.
-  // Ctrl+S - Save selected asset to inventory (per Controls-Keybinds.txt).
+  // Ctrl+S — Save selected asset to inventory (per Controls-Keybinds.txt).
   // Mirrors the inventory-item shape built in handleImportFile so a future
   // spawn from inventory picks up the original MIME type / metadata.
   const handleSaveSelectedToInventory = useCallback(() => {
@@ -3106,11 +2961,11 @@ const vrHud = new VRHUDManager(
     });
   }, [selectedAsset]);
 
-  // Ctrl+D - Duplicate selected asset (per Controls-Keybinds.txt). Mirrors
+  // Ctrl+D — Duplicate selected asset (per Controls-Keybinds.txt). Mirrors
   // the respawn path used by handleSpawnFromInventory so the duplicate is a
   // real, addressable world object (and the new id flows through to peer
   // clients via broadcastSpawn). Async because primitives are sync but
-  // file/url re-imports take a tick - broadcast only fires AFTER the asset
+  // file/url re-imports take a tick — broadcast only fires AFTER the asset
   // is fully realized so we have its final id.
   const handleDuplicateSelected = useCallback(async () => {
     if (!selectedAsset) return;
@@ -3207,7 +3062,7 @@ const vrHud = new VRHUDManager(
     }
 
     if (asset.fileData && asset.name) {
-      // Rebuild File from saved ArrayBuffer - pass MIME type so GLTF/FBX/etc.
+      // Rebuild File from saved ArrayBuffer — pass MIME type so GLTF/FBX/etc.
       // loaders pick the right parser.
       const blob = new Blob([asset.fileData], {
         type: asset.metadata?.mimeType || 'application/octet-stream',
@@ -3320,9 +3175,9 @@ const vrHud = new VRHUDManager(
         }
       }
 
-      // Dev tool's secondary action (R) - center-of-screen raycast
+      // Dev tool's secondary action (R) — center-of-screen raycast
       // select. Gated on: dev tool active, first-person mode, NOT in
-      // VR. Plain R only - Shift+E is rotate-around-Y-axis (managed
+      // VR. Plain R only — Shift+E is rotate-around-Y-axis (managed
       // by ManipulationManager), so plain R is what gets the new
       // selection semantics; modifier combos fall through to the
       // handlers below. Placed BEFORE the orbit translate/rotate/scale
@@ -3350,7 +3205,7 @@ const vrHud = new VRHUDManager(
         }
       }
 
-      // T key - toggle the Resonite-style radial / pie context menu.
+      // T key — toggle the Resonite-style radial / pie context menu.
       // (Also reachable via the canvas right-click and the toolbar button.)
       if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
@@ -3358,7 +3213,7 @@ const vrHud = new VRHUDManager(
         setShowRadialMenu((prev) => !prev);
         return;
       } else if (e.key === 'o' || e.key === 'O') {
-        // Toggle the Scene Inspector. Plain O only - modifier combos
+        // Toggle the Scene Inspector. Plain O only — modifier combos
         // (Ctrl+O for "Open File" in browsers, etc.) fall through to
         // the browser's default. Opens either inspecting the selected asset
         // or showing the full Scene Hierarchy explorer when none selected.
@@ -3389,7 +3244,7 @@ const vrHud = new VRHUDManager(
         e.preventDefault();
         handleDuplicateSelected();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V') && e.shiftKey) {
-        // Ctrl+Shift+V - "paste as plain text". Do NOT preventDefault:
+        // Ctrl+Shift+V — "paste as plain text". Do NOT preventDefault:
         // the focused <input> (if any) still needs to receive the text from
         // the browser's default paste handler. The flag is read-and-cleared
         // in handlePaste which short-circuits our URL/data-URI import
@@ -3435,10 +3290,10 @@ const vrHud = new VRHUDManager(
         return;
       }
 
-      // Ctrl+Shift+V (no input focus): user explicitly wants plain text -
+      // Ctrl+Shift+V (no input focus): user explicitly wants plain text —
       // suppress the asset-import path. Browser default paste into <body>
       // is effectively a no-op anyway, so this is "do nothing unsafe with
-      // the clipboard contents" - exactly the spec intent.
+      // the clipboard contents" — exactly the spec intent.
       if (plainPasteModeRef.current) {
         plainPasteModeRef.current = false;
         e.preventDefault();
@@ -3490,7 +3345,7 @@ const vrHud = new VRHUDManager(
   }, []);
 
   const handleDisconnect = useCallback(() => {
-    // Dispose any pending placeholders - the network is going away
+    // Dispose any pending placeholders — the network is going away
     // and we won't be receiving 'spawn' or 'pendingcancel' for them
     // anymore, so leaving placeholders installed would be incorrect.
     const pendingCleanup = pendingAssetsRef.current;
@@ -3593,7 +3448,7 @@ const vrHud = new VRHUDManager(
     // at the user's hand. For RMB-grab (direct child of scene) local
     // == world, so the change is a no-op for that case. getWorldPosition
     // requires matrixWorld to be up to date, which the renderer
-    // maintains each frame for visible meshes - held assets ARE
+    // maintains each frame for visible meshes — held assets ARE
     // rendered, so the call is safe.
     const worldPos = new THREE.Vector3();
     asset.object3d.getWorldPosition(worldPos);
@@ -3965,7 +3820,7 @@ const vrHud = new VRHUDManager(
   // 5 seconds after the menu opened still sees fresh state. The mesh stores
   // this object once at construction; the closures stay valid for the lifetime
   // of the mesh. Functional setters are stable in React so re-creating this
-  // on every render would be wasteful - build once at mount via useCallback.
+  // on every render would be wasteful — build once at mount via useCallback.
   const [lightNoShadows, setLightNoShadows] = useState<boolean>(false);
   const lightNoShadowsRef = useRef<boolean>(false);
   useEffect(() => { lightNoShadowsRef.current = lightNoShadows; }, [lightNoShadows]);
@@ -4265,7 +4120,7 @@ const vrHud = new VRHUDManager(
         isPersistent: snap.isPersistent,
       });
     } else {
-      console.warn(`[UndoRedo] Could not respawn asset "${snap.name}" - no primitiveType, fileData, or url.`);
+      console.warn(`[UndoRedo] Could not respawn asset "${snap.name}" — no primitiveType, fileData, or url.`);
     }
   };
 
@@ -4427,7 +4282,7 @@ const vrHud = new VRHUDManager(
     const assetManager = assetManagerRef.current;
     if (!assetManager) return;
 
-    // VRM equip path - no world asset, so no placeholder; the avatar
+    // VRM equip path — no world asset, so no placeholder; the avatar
     // manager has its own loading state and we don't broadcast.
     if (config.file && config.file.name.toLowerCase().endsWith('.vrm') && config.vrmAction === 'equip-avatar') {
       await avatarManagerRef.current?.loadLocalVRM(config.file);
@@ -4695,7 +4550,7 @@ const vrHud = new VRHUDManager(
       {/* 3D WebGL Canvas Container */}
       <div ref={containerRef} className="absolute inset-0 z-0 w-full h-full" />
 
-      {/* Center Crosshair - cyan when idle, amber when dev tool hovers
+      {/* Center Crosshair — cyan when idle, amber when dev tool hovers
           a selectable asset, green when hovering an interactive panel. */}
       <div className="absolute inset-0 z-[5] pointer-events-none flex items-center justify-center">
         {(() => {
@@ -4707,10 +4562,10 @@ const vrHud = new VRHUDManager(
             cameraMode === 'first-person';
 
           const stroke = overPanel
-            ? 'rgba(52,211,153,0.95)'   // green - panel hover
+            ? 'rgba(52,211,153,0.95)'   // green — panel hover
             : overAsset
-            ? 'rgba(245,158,11,0.95)'   // amber - asset hover
-            : 'rgba(0,240,255,0.7)';    // cyan  - idle
+            ? 'rgba(245,158,11,0.95)'   // amber — asset hover
+            : 'rgba(0,240,255,0.7)';    // cyan  — idle
 
           const strokeOuter = overPanel
             ? 'rgba(52,211,153,0.55)'
@@ -4743,14 +4598,14 @@ const vrHud = new VRHUDManager(
             // the attribute directly on the SVG element forces every
             // painting descendant into the same pass-through state.
             <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
-              {/* Outer ring - larger and coloured when over panel */}
+              {/* Outer ring — larger and coloured when over panel */}
               <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
-              {/* Crosshair lines - gap widens on panel hover to look like a hand cursor */}
+              {/* Crosshair lines — gap widens on panel hover to look like a hand cursor */}
               <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
               <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
               <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
               <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
-              {/* Centre dot - square on panel hover to echo a pointer/cursor icon */}
+              {/* Centre dot — square on panel hover to echo a pointer/cursor icon */}
               {overPanel
                 ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
                 : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
@@ -4792,7 +4647,7 @@ const vrHud = new VRHUDManager(
         unreadChatCount={unreadChatCount}
       />
 
-      {/* First-Person HUD stack - a single flex column anchors the
+      {/* First-Person HUD stack — a single flex column anchors the
           locomotion banner AND the equipped-tool chip so they stack
           with a guaranteed `gap-2` clearance regardless of banner
           height (the banner's content can wrap on narrow viewports). */}
@@ -4827,7 +4682,7 @@ const vrHud = new VRHUDManager(
             </button>
           </div>
 
-          {/* Tool Equipped chip - visible while the dev tool is the
+          {/* Tool Equipped chip — visible while the dev tool is the
               active tool in first-person; hints at the look-and-press-R
               workflow (per Controls-Keybinds.txt dev-tool section).
               `whitespace-nowrap` keeps the chip a single row on narrow
@@ -4843,7 +4698,7 @@ const vrHud = new VRHUDManager(
             </div>
           )}
 
-          {/* Selection chip - when an asset is selected while in
+          {/* Selection chip — when an asset is selected while in
               first-person, hint at the O-to-inspect workflow. */}
           {selectedAsset && (
             <div className="glass-card px-4 py-1.5 flex items-center gap-2 border border-amber-500/40 bg-amber-950/60 shadow-[0_0_18px_rgba(245,158,11,0.30)] pointer-events-auto whitespace-nowrap">
@@ -4858,7 +4713,7 @@ const vrHud = new VRHUDManager(
         </div>
       ) : selectedAsset && (
         /* Orbit-mode sibling for the selection chip so the user sees
-           the O hint even when they're not in first-person - the
+           the O hint even when they're not in first-person — the
            inspector O-keybind works in either camera mode. */
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
           <div className="glass-card px-4 py-1.5 flex items-center gap-2 border border-amber-500/40 bg-amber-950/60 shadow-[0_0_18px_rgba(245,158,11,0.30)] pointer-events-auto whitespace-nowrap">
@@ -5228,7 +5083,7 @@ const vrHud = new VRHUDManager(
         onToggleMute={handleToggleMute}
       />
 
-      {/* Resonite Radial Context Menu (Pie Menu) - desktop 2D overlay */}
+      {/* Resonite Radial Context Menu (Pie Menu) — desktop 2D overlay */}
       <RadialContextMenu
         isOpen={showRadialMenu}
         position={radialMenuPos}

@@ -1,0 +1,80 @@
+1: import * as THREE from 'three';
+2: import Peer, { type DataConnection, type MediaConnection } from 'peerjs';
+3: import type { TransformUpdate } from '../engine/ManipulationManager.ts';
+4: import type { AvatarTransform } from '../engine/AvatarManager.ts';
+5: import type { AssetType, LoadedAsset } from '../engine/AssetManager.ts';
+6: import type { UserRole, ModerationActionPayload, RoleUpdatePayload } from '../types/permissions.ts';
+7: 
+8: export type ConnectionMode = 'offline' | 'online' | 'paired';
+9: 
+10: export interface ChatMessage {
+11:   id: string;
+12:   senderId: string;
+13:   senderName: string;
+14:   text: string;
+15:   timestamp: number;
+16:   isSystem?: boolean;
+17: }
+18: 
+19: export interface AssetSpawnData {
+20:   id: string;
+21:   name: string;
+22:   type: AssetType;
+23:   position: [number, number, number];
+24:   rotation: [number, number, number];
+25:   scale: [number, number, number];
+26:   url?: string;
+27:   primitiveType?: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane';
+28:   fileData?: ArrayBuffer;
+29:   // Set by buildEnvelope when the original fileData was above
+30:   // MAX_INLINED_FILE_BYTES and stripped from the broadcast to keep
+31:   // WebRTC envelopes under the size that crashes the Quest browser.
+32:   // Receivers should render a "Too Large" placeholder instead of
+33:   // trying to import — see App.tsx onSpawn / onSyncResp handlers.
+34:   fileDataOversized?: boolean;
+35:   isCollidable: boolean;
+36:   // Optional persistent flag. Mirrored on the spawn / scene-snapshot
+37:   // broadcast paths so late-joining guests get the host's pre-existing
+38:   // `userData.isPersistent` value on first import. Receivers should
+39:   // write through to `asset.object3d.userData.isPersistent` so the
+40:   // inspector checkbox and tree-orange-dot indicator both reflect the
+41:   // synced state.
+42:   isPersistent?: boolean;
+43:   materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
+44:   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
+45:   // Phase 3A: when the host imports a video too large for the sync
+46:   // envelope, the spawn carries `fileData: undefined` +
+47:   // `fileDataOversized: true` AND this streamingHint. Receivers use it
+48:   // to attach a VideoStreamingService receiver and bring up an MSE-
+49:   // backed <video> element which then feeds THREE.VideoTexture via the
+50:   // existing Phase 2 cap.
+51:   streamingHint?: {
+52:     id: string;
+53:     fileSize: number;
+54:     mimeHint?: string;
+55:   };
+56:   p2pTransferHint?: {
+57:     id: string;
+58:     size: number;
+59:   };
+60:   senderPeerId?: string;
+61: }
+62: 
+63: export interface MaterialUpdate {
+64:   assetId: string;
+65:   materialIndex?: number;
+66:   color?: string;
+67:   roughness?: number;
+68:   metalness?: number;
+69:   emissive?: string;
+70:   emissiveIntensity?: number;
+71:   opacity?: number;
+72:   wireframe?: boolean;
+73:   flatShading?: boolean;
+74:   normalScale?: number;
+75:   aoMapIntensity?: number;
+76:   map?: string | null;
+77:   normalMap?: string | null;
+78:   roughnessMap?: string | null;
+79:   metalnessMap?: string | null;
+80:   emissiveMap?: string | null;

@@ -4,6 +4,7 @@ import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryItem } from '../services/InventoryService.ts';
 import type { GraphicsSettings, PerformanceStats } from '../engine/SceneEngine.ts';
+import { SplatGraphicsSection } from './SplatGraphicsSection.tsx';
 import { 
   Shield, Users, Key, Settings as SettingsIcon, Package, HelpCircle, 
   X, Volume2, VolumeX, RefreshCw, Navigation, UserX, AlertTriangle, 
@@ -37,11 +38,18 @@ export interface DashMenuProps {
   graphicsSettings?: GraphicsSettings;
   performanceStats?: PerformanceStats;
   onUpdateGraphicsSettings?: (newSettings: Partial<GraphicsSettings>) => void;
+  /**
+   * SceneEngine reference, forwarded to `SplatGraphicsSection` so the
+   * "No Limit" preset can display the platform default LoD budget.
+   * Optional — falls back to a generic explanation when omitted.
+   */
+  sceneEngine?: { getDefaultSplatTarget: () => number | null } | null;
   audioDevices?: MediaDeviceInfo[];
   selectedAudioDeviceId?: string;
   onSelectAudioDevice?: (deviceId: string) => void;
   isMuted?: boolean;
   onToggleMute?: () => void;
+  onOpenSaveLoad?: () => void;
 }
 
 export const DashMenu: React.FC<DashMenuProps> = ({
@@ -69,13 +77,15 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   graphicsSettings,
   performanceStats,
   onUpdateGraphicsSettings,
+  sceneEngine = null,
   audioDevices = [],
   selectedAudioDeviceId,
   onSelectAudioDevice,
   isMuted,
-  onToggleMute
+  onToggleMute,
+  onOpenSaveLoad,
 }) => {
-  const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'controls'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'splats' | 'controls'>('session');
   const [sessionSubTab, setSessionSubTab] = useState<'users' | 'permissions'>('users');
   const [dashNameInput, setDashNameInput] = useState<string>(userName);
 
@@ -207,6 +217,17 @@ export const DashMenu: React.FC<DashMenuProps> = ({
               </div>
             </button>
 
+            <button
+              onClick={() => setActiveTab('splats')}
+              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'splats' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
+            >
+              <Sparkles className="w-5 h-5 text-emerald-400" />
+              <div className="flex-1">
+                <div>Gaussian Splats</div>
+                <div className="text-[10px] text-slate-500 font-normal">Spark RAD, LODs & Max Splats</div>
+              </div>
+            </button>
+
             <div className="mt-auto p-3 rounded-xl bg-slate-900/80 border border-slate-800 text-xs text-slate-400">
               <div className="flex items-center gap-2 font-semibold text-slate-300 mb-1">
                 <Shield className="w-4 h-4 text-cyan-400" />
@@ -226,6 +247,25 @@ export const DashMenu: React.FC<DashMenuProps> = ({
             {/* SESSION TAB */}
             {activeTab === 'session' && (
               <div className="space-y-6">
+                {onOpenSaveLoad && (
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-950/40 via-slate-900/80 to-cyan-950/40 border border-purple-500/30 flex items-center justify-between gap-4 shadow-lg">
+                    <div>
+                      <h3 className="text-sm font-bold text-white">World & Room Persistence</h3>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Save complete scene arrangements or export/import .nexus world files
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        onClose();
+                        onOpenSaveLoad();
+                      }}
+                      className="btn btn-primary text-xs py-2 px-4 font-bold shadow-md shadow-purple-500/20"
+                    >
+                      Manage Saved Rooms
+                    </button>
+                  </div>
+                )}
                 
                 {/* Sub-tab pills */}
                 <div className="flex gap-2 p-1 bg-slate-950/60 rounded-xl border border-slate-800 w-fit">
@@ -1194,6 +1234,28 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                       </div>
                     </div>
                   </div>
+                )}
+              </div>
+            )}
+
+            {/* Dedicated Gaussian Splats Tab */}
+            {activeTab === 'splats' && (
+              <div className="space-y-4">
+                <div className="border-b border-slate-800 pb-3">
+                  <h3 className="text-sm font-bold text-slate-200 mb-1 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-emerald-400" /> Gaussian Splatting Engine (Spark RAD)
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Dedicated configuration page for 3D Gaussian Splats (.ply, .spz, .splat, .rad). Manage hierarchical LOD streaming, distance quality scaling, and maximum visible splats.
+                  </p>
+                </div>
+                {graphicsSettings && onUpdateGraphicsSettings && (
+                  <SplatGraphicsSection
+                    compact={false}
+                    settings={graphicsSettings}
+                    onUpdateSettings={onUpdateGraphicsSettings}
+                    sceneEngine={sceneEngine}
+                  />
                 )}
               </div>
             )}

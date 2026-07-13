@@ -1,0 +1,81 @@
+5270:               item.previewUrl = url;
+5271:               inventoryServiceRef.current.saveItem(item);
+5272:             }
+5273:           });
+5274:         }
+5275:         if (asset.type !== 'video') {
+5276:           manipulationManagerRef.current?.selectAsset(asset);
+5277:         } else {
+5278:           setActiveVideoAssetId(asset.id);
+5279:           resetVideoInactivityTimer();
+5280:         }
+5281:         recordSpawnUndo(asset);
+5282:       }
+5283:     }
+5284:     setShowInventoryModal(false);
+5285:   };
+5286: 
+5287:   const handleGenerateItemThumbnail = useCallback(async (item: InventoryItem) => {
+5288:     const assetManager = assetManagerRef.current;
+5289:     if (!assetManager) return;
+5290: 
+5291:     let tempAsset: LoadedAsset | null = null;
+5292:     let shouldDispose = false;
+5293: 
+5294:     for (const loaded of assetManager.assets.values()) {
+5295:       if (loaded.id === item.id || loaded.name === item.name) {
+5296:         tempAsset = loaded;
+5297:         break;
+5298:       }
+5299:     }
+5300: 
+5301:     if (!tempAsset) {
+5302:       const offscreenPos = new THREE.Vector3(0, -9999, 0);
+5303:       if (item.type === 'primitive' && item.primitiveType) {
+5304:         tempAsset = assetManager.spawnPrimitive(item.primitiveType, offscreenPos);
+5305:         shouldDispose = true;
+5306:       } else if (item.fileData) {
+5307:         const blob = new Blob([item.fileData], { type: item.metadata?.mimeType || 'application/octet-stream' });
+5308:         const file = new File([blob], item.name);
+5309:         tempAsset = await assetManager.importFile(file, offscreenPos);
+5310:         shouldDispose = true;
+5311:       } else if (item.url) {
+5312:         tempAsset = await assetManager.importFromUrl(item.url, offscreenPos);
+5313:         shouldDispose = true;
+5314:       }
+5315:     }
+5316: 
+5317:     if (tempAsset) {
+5318:       const previewUrl = await generateAssetThumbnail(tempAsset);
+5319:       if (shouldDispose) {
+5320:         assetManager.removeAsset(tempAsset.id);
+5321:       }
+5322:       if (previewUrl) {
+5323:         const updated = { ...item, previewUrl };
+5324:         await inventoryServiceRef.current.saveItem(updated);
+5325:       }
+5326:     }
+5327:   }, []);
+5328: 
+5329:   const handleEquipVrmFromInventory = async (item: InventoryItem) => {
+5330:     if (!item.fileData && !item.url) return;
+5331:     const blob = item.fileData ? new Blob([item.fileData]) : await (await fetch(item.url!)).blob();
+5332:     const file = new File([blob], item.name);
+5333:     await avatarManagerRef.current?.loadLocalVRM(file);
+5334:     setShowInventoryModal(false);
+5335:   };
+5336: 
+5337:   const handleUpdateUserName = (name: string) => {
+5338:     networkServiceRef.current.setLocalUserName(name);
+5339:     setUserName(networkServiceRef.current.localUserName);
+5340:   };
+5341: 
+5342:   const handleUpdateGraphicsSettings = (newSettings: Partial<GraphicsSettings>) => {
+5343:     setGraphicsSettings((prev) => {
+5344:       const updated = { ...prev, ...newSettings };
+5345:       sceneEngineRef.current?.updateSettings(updated);
+5346: 
+5347:       // Handle progressive LOD toggle
+5348:       if ('progressiveLOD' in newSettings) {
+5349:         const assetMgr = assetManagerRef.current;
+5350:         const renderer = sceneEngineRef.current?.renderer;

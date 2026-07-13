@@ -1,0 +1,61 @@
+470:     });
+471: 
+472:     this.bindPeerHandlers();
+473:     this.registerUnloadHandlers();
+474:     this.startHeartbeat();
+475:   }
+476: 
+477:   public onP2PChunkData(cb: (data: P2PChunkData) => void): () => void {
+478:     this.onP2PChunkDataCallbacks.add(cb);
+479:     return () => this.onP2PChunkDataCallbacks.delete(cb);
+480:   }
+481: 
+482:   /**
+483:    * Request a chunk of a large asset via the raw-binary asset channel.
+484:    * The request is sent as a small JSON control message; the host replies
+485:    * with a binary-framed chunk that fires `onP2PChunkData` listeners.
+486:    * This avoids base64/JSON overhead and does not block realtime
+487:    * movement updates on the reliable channel.
+488:    */
+489:   public requestAssetChunk(assetId: string, peerId: string, start: number, end: number): void {
+490:     if (this.mode === 'offline' || this.bannedPeers.has(peerId)) return;
+491:     let conn: DataConnection;
+492:     try {
+493:       conn = this.openAssetBinaryChannel(peerId);
+494:     } catch (err) {
+495:       console.warn('[PeerJS] failed to open asset-binary channel for', peerId, err);
+496:       return;
+497:     }
+498:     const req = JSON.stringify({ type: 'p2preq', id: assetId, start, end });
+499:     if (conn.open) {
+500:       try { conn.send(req); } catch (err) {
+501:         console.warn('[PeerJS] asset-binary request send failed for', peerId, err);
+502:       }
+503:     } else {
+504:       let pending = this.pendingAssetBinaryRequests.get(peerId);
+505:       if (!pending) {
+506:         pending = [];
+507:         this.pendingAssetBinaryRequests.set(peerId, pending);
+508:       }
+509:       if (pending.length >= SEND_TO_MAX_QUEUED) {
+510:         pending.shift();
+511:       }
+512:       pending.push(req);
+513:     }
+514:   }
+515: 
+516:   private registerUnloadHandlers(): void {
+517:     if (this.unloadHandlersRegistered) return;
+518:     this.unloadHandlersRegistered = true;
+519:     const handleUnload = () => {
+520:       if (this.localPeerId && this.peers.size > 0) {
+521:         try {
+522:           this.broadcastEnvelope(this.buildEnvelope('leave', this.localPeerId));
+523:         } catch { /* noop */ }
+524:       }
+525:       for (const conn of this.dataConns.values()) {
+526:         try { conn.close(); } catch { /* noop */ }
+527:       }
+528:       for (const conn of this.realtimeConns.values()) {
+529:         try { conn.close(); } catch { /* noop */ }
+530:       }

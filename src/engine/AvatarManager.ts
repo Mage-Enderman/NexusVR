@@ -32,6 +32,7 @@ export class PeerAvatar {
   public vrm: VRM | null = null;
   public audioSpeakerMesh: THREE.Mesh | null = null;
   public positionalAudio: THREE.PositionalAudio | null = null;
+  public audioElement: HTMLAudioElement | null = null;
   public isSpeaking = false;
   public vrmUrl: string | null = null;
 
@@ -229,11 +230,28 @@ export class PeerAvatar {
 
   public attachAudioStream(stream: MediaStream, listener: THREE.AudioListener): void {
     if (!this.headMesh) return;
-    
+
+    // Browsers suspend the AudioContext until a user gesture. Resume it
+    // as soon as we have a remote stream so positional audio actually plays.
+    listener.context.resume().catch(() => {});
+
     if (this.positionalAudio) {
       if (this.positionalAudio.isPlaying) this.positionalAudio.stop();
       this.headMesh.remove(this.positionalAudio);
     }
+
+    // Keep a hidden <audio> element attached to the stream so the browser
+    // doesn't garbage-collect / suspend the WebRTC audio track.
+    if (this.audioElement) {
+      try { this.audioElement.pause(); } catch { /* noop */ }
+      this.audioElement = null;
+    }
+    const audioEl = document.createElement('audio');
+    audioEl.srcObject = stream;
+    audioEl.muted = true;
+    audioEl.setAttribute('playsinline', 'true');
+    audioEl.play().catch(() => {});
+    this.audioElement = audioEl;
 
     const audio = new THREE.PositionalAudio(listener);
     const audioNode = audio.context.createMediaStreamSource(stream);
@@ -249,6 +267,10 @@ export class PeerAvatar {
   public dispose(_scene?: THREE.Scene): void {
     if (this.positionalAudio && this.positionalAudio.isPlaying) {
       try { this.positionalAudio.stop(); } catch { /* noop */ }
+    }
+    if (this.audioElement) {
+      try { this.audioElement.pause(); this.audioElement.srcObject = null; } catch { /* noop */ }
+      this.audioElement = null;
     }
     this.group.traverse((child) => {
       if ((child as THREE.Mesh).geometry) {

@@ -1,0 +1,530 @@
+670:                 case 'sys-pair':
+671:                   setShareModalTab('pairing');
+672:                   setShowShareModal(true);
+673:                   break;
+674:                 case 'sys-radial':
+675:                   setRadialMenuPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+676:                   setShowRadialMenu(true);
+677:                   break;
+678:                 case 'sys-chat':
+679:                   // Open the React ChatPanel on desktop (already used by
+680:                   // navbar); open the VR 3D chat panel on immersive VR.
+681:                   if (sceneEngineRef.current?.renderer.xr.isPresenting) {
+682:                     vrHudRef.current?.openPanel('sys-chat');
+683:                   } else {
+684:                     setUnreadChatCount(0);
+685:                     setShowChatPanel(true);
+686:                   }
+687:                   break;
+688:                 case 'sys-inspector':
+689:                   setShowSceneInspector(true);
+690:                   break;
+---
+1850:       // asset); for RMB-grabs it is `grabbedAsset`, since RMB-grab no
+1851:       // longer mutates selection state. If we read only `selectedAsset`,
+1852:       // RMB-grabs on non-selected assets would silently skip undo capture
+1853:       // because the "moved" comparison would be against the (unchanged)
+1854:       // selected asset's transform.
+1855:       const asset = manipulationManager.grabbedAsset ?? manipulationManager.selectedAsset;
+1856:       if (dragging && asset) {
+1857:         // Drag started: save snapshot
+1858:         preDragSnapshot = captureSnapshot(asset);
+1859:         preDragAssetId = asset.id;
+1860:       } else if (!dragging && preDragSnapshot && preDragAssetId) {
+1861:         // Drag ended: record undo action
+1862:         const afterAsset = assetManager.assets.get(preDragAssetId);
+1863:         if (afterAsset) {
+1864:           const afterSnap = captureSnapshot(afterAsset);
+1865:           const moved =
+---
+2280:     disposers.push(net.onSyncResp((snapshot) => {
+2281:       snapshot.assets.forEach((data) => {
+2282:         // Phase 3A late-join branch - MUST come BEFORE the isImporting
+2283:         // guard because the manual broadcast path sometimes lands
+2284:         // AFTER the local user has already placed a placeholder.
+2285:         // We want to UPGRADE that placeholder (replace the
+2286:         // blob/file import path) rather than short-circuit on the
+2287:         // existence guard.
+2288:         //
+2289:         // Fix A: async work via IIFE - same rationale as onSpawn
+2290:         // above; forEach's callback is plain sync so we can't use
+2291:         // `await` directly.
+2292:         if (data.streamingHint && data.type === 'video') {
+2293:           // v4 fix: see onSpawn's mirror comment. Sync attachReceiver
+2294:           // in try/catch; if it throws, fall through (in this branch
+2295:           // the fileDataOversized fallback is below the snapshotForEach).
+2296:           let v: HTMLVideoElement | null = null;
+2297:           try {
+2298:             v = videoStreamingServiceRef.current.attachReceiver(
+2299:               data.streamingHint,
+2300:               data.id,
+2301:               data.senderPeerId
+2302:             );
+2303:           } catch (err) {
+2304:             console.warn(
+2305:               '[VideoStreaming] late-join attachReceiver failed, falling through',
+2306:               err
+2307:             );
+2308:             v = null;
+2309:           }
+2310:           if (v) {
+2311:             const posV = new THREE.Vector3(...data.position);
+2312:             assetManager.loadVideoFromStreamedSource(
+2313:               data.id,
+2314:               data.name,
+2315:               v,
+2316:               posV,
+2317:               { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+2318:             )
+2319:               .then((loadedAsset) => {
+2320:                 if (loadedAsset) {
+2321:                   loadedAsset.object3d.rotation.set(...data.rotation);
+2322:                   loadedAsset.object3d.scale.set(...data.scale);
+2323:                   if (data.isPersistent !== undefined) {
+2324:                     loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+2325:                   }
+2326:                   if (data.materialState) {
+2327:                     AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+2328:                   }
+2329:                 }
+2330:               })
+---
+2610:       if (e.button === 1) {
+2611:         e.preventDefault();
+2612:         // MMB toggles the radial menu (was always-open-only).
+2613:         // Read the LIVE `showRadialMenuRef` mirror instead of
+2614:         // the closed-over React state -- this handler is
+2615:         // registered once inside the `[]`-deps engine-init
+2616:         // effect, so the directly-read `showRadialMenu`
+2617:         // would always see the initial `false`. The
+2618:         // RadialContextMenu's window-capture mousedown
+2619:         // handler fires FIRST when MMB is pressed over the
+2620:         // menu backdrop, so the menu closes itself before
+2621:         // this branch sees the click -- consistent UX.
+2622:         if (showRadialMenuRef.current) {
+2623:           setShowRadialMenu(false);
+2624:         } else {
+2625:           setRadialMenuPos({ x: e.clientX, y: e.clientY });
+2626:           setShowRadialMenu(true);
+2627:         }
+2628:       } else if (e.button === 3 || e.button === 4) {
+2629:         e.preventDefault();
+2630:         if (activeToolRef.current === 'dev') {
+2631:           handleCenterRaySelect();
+2632:         }
+2633:       }
+2634:     };
+2635:     const onCanvasMouseMove = (e: MouseEvent) => {
+2636:       const rect = sceneEngine.renderer.domElement.getBoundingClientRect();
+2637:       const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+2638:       const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+2639:       lastMouseNdcRef.current.set(x, y);
+2640:     };
+2641:     // Scroll wheel: when locked/crosshair + pointing at a panel, scroll the panel directly.
+2642:     const onCanvasWheel = (e: WheelEvent) => {
+2643:       const spm = sceneEngine.spatialPanelManager;
+2644:       const isLocked = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
+2645:       if (isLocked && spm) {
+2646:         spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+2647:         if (spm.isOverPanel && spm.handleLockedScroll(e.deltaY)) {
+2648:           e.preventDefault();
+2649:           e.stopPropagation();
+2650:         }
+2651:       }
+2652:     };
+2653:     const domElem = sceneEngine.renderer.domElement;
+2654:     domElem.addEventListener('click', onCanvasClick);
+2655:     domElem.addEventListener('contextmenu', onCanvasContextMenu);
+2656:     domElem.addEventListener('mousedown', onCanvasAuxMouseDown);
+2657:     domElem.addEventListener('mousemove', onCanvasMouseMove);
+2658:     domElem.addEventListener('wheel', onCanvasWheel, { passive: false });
+2659: 
+2660:     // Register hover-change callback so React can update the crosshair visual
+2661:     sceneEngine.spatialPanelManager?.setOnHoverChange((isOver) => {
+2662:       setIsCrosshairOverPanel(isOver);
+2663:     });
+2664: 
+2665:     // Check URL parameters for auto-joining room or pairing code
+2666:     const params = new URLSearchParams(window.location.search);
+2667:     const roomParam = params.get('room');
+2668:     const pairParam = params.get('pair');
+2669: 
+2670:     if (roomParam) {
+2671:       handleJoinRoom(roomParam, 'online', false);
+2672:     } else if (pairParam) {
+2673:       handleJoinRoom(pairParam, 'paired', true);
+2674:     } else {
+2675:       // Spawn welcome primitive blocks immediately in offline sandbox
+2676:       if (assetManager.assets.size === 0) {
+2677:         const cube = assetManager.spawnPrimitive('cube', new THREE.Vector3(0, 1.2, 0));
+2678:         cube.object3d.rotation.set(0.4, 0.6, 0);
+2679:         const torus = assetManager.spawnPrimitive('torus', new THREE.Vector3(2.0, 1.2, -2));
+2680:         torus.object3d.rotation.set(0.2, 1.0, 0);
+---
+3260:     const handleKeyUp = (e: KeyboardEvent) => {
+3261:       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) {
+3262:         plainPasteModeRef.current = false;
+3263:       }
+3264:     };
+3265:     window.addEventListener('keydown', handleKeyDown);
+3266:     window.addEventListener('keyup', handleKeyUp);
+3267:     return () => {
+3268:       window.removeEventListener('keydown', handleKeyDown);
+3269:       window.removeEventListener('keyup', handleKeyUp);
+3270:     };
+3271:   }, [selectedAsset, cameraMode, activeTool, handleSaveSelectedToInventory, handleDuplicateSelected, handleCenterRaySelect]);
+3272: 
+3273:   // Global Drag-and-Drop and Paste (Ctrl+V) Listeners
+3274:   useEffect(() => {
+3275:     const handleDragOver = (e: DragEvent) => {
+3276:       e.preventDefault();
+3277:     };
+3278:     const handleDrop = (e: DragEvent) => {
+3279:       e.preventDefault();
+3280:       if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
+3281:         setImportInitialFile(e.dataTransfer.files[0]);
+3282:         setShowImportDialog(true);
+3283:       }
+3284:     };
+3285:     const handlePaste = (e: ClipboardEvent) => {
+3286:       const tag = (e.target as HTMLElement)?.tagName;
+3287:       // Inputs always hand off to the browser's default paste behavior.
+3288:       if (['INPUT', 'TEXTAREA'].includes(tag)) {
+3289:         if (plainPasteModeRef.current) plainPasteModeRef.current = false;
+3290:         return;
+3291:       }
+3292: 
+3293:       // Ctrl+Shift+V (no input focus): user explicitly wants plain text —
+3294:       // suppress the asset-import path. Browser default paste into <body>
+3295:       // is effectively a no-op anyway, so this is "do nothing unsafe with
+3296:       // the clipboard contents" — exactly the spec intent.
+3297:       if (plainPasteModeRef.current) {
+3298:         plainPasteModeRef.current = false;
+3299:         e.preventDefault();
+3300:         return;
+3301:       }
+3302: 
+3303:       if (e.clipboardData?.files && e.clipboardData.files[0]) {
+3304:         setImportInitialFile(e.clipboardData.files[0]);
+3305:         setShowImportDialog(true);
+3306:       } else if (e.clipboardData) {
+3307:         const text = e.clipboardData.getData('text');
+3308:         if (text && (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:'))) {
+3309:           setImportInitialFile(null);
+3310:           setShowImportDialog(true);
+3311:         }
+3312:       }
+3313:     };
+3314: 
+3315:     window.addEventListener('dragover', handleDragOver);
+3316:     window.addEventListener('drop', handleDrop);
+3317:     window.addEventListener('paste', handlePaste);
+3318:     return () => {
+3319:       window.removeEventListener('dragover', handleDragOver);
+3320:       window.removeEventListener('drop', handleDrop);
+---
+4520:         }
+4521:       }
+4522: 
+4523:       // Sync LODsManager settings when changed
+4524:       if ('lodTargetDensity' in newSettings || 'lodOverrideLevel' in newSettings) {
+4525:         const assetMgr = assetManagerRef.current;
+4526:         if (assetMgr) {
+4527:           assetMgr.getLODsManager().then((lm) => {
+4528:             if (lm) {
+4529:               if ('lodTargetDensity' in newSettings) lm.targetTriangleDensity = updated.lodTargetDensity;
+4530:               if ('lodOverrideLevel' in newSettings) lm.overrideLodLevel = updated.lodOverrideLevel;
+4531:             }
+4532:           });
+4533:         }
+4534:       }
+4535: 
+4536:       return updated;
+4537:     });
+4538:   };
+4539: 
+4540:   const handleUpdateEnvSettings = (newSettings: Partial<EnvironmentSettings>) => {
+4541:     setEnvSettings((prev) => {
+4542:       const updated = { ...prev, ...newSettings };
+4543:       environmentManagerRef.current?.applySettings(updated);
+4544:       return updated;
+4545:     });
+4546:   };
+4547: 
+4548:   return (
+4549:     <div className="w-screen h-screen relative bg-[#07090e] select-none overflow-hidden">
+4550:       {/* 3D WebGL Canvas Container */}
+4551:       <div ref={containerRef} className="absolute inset-0 z-0 w-full h-full" />
+4552: 
+4553:       {/* Center Crosshair — cyan when idle, amber when dev tool hovers
+4554:           a selectable asset, green when hovering an interactive panel. */}
+4555:       <div className="absolute inset-0 z-[5] pointer-events-none flex items-center justify-center">
+4556:         {(() => {
+4557:           const overPanel = isCrosshairOverPanel && cameraMode === 'first-person';
+4558:           const overAsset =
+4559:             !overPanel &&
+4560:             centerRayHitAssetId !== null &&
+4561:             activeTool === 'dev' &&
+4562:             cameraMode === 'first-person';
+4563: 
+4564:           const stroke = overPanel
+4565:             ? 'rgba(52,211,153,0.95)'   // green — panel hover
+4566:             : overAsset
+4567:             ? 'rgba(245,158,11,0.95)'   // amber — asset hover
+4568:             : 'rgba(0,240,255,0.7)';    // cyan  — idle
+4569: 
+4570:           const strokeOuter = overPanel
+4571:             ? 'rgba(52,211,153,0.55)'
+4572:             : overAsset
+4573:             ? 'rgba(245,158,11,0.65)'
+4574:             : 'rgba(0,240,255,0.5)';
+4575: 
+4576:           const fillDot = overPanel
+4577:             ? 'rgba(52,211,153,1)'
+4578:             : overAsset
+4579:             ? 'rgba(245,158,11,1)'
+4580:             : 'rgba(0,240,255,0.9)';
+4581: 
+4582:           const outerR = overPanel ? 5 : overAsset ? 3.6 : 3;
+4583:           // Gap: panel hover shows wider gap to feel more like a pointer
+4584:           const gapInner = overPanel ? 7 : 8;
+4585:           const gapOuter = overPanel ? 10 : 8;
+4586: 
+4587:           return (
+4588:             // pointerEvents="none" on the root SVG + Tailwind className
+4589:             // belt-and-braces: SVG child elements default to
+4590:             // pointer-events: visiblePainted, and a parent CSS rule of
+4591:             // pointer-events: none does NOT reliably cascade into SVG
+4592:             // children across browsers/renderers (Chromium and Firefox
+4593:             // have both shipped quirks here). When the inspector is
+4594:             // centered on the camera via "Bring To Me", the X/Y input
+4595:             // wrappers straddle the exact screen center, and the
+4596:             // crosshair dot/ring can absorb those clicks silently while
+4597:             // the offset Z input (further right) still works. Setting
+4598:             // the attribute directly on the SVG element forces every
+4599:             // painting descendant into the same pass-through state.
+4600:             <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
+4601:               {/* Outer ring — larger and coloured when over panel */}
+4602:               <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
+4603:               {/* Crosshair lines — gap widens on panel hover to look like a hand cursor */}
+4604:               <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+4605:               <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+4606:               <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+4607:               <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+4608:               {/* Centre dot — square on panel hover to echo a pointer/cursor icon */}
+4609:               {overPanel
+4610:                 ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
+4611:                 : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
+4612:               }
+4613:               {/* Subtle pulse ring on panel hover */}
+4614:               {overPanel && (
+4615:                 <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
+4616:               )}
+4617:             </svg>
+4618:           );
+4619:         })()}
+4620:       </div>
+4621: 
+4622:       {/* Top Glass Navigation Bar */}
+4623:       <Navbar
+4624:         mode={mode}
+4625:         roomId={roomId}
+4626:         peerCount={peerCount}
+4627:         isHost={isHost}
+4628:         cameraMode={cameraMode}
+4629:         onToggleCameraMode={handleToggleCameraMode}
+4630:         onOpenWorldEnv={() => setShowWorldEnvModal(true)}
+4631:         onOpenShare={() => { setShareModalTab('multiplayer'); setShowShareModal(true); }}
+4632:         onOpenPairing={() => { setShareModalTab('pairing'); setShowShareModal(true); }}
+4633:         onOpenDashMenu={() => {
+4634:           inventoryServiceRef.current.getItems().then((items) => {
+4635:             setInventoryItems(items);
+4636:             if (sceneEngineRef.current?.renderer.xr.isPresenting) {
+4637:               vrHudRef.current?.setItems(items);
+4638:               vrHudRef.current?.toggle();
+4639:             } else {
+4640:               setShowDashMenu(true);
+---
+4750:       />
+4751: 
+4752:       {/* Resonite / World Tools Panel */}
+4753:       {showToolsPanel && (
+4754:         <WorldToolsPanel
+4755:           activeTool={activeTool}
+4756:           onSelectTool={(t) => {
+4757:             setActiveTool(t);
+4758:             if (t === 'brush') {
+4759:               brushManagerRef.current?.startStroke('#00f0ff', 0.05);
+4760:             }
+4761:           }}
+4762:           selectedAsset={selectedAsset}
+4763:           onSpawnPrimitive={handleSpawnPrimitive}
+4764:           onApplyMaterial={(color, roughness, metalness, wireframe, emissive, opacity, textureUrl) => {
+4765:             if (selectedAsset) {
+4766:               selectedAsset.object3d.traverse((child) => {
+4767:                 if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
+4768:                   const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+4769:                   if (color) m.color.set(color);
+4770:                   if (roughness !== undefined) m.roughness = roughness;
+4771:                   if (metalness !== undefined) m.metalness = metalness;
+4772:                   if (wireframe !== undefined) m.wireframe = wireframe;
+4773:                   if (emissive) m.emissive.set(emissive);
+4774:                   if (opacity !== undefined) {
+4775:                     m.opacity = opacity;
+4776:                     m.transparent = opacity < 1.0;
+4777:                   }
+4778:                   if (textureUrl) {
+4779:                     if (textureUrl === 'none') {
+4780:                       m.map = null;
+4781:                       m.needsUpdate = true;
+4782:                     } else {
+4783:                       new THREE.TextureLoader().load(textureUrl, (tex) => {
+4784:                         tex.wrapS = THREE.RepeatWrapping;
+4785:                         tex.wrapT = THREE.RepeatWrapping;
+4786:                         tex.repeat.set(2, 2);
+4787:                         m.map = tex;
+4788:                         m.needsUpdate = true;
+4789:                       });
+4790:                     }
+4791:                   }
+4792:                   m.needsUpdate = true;
+4793:                 }
+4794:               });
+4795:             }
+4796:           }}
+4797:           onSpawnLight={(type, color, intensity, distance) => {
+4798:             spawnLightGizmo(type as 'point' | 'spot' | 'sun', color, intensity, distance);
+4799:           }}
+4800:           onToggleDrawing={() => {
+4801:             if (brushManagerRef.current) {
+4802:               const drawing = !brushManagerRef.current.isActive;
+4803:               brushManagerRef.current.isActive = drawing;
+4804:               if (drawing) {
+4805:                 const pos = new THREE.Vector3(0, 1.5, -1.5);
+4806:                 brushManagerRef.current.startStroke('#ff007f', 0.05);
+4807:                 brushManagerRef.current.addPoint(pos);
+4808:                 brushManagerRef.current.addPoint(pos.clone().add(new THREE.Vector3(0.5, 0.5, 0)));
+4809:                 brushManagerRef.current.addPoint(pos.clone().add(new THREE.Vector3(1.0, 0, 0)));
+4810:               }
+4811:             }
+4812:           }}
+4813:           currentTransformMode={currentTransformMode}
+4814:           onSetTransformMode={setCurrentTransformMode}
+4815:           onToggleWireframe={() => {
+4816:             if (selectedAsset) {
+4817:               selectedAsset.object3d.traverse((child) => {
+4818:                 if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
+4819:                   const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+4820:                   (m as THREE.MeshStandardMaterial).wireframe = !(m as THREE.MeshStandardMaterial).wireframe;
+4821:                 }
+4822:               });
+4823:             }
+4824:           }}
+4825:           brushColor="#ff007f"
+4826:           onChangeBrushColor={(c) => {
+4827:             if (brushManagerRef.current) brushManagerRef.current.currentColor = c;
+4828:           }}
+4829:           brushWidth={brushWidth}
+4830:           onChangeBrushWidth={(w) => {
+4831:             setBrushWidth(w);
+4832:             if (brushManagerRef.current) brushManagerRef.current.currentWidth = w;
+4833:           }}
+4834:           isDrawingActive={false}
+4835:           onClearStrokes={() => brushManagerRef.current?.clearAll()}
+4836:           onClose={() => setShowToolsPanel(false)}
+4837:         />
+4838:       )}
+4839: 
+4840:       {/* Resonite Spatial Scene Inspector Window */}
+4841:       <SceneInspectorWindow
+4842:         isOpen={showSceneInspector}
+4843:         onClose={() => setShowSceneInspector(false)}
+4844:         selectedAsset={selectedAsset}
+4845:         onSelectAsset={(asset) => setSelectedAsset(asset)}
+4846:         onUpdateAsset={(updated) => {
+4847:           setSelectedAsset({ ...updated });
+4848:           networkServiceRef.current.broadcastAssetUpdate(updated);
+4849:         }}
+4850:         onBroadcastMaterial={(update) => {
+---
+5180: undefined
+5181: undefined
+5182: undefined
+5183: undefined
+5184: undefined
+5185: undefined
+5186: undefined
+5187: undefined
+5188: undefined
+5189: undefined
+5190: undefined
+5191: undefined
+5192: undefined
+5193: undefined
+5194: undefined
+5195: undefined
+5196: undefined
+5197: undefined
+5198: undefined
+5199: undefined
+5200: undefined
+5201: undefined
+5202: undefined
+5203: undefined
+5204: undefined
+5205: undefined
+5206: undefined
+5207: undefined
+5208: undefined
+5209: undefined
+5210: undefined
+5211: undefined
+5212: undefined
+5213: undefined
+5214: undefined
+5215: undefined
+5216: undefined
+5217: undefined
+5218: undefined
+5219: undefined
+5220: undefined
+5221: undefined
+5222: undefined
+5223: undefined
+5224: undefined
+5225: undefined
+5226: undefined
+5227: undefined
+5228: undefined
+5229: undefined
+5230: undefined
+5231: undefined
+5232: undefined
+5233: undefined
+5234: undefined
+5235: undefined
+5236: undefined
+5237: undefined
+5238: undefined
+5239: undefined
+5240: undefined
+5241: undefined
+5242: undefined
+5243: undefined
+5244: undefined
+5245: undefined
+5246: undefined
+5247: undefined
+5248: undefined
+5249: undefined
+5250: undefined
+5251: undefined
+5252: undefined
+5253: undefined
+5254: undefined
+5255: undefined
+5256: undefined
+5257: undefined
+5258: undefined
+5259: undefined
+5260: undefined

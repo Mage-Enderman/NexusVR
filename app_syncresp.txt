@@ -1,0 +1,136 @@
+2285:     }));
+2286: 
+2287:     disposers.push(net.onSyncResp((snapshot) => {
+2288:       snapshot.assets.forEach((data) => {
+2289:         // Phase 3A late-join branch - MUST come BEFORE the isImporting
+2290:         // guard because the manual broadcast path sometimes lands
+2291:         // AFTER the local user has already placed a placeholder.
+2292:         // We want to UPGRADE that placeholder (replace the
+2293:         // blob/file import path) rather than short-circuit on the
+2294:         // existence guard.
+2295:         //
+2296:         // Fix A: async work via IIFE - same rationale as onSpawn
+2297:         // above; forEach's callback is plain sync so we can't use
+2298:         // `await` directly.
+2299:         if (data.streamingHint && data.type === 'video') {
+2300:           // v4 fix: see onSpawn's mirror comment. Sync attachReceiver
+2301:           // in try/catch; if it throws, fall through (in this branch
+2302:           // the fileDataOversized fallback is below the snapshotForEach).
+2303:           let v: HTMLVideoElement | null = null;
+2304:           try {
+2305:             v = videoStreamingServiceRef.current.attachReceiver(
+2306:               data.streamingHint,
+2307:               data.id,
+2308:               data.senderPeerId
+2309:             );
+2310:           } catch (err) {
+2311:             console.warn(
+2312:               '[VideoStreaming] late-join attachReceiver failed, falling through',
+2313:               err
+2314:             );
+2315:             v = null;
+2316:           }
+2317:           if (v) {
+2318:             const posV = new THREE.Vector3(...data.position);
+2319:             assetManager.loadVideoFromStreamedSource(
+2320:               data.id,
+2321:               data.name,
+2322:               v,
+2323:               posV,
+2324:               { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+2325:             )
+2326:               .then((loadedAsset) => {
+2327:                 if (loadedAsset) {
+2328:                   loadedAsset.object3d.rotation.set(...data.rotation);
+2329:                   loadedAsset.object3d.scale.set(...data.scale);
+2330:                   if (data.isPersistent !== undefined) {
+2331:                     loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+2332:                   }
+2333:                   if (data.materialState) {
+2334:                     AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+2335:                   }
+2336:                 }
+2337:               })
+2338:               .catch((err) => {
+2339:                 console.warn(
+2340:                   '[VideoStreaming] late-join loadVideoFromStreamedSource failed',
+2341:                   err
+2342:                 );
+2343:               });
+2344:             return;
+2345:           }
+2346:           // v null: fall through to forEach's normal branches below.
+2347:         }
+2348:         // Belt + braces: skip late-join snapshot items whose import
+2349:         // is already in-flight from a separate listener (mirrors the
+2350:         // onSpawn guard above). Without this, two near-simultaneous
+2351:         // delivery paths (e.g. a 'spawn' envelope immediately
+2352:         // followed by a sync-resp snapshot containing the same id)
+2353:         // could each race past `assets.has(id)` and start their own
+2354:         // importFile Promise for the same id.
+2355:         if (assetManager.isImporting(data.id)) return;
+2356:         if (!assetManager.assets.has(data.id)) {
+2357:           const pos = new THREE.Vector3(...data.position);
+2358:           // Mirror the onSpawn handler's oversized branch above:
+2359:           // the host's snapshot had its fileData stripped by
+2360:           // buildEnvelope's per-asset size cap, so a late-joining
+2361:           // guest renders a red "Too Large" placeholder instead of
+2362:           // attempting to import a binary that was never sent.
+2363:           if (data.fileDataOversized) {
+2364:             // Mirror the onSpawn handler's dispose-prior-entry
+2365:             // pattern above: a 'pending' broadcast may have already
+2366:             // drawn a "Loading" placeholder for this id (the host
+2367:             // fires 'pending' before the import resolves), so we
+2368:             // must dispose it before swapping in the permanent red
+2369:             // "Too Large" indicator. Without this the cyan mesh
+2370:             // orphans in worldRoot with no registerOnAssetAdded
+2371:             // cleanup ever firing.
+2372:             const prior = pendingAssetsRef.current.get(data.id);
+2373:             if (prior) {
+2374:               sceneEngine.worldRoot.remove(prior.group);
+2375:               prior.dispose();
+2376:               pendingAssetsRef.current.delete(data.id);
+2377:             }
+2378:             const { group, dispose } = createLoadingPlaceholder(
+2379:               data.name || 'Asset',
+2380:               'Network',
+2381:               pos,
+2382:               true  // isOversized — red palette, "Too Large" label
+2383:             );
+2384:             sceneEngine.worldRoot.add(group);
+2385:             pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
+2386:             return;
+2387:           }
+2388:           if (data.type === 'primitive' && data.primitiveType) {
+2389:             const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
+2390:             prim.object3d.rotation.set(...data.rotation);
+2391:             prim.object3d.scale.set(...data.scale);
+2392:             // Mirror the late-join snapshot's userData.isPersistent so
+2393:             // the guest's inspector reflects the host's persist bit
+2394:             // from the first render after sync.
+2395:             if (data.isPersistent !== undefined) {
+2396:               prim.object3d.userData.isPersistent = data.isPersistent;
+2397:             }
+2398:             if (data.materialState) {
+2399:               AssetManager.applyMaterialUpdate(prim, data.materialState);
+2400:             }
+2401:           } else if (data.fileData && data.name) {
+2402:             const blob = new Blob([data.fileData]);
+2403:             const file = new File([blob], data.name);
+2404:             assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
+2405:               if (asset) {
+2406:                 asset.object3d.rotation.set(...data.rotation);
+2407:                 asset.object3d.scale.set(...data.scale);
+2408:                 if (data.isPersistent !== undefined) {
+2409:                   asset.object3d.userData.isPersistent = data.isPersistent;
+2410:                 }
+2411:                 if (data.materialState) {
+2412:                   AssetManager.applyMaterialUpdate(asset, data.materialState);
+2413:                 }
+2414:               }
+2415:             });
+2416:           } else if (data.url) {
+2417:             assetManager.importFromUrl(data.url, pos, undefined, data.id).then((asset) => {
+2418:               if (asset) {
+2419:                 asset.object3d.rotation.set(...data.rotation);
+2420:                 asset.object3d.scale.set(...data.scale);

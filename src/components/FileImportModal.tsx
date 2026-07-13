@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { X, Upload, Box, Image as ImageIcon, Video, FileText, UserCheck, HardDriveDownload } from 'lucide-react';
+import { X, Upload, Box, Image as ImageIcon, Video, FileText, UserCheck, HardDriveDownload, Sparkles } from 'lucide-react';
 
 interface FileImportModalProps {
   onImportFile: (file: File, saveToInventory: boolean, equipVrm: boolean, videoSyncMode?: 'persistent' | 'watch-party') => Promise<void>;
@@ -103,16 +103,21 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
             {isDragging ? 'Drop Files Here Now!' : 'Click to Browse or Drag & Drop Files'}
           </h3>
           <p className="text-xs text-slate-400 mt-1 max-w-xs leading-relaxed">
-            Supports 3D Models (GLB, OBJ, FBX), Images (JPG, PNG), Videos (MP4), VRM Avatars, and any Miscellaneous files.
+            Supports 3D Models (GLB, OBJ, FBX), Gaussian Splats (PLY, SPZ, SPLAT, RAD), Images (JPG, PNG), Videos (MP4), VRM Avatars, and any Miscellaneous files.
           </p>
         </div>
 
         {/* Supported Categories Badge Row */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-5 gap-2">
           <div className="glass-card p-2.5 flex flex-col items-center text-center">
             <Box className="w-4 h-4 text-cyan-400 mb-1" />
             <span className="text-[10px] font-bold text-slate-300">3D Models</span>
             <span className="text-[9px] text-slate-500">GLB, OBJ, FBX</span>
+          </div>
+          <div className="glass-card p-2.5 flex flex-col items-center text-center">
+            <Sparkles className="w-4 h-4 text-emerald-400 mb-1" />
+            <span className="text-[10px] font-bold text-slate-300">Splat 3D</span>
+            <span className="text-[9px] text-slate-500">PLY, SPZ, RAD</span>
           </div>
           <div className="glass-card p-2.5 flex flex-col items-center text-center">
             <ImageIcon className="w-4 h-4 text-purple-400 mb-1" />
@@ -122,12 +127,12 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
           <div className="glass-card p-2.5 flex flex-col items-center text-center">
             <Video className="w-4 h-4 text-pink-400 mb-1" />
             <span className="text-[10px] font-bold text-slate-300">Videos</span>
-            <span className="text-[9px] text-slate-500">MP4 Synced Screen</span>
+            <span className="text-[9px] text-slate-500">MP4 Synced</span>
           </div>
           <div className="glass-card p-2.5 flex flex-col items-center text-center">
-            <FileText className="w-4 h-4 text-emerald-400 mb-1" />
+            <FileText className="w-4 h-4 text-amber-400 mb-1" />
             <span className="text-[10px] font-bold text-slate-300">Misc Files</span>
-            <span className="text-[9px] text-slate-500">Holo File Icon</span>
+            <span className="text-[9px] text-slate-500">Any Format</span>
           </div>
         </div>
 

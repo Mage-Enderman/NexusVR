@@ -1,5 +1,5 @@
 import React from 'react';
-import { Share2, Smartphone, Glasses, Settings, MessageSquare, ShieldCheck, WifiOff, Users, Globe, Footprints, Orbit, Sparkles } from 'lucide-react';
+import { Share2, Smartphone, Glasses, Settings, MessageSquare, ShieldCheck, WifiOff, Users, Globe, Footprints, Orbit, Sparkles, Save } from 'lucide-react';
 import type { ConnectionMode } from '../services/NetworkService.ts';
 
 interface NavbarProps {
@@ -10,6 +10,7 @@ interface NavbarProps {
   cameraMode: 'orbit' | 'first-person';
   onToggleCameraMode: () => void;
   onOpenWorldEnv: () => void;
+  onOpenSaveLoad?: () => void;
   onOpenShare: () => void;
   onOpenPairing: () => void;
   onOpenDashMenu: () => void;
@@ -27,6 +28,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   cameraMode,
   onToggleCameraMode,
   onOpenWorldEnv,
+  onOpenSaveLoad,
   onOpenShare,
   onOpenPairing,
   onOpenDashMenu,
@@ -98,6 +100,17 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <Globe className="w-4 h-4" />
         </button>
+
+        {onOpenSaveLoad && (
+          <button
+            onClick={onOpenSaveLoad}
+            className="btn btn-glass text-xs py-2 px-3 border-purple-500/40 text-purple-300 hover:bg-purple-500/10 flex items-center gap-1.5"
+            title="Save or Load World / Room Layouts"
+          >
+            <Save className="w-4 h-4 text-purple-400" />
+            <span className="font-bold">Save/Load Room</span>
+          </button>
+        )}
 
         <div className="h-5 w-[1px] bg-slate-700/50 mx-0.5" />
 

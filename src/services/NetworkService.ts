@@ -53,6 +53,10 @@ export interface AssetSpawnData {
     fileSize: number;
     mimeHint?: string;
   };
+  p2pTransferHint?: {
+    id: string;
+    size: number;
+  };
   senderPeerId?: string;
 }
 
@@ -161,6 +165,13 @@ export interface VideoStateData {
 export interface SceneStateSnapshot {
   assets: AssetSpawnData[];
   hostId: string;
+}
+
+export interface P2PChunkData {
+  id: string;
+  start: number;
+  end: number;
+  data: ArrayBuffer;
 }
 
 /**
@@ -285,6 +296,12 @@ export class NetworkService {
   // PeerJS internals
   private peer: Peer | null = null;
   private readonly dataConns: Map<string, DataConnection> = new Map();
+  // Dedicated low-latency channel for ephemeral, high-frequency updates
+  // (transforms, avatars, heartbeats). Uses an unreliable DataConnection
+  // so large asset transfers on the reliable channel cannot head-of-line
+  // block movement updates.
+  private readonly realtimeConns: Map<string, DataConnection> = new Map();
+  private readonly hostedAssets: Map<string, ArrayBuffer> = new Map();
   // Phase 3A: outbound binary conns (host's `openBinaryChannel` dials)
   // AND inbound binary conns that arrived via `peer.on('connection')`
   // and matched the `vid-binary` metadata discriminator. Storing both
@@ -301,7 +318,22 @@ export class NetworkService {
   // each delivery so a slow receiver registration can't accidentally
   // receive a stale conn from a later video import by the same host.
   private readonly inboundBinaryListeners: Map<string, Set<(dc: DataConnection) => void>> = new Map();
+  // Phase 3B: dedicated raw-binary DataConnections for oversized asset
+  // chunk transfer. Unlike the JSON envelope path, these carry a tiny
+  // binary header (magic + idLen + start + end + assetId) followed by
+  // raw bytes — no base64, no JSON.stringify, no head-of-line blocking
+  // of realtime movement updates. Each peer gets at most one outbound
+  // asset-binary conn; inbound conns are accepted by the same
+  // `peer.on('connection')` branch that routes `vid-binary`.
+  private readonly assetBinaryConns: Map<string, DataConnection> = new Map();
+  // Outgoing asset-binary control messages (`p2preq`) that arrived
+  // before the raw-binary DataConnection reached its `open` state.
+  // Drained once the channel opens; dropped on close.
+  private readonly pendingAssetBinaryRequests: Map<string, string[]> = new Map();
   private readonly mediaConns: Map<string, MediaConnection> = new Map();
+  // Inbound voice calls that arrived before the local mic was ready.
+  // Answered once enableVoiceChat/switchAudioInputDevice provides a stream.
+  private readonly pendingMediaCalls: Set<MediaConnection> = new Set();
   // Outgoing envelopes that arrived while a DataConnection hadn't yet
   // reached its `open` state. We cannot call conn.send() pre-open —
   // PeerJS's internal guard consoles an "ERROR: Connection is not open.
@@ -309,6 +341,10 @@ export class NetworkService {
   // AND emits 'error' on the conn. Buffet on the way in, drain once
   // open fires, drop on close so envelopes to dead peers never leak.
   private readonly pendingEnvelopes: Map<string, Envelope[]> = new Map();
+  // Outgoing realtime envelopes that arrived before the unreliable
+  // DataConnection reached its `open` state. Drained once the channel
+  // opens; dropped on close.
+  private readonly pendingRealtimeEnvelopes: Map<string, Envelope[]> = new Map();
   // Reassembly buffer for chunked envelopes keyed by `${fromPeerId}-${id}`.
   // Each entry holds the in-order string fragments and a count of how many
   // have arrived; when count === total we JSON.parse the concatenation
@@ -357,6 +393,12 @@ export class NetworkService {
   // shows both lines.
   private static readonly SYSTEM_CHAT_DEDUPE_MS = 3000;
 
+  // Envelope types that should travel over the dedicated unreliable
+  // realtime DataConnection instead of the reliable one. Keeping
+  // transform/avatar/heartbeat traffic on a separate channel prevents
+  // large asset spawns from head-of-line blocking peer movement.
+  private static readonly REALTIME_TYPES: ReadonlySet<EnvelopeType> = new Set<EnvelopeType>(['trans', 'av', 'ping']);
+
   // ICE servers — kept identical to the previous Trystero configuration so
   // NAT traversal behavior matches. Google STUN + OpenRelay TURN covers
   // the common home-network / corporate-firewall combinations.
@@ -384,8 +426,9 @@ export class NetworkService {
   private onVideoLiveStreamCallbacks: Set<(assetId: string, stream: MediaStream, peerId: string) => void> = new Set();
   private onSyncReqCallbacks: Set<(fromPeerId: string) => void> = new Set();
   private onSyncRespCallbacks: Set<(snapshot: SceneStateSnapshot) => void> = new Set();
-  private onRoleCallbacks: Set<(data: RoleUpdatePayload) => void> = new Set();
-  private onModCallbacks: Set<(data: ModerationActionPayload) => void> = new Set();
+  private readonly onRoleCallbacks: Set<(data: RoleUpdatePayload) => void> = new Set();
+  private readonly onModerationCallbacks: Set<(data: ModerationActionPayload) => void> = new Set();
+  private readonly onP2PChunkDataCallbacks: Set<(data: P2PChunkData) => void> = new Set();
   private onPendingSpawnCallbacks: Set<(data: PendingSpawnData) => void> = new Set();
   private onPendingCancelCallbacks: Set<(id: string) => void> = new Set();
   private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
@@ -431,6 +474,45 @@ export class NetworkService {
     this.startHeartbeat();
   }
 
+  public onP2PChunkData(cb: (data: P2PChunkData) => void): () => void {
+    this.onP2PChunkDataCallbacks.add(cb);
+    return () => this.onP2PChunkDataCallbacks.delete(cb);
+  }
+
+  /**
+   * Request a chunk of a large asset via the raw-binary asset channel.
+   * The request is sent as a small JSON control message; the host replies
+   * with a binary-framed chunk that fires `onP2PChunkData` listeners.
+   * This avoids base64/JSON overhead and does not block realtime
+   * movement updates on the reliable channel.
+   */
+  public requestAssetChunk(assetId: string, peerId: string, start: number, end: number): void {
+    if (this.mode === 'offline' || this.bannedPeers.has(peerId)) return;
+    let conn: DataConnection;
+    try {
+      conn = this.openAssetBinaryChannel(peerId);
+    } catch (err) {
+      console.warn('[PeerJS] failed to open asset-binary channel for', peerId, err);
+      return;
+    }
+    const req = JSON.stringify({ type: 'p2preq', id: assetId, start, end });
+    if (conn.open) {
+      try { conn.send(req); } catch (err) {
+        console.warn('[PeerJS] asset-binary request send failed for', peerId, err);
+      }
+    } else {
+      let pending = this.pendingAssetBinaryRequests.get(peerId);
+      if (!pending) {
+        pending = [];
+        this.pendingAssetBinaryRequests.set(peerId, pending);
+      }
+      if (pending.length >= SEND_TO_MAX_QUEUED) {
+        pending.shift();
+      }
+      pending.push(req);
+    }
+  }
+
   private registerUnloadHandlers(): void {
     if (this.unloadHandlersRegistered) return;
     this.unloadHandlersRegistered = true;
@@ -441,6 +523,9 @@ export class NetworkService {
         } catch { /* noop */ }
       }
       for (const conn of this.dataConns.values()) {
+        try { conn.close(); } catch { /* noop */ }
+      }
+      for (const conn of this.realtimeConns.values()) {
         try { conn.close(); } catch { /* noop */ }
       }
       try { this.peer?.destroy(); } catch { /* noop */ }
@@ -525,6 +610,10 @@ export class NetworkService {
           console.warn('[Net] binary conn error:', conn.peer, err);
           this.binaryConns.delete(conn.peer);
         });
+      } else if (md && typeof md === 'object' && md.kind === 'asset-binary') {
+        this.acceptAssetBinaryConnection(conn);
+      } else if (md && typeof md === 'object' && md.kind === 'realtime') {
+        this.acceptRealtimeConnection(conn);
       } else {
         this.acceptDataConnection(conn);
       }
@@ -611,6 +700,7 @@ export class NetworkService {
       if (hostReachable) {
         this.hostId = hostId;
         this.acceptDataConnection(conn);
+        this.openRealtimeToPeer(hostId);
       } else {
         conn.close();
         this.becomeHost(roomId);
@@ -651,7 +741,19 @@ export class NetworkService {
       this.peer = null;
     }
     this.dataConns.clear();
+    this.realtimeConns.clear();
+    this.pendingRealtimeEnvelopes.clear();
     this.mediaConns.clear();
+    // Tear down any asset-binary channels from a previous session so
+    // stale conns don't leak into the new host identity.
+    for (const conn of this.assetBinaryConns.values()) {
+      try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
+    }
+    this.assetBinaryConns.clear();
+    this.pendingAssetBinaryRequests.clear();
+    this.hostedAssets.clear();
+    this.chunkedMessages.clear();
+    this.pendingEnvelopes.clear();
     this.localPeerId = `${roomId}-host`;
     this.hostId = this.localPeerId;
     this.isHost = true;
@@ -681,11 +783,263 @@ export class NetworkService {
     } catch (err) {
       console.warn('[PeerJS] connect threw for', peerId, err);
     }
+    this.openRealtimeToPeer(peerId);
+  }
+
+  private openRealtimeToPeer(peerId: string): void {
+    if (!this.peer) return;
+    if (peerId === this.localPeerId) return;
+    if (this.realtimeConns.has(peerId)) return;
+    try {
+      const conn = this.peer.connect(peerId, { reliable: false, metadata: { kind: 'realtime' } });
+      this.acceptRealtimeConnection(conn);
+    } catch (err) {
+      console.warn('[PeerJS] realtime connect threw for', peerId, err);
+    }
+  }
+
+  private acceptRealtimeConnection(conn: DataConnection): void {
+    if (this.mode === 'offline') {
+      conn.close();
+      return;
+    }
+    if (this.bannedPeers.has(conn.peer)) {
+      conn.close();
+      return;
+    }
+    this.realtimeConns.set(conn.peer, conn);
+
+    const onConnOpen = () => {
+      this.lastSeenPeers.set(conn.peer, Date.now());
+      const pending = this.pendingRealtimeEnvelopes.get(conn.peer);
+      if (pending && pending.length > 0) {
+        for (const env of pending) {
+          try { conn.send(env); } catch (err) {
+            console.warn('[PeerJS] realtime flush failed for', conn.peer, err);
+          }
+        }
+        this.pendingRealtimeEnvelopes.delete(conn.peer);
+      }
+    };
+
+    if (conn.open) {
+      onConnOpen();
+    } else {
+      conn.on('open', onConnOpen);
+    }
+
+    conn.on('data', (raw) => {
+      this.handleEnvelopeFrom(conn.peer, raw);
+    });
+
+    conn.on('close', () => {
+      this.realtimeConns.delete(conn.peer);
+    });
+
+    conn.on('error', (err) => {
+      console.warn('[PeerJS] RealtimeDataConnection error:', conn.peer, err);
+      this.realtimeConns.delete(conn.peer);
+    });
+  }
+
+  private sendRealtimeEnvelopeTo(conn: DataConnection, env: Envelope): void {
+    if (conn.open) {
+      try {
+        conn.send(env);
+      } catch (err) {
+        console.warn('[PeerJS] realtime send failed for', conn.peer, err);
+      }
+      return;
+    }
+    let queue = this.pendingRealtimeEnvelopes.get(conn.peer);
+    if (!queue) {
+      queue = [];
+      this.pendingRealtimeEnvelopes.set(conn.peer, queue);
+    }
+    if (queue.length >= SEND_TO_MAX_QUEUED) {
+      queue.shift();
+    }
+    queue.push(env);
+  }
+
+  // ===========================================================================
+  // Asset binary channel (minimal fallback for oversized fileData)
+  // ===========================================================================
+  /**
+   * Accept an inbound raw-binary DataConnection opened by a peer that
+   * wants to pull (or push) oversized asset chunks. We store it in
+   * `assetBinaryConns` and route every message to the binary framing
+   * parser. The channel uses `serialization: 'binary'` so the bytes
+   * arrive as ArrayBuffers, not JSON-wrapped strings.
+   */
+  private acceptAssetBinaryConnection(conn: DataConnection): void {
+    if (this.mode === 'offline') {
+      conn.close();
+      return;
+    }
+    if (this.bannedPeers.has(conn.peer)) {
+      conn.close();
+      return;
+    }
+    const existing = this.assetBinaryConns.get(conn.peer);
+    if (existing) {
+      if (existing.open) {
+        // We already have an open channel for this peer; keep it and
+        // discard the duplicate inbound conn.
+        conn.close();
+        return;
+      }
+      // Stale connecting/closed conn: tear it down before replacing.
+      try { existing.removeAllListeners(); existing.close(); } catch { /* noop */ }
+    }
+    this.assetBinaryConns.set(conn.peer, conn);
+
+    const onConnOpen = () => {
+      this.lastSeenPeers.set(conn.peer, Date.now());
+    };
+
+    if (conn.open) {
+      onConnOpen();
+    } else {
+      conn.on('open', onConnOpen);
+    }
+
+    conn.on('data', (raw) => {
+      this.handleAssetBinaryMessage(conn, raw);
+    });
+
+    conn.on('close', () => {
+      if (this.assetBinaryConns.get(conn.peer) === conn) {
+        this.assetBinaryConns.delete(conn.peer);
+      }
+    });
+
+    conn.on('error', (err) => {
+      console.warn('[PeerJS] asset-binary conn error:', conn.peer, err);
+      if (this.assetBinaryConns.get(conn.peer) === conn) {
+        this.assetBinaryConns.delete(conn.peer);
+      }
+    });
+  }
+
+  /**
+   * Open (or reuse) a raw-binary DataConnection to a peer for oversized
+   * asset chunk transfer. The conn is tagged with `kind: 'asset-binary'`
+   * so the remote side routes it here instead of into the JSON envelope
+   * parser.
+   */
+  private openAssetBinaryChannel(peerId: string): DataConnection {
+    if (!this.peer) throw new Error('NetworkService peer not initialized');
+    if (peerId === this.localPeerId) throw new Error('Cannot open asset-binary channel to self');
+    if (this.bannedPeers.has(peerId)) throw new Error('Cannot open asset-binary channel to a banned peer');
+    const existing = this.assetBinaryConns.get(peerId);
+    if (existing) {
+      if (existing.open) return existing;
+      // Stale closed conn: tear it down and create a fresh one.
+      try { existing.removeAllListeners(); existing.close(); } catch { /* noop */ }
+      this.assetBinaryConns.delete(peerId);
+    }
+    const conn = this.peer.connect(peerId, {
+      reliable: true,
+      serialization: 'binary',
+      metadata: { kind: 'asset-binary' }
+    });
+    this.assetBinaryConns.set(peerId, conn);
+    conn.on('open', () => {
+      this.lastSeenPeers.set(peerId, Date.now());
+      const pending = this.pendingAssetBinaryRequests.get(peerId);
+      if (pending && pending.length > 0) {
+        for (const req of pending) {
+          try { conn.send(req); } catch (err) {
+            console.warn('[PeerJS] asset-binary pending request send failed for', peerId, err);
+          }
+        }
+        this.pendingAssetBinaryRequests.delete(peerId);
+      }
+    });
+    conn.on('close', () => {
+      if (this.assetBinaryConns.get(peerId) === conn) {
+        this.assetBinaryConns.delete(peerId);
+      }
+    });
+    conn.on('error', (err) => {
+      console.warn('[PeerJS] asset-binary outbound conn error:', peerId, err);
+      if (this.assetBinaryConns.get(peerId) === conn) {
+        this.assetBinaryConns.delete(peerId);
+      }
+    });
+    conn.on('data', (raw) => { this.handleAssetBinaryMessage(conn, raw); });
+    return conn;
+  }
+
+  /**
+   * Parse a raw asset-binary message. String payloads carry JSON control
+   * messages (`p2preq`); ArrayBuffer payloads carry a chunked data header
+   * followed by raw bytes. Fires `onP2PChunkDataCallbacks` on the
+   * receiving side.
+   */
+  private handleAssetBinaryMessage(conn: DataConnection, raw: unknown): void {
+    if (typeof raw === 'string') {
+      try {
+        const msg = JSON.parse(raw) as { type: string; id: string; start: number; end: number };
+        if (msg.type === 'p2preq') {
+          this.handleAssetBinaryRequest(conn, msg);
+        }
+      } catch (err) {
+        console.warn('[PeerJS] asset-binary control parse error from', conn.peer, err);
+      }
+      return;
+    }
+    if (raw instanceof ArrayBuffer) {
+      try {
+        const chunk = decodeAssetBinaryChunk(raw);
+        for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
+      } catch (err) {
+        console.warn('[PeerJS] asset-binary chunk decode error from', conn.peer, err);
+      }
+      return;
+    }
+    console.warn('[PeerJS] unexpected asset-binary message type from', conn.peer, typeof raw);
+  }
+
+  /**
+   * Host-side handler for a chunk request received over the asset-binary
+   * channel. Reads the requested slice from `hostedAssets` and sends it
+   * back as a raw binary message on the same DataConnection so the reply
+   * cannot be routed to a stale or overwritten conn.
+   */
+  private handleAssetBinaryRequest(conn: DataConnection, req: { id: string; start: number; end: number }): void {
+    if (this.bannedPeers.has(conn.peer)) return;
+    const buffer = this.hostedAssets.get(req.id);
+    if (!buffer) return;
+    // Clamp the chunk size so a single reply never exceeds the
+    // WebRTC message comfort zone, even if a peer asks for the
+    // whole file at once.
+    let end = Math.min(req.end, req.start + MAX_ASSET_BINARY_CHUNK_BYTES);
+    end = Math.min(end, buffer.byteLength);
+    const chunkLength = end - req.start;
+    if (chunkLength <= 0 || req.start < 0) {
+      console.warn('[PeerJS] invalid asset-binary request range from', conn.peer, req);
+      return;
+    }
+    const encoded = encodeAssetBinaryChunk(req.id, req.start, end, buffer, req.start, chunkLength);
+    if (conn.open) {
+      conn.send(encoded);
+    }
   }
 
   private callPeerForAudio(peerId: string): void {
     if (!this.peer || !this.localAudioStream) return;
-    if (this.mediaConns.has(peerId)) return;
+    if (peerId === this.localPeerId) return;
+    if (this.bannedPeers.has(peerId)) return;
+    // Close any stale call so device switches and re-mutes actually
+    // renegotiate with a fresh MediaConnection. Without this the
+    // early return below would leave peers using an old/stopped track.
+    const existing = this.mediaConns.get(peerId);
+    if (existing) {
+      try { existing.removeAllListeners(); existing.close(); } catch { /* noop */ }
+      this.mediaConns.delete(peerId);
+    }
     try {
       const call = this.peer.call(peerId, this.localAudioStream);
       if (!call) return;
@@ -802,11 +1156,23 @@ export class NetworkService {
     if (binaryConn) {
       try { binaryConn.removeAllListeners(); binaryConn.close(); } catch { /* noop */ }
     }
+    const assetBinaryConn = this.assetBinaryConns.get(peerId);
+    if (assetBinaryConn) {
+      try { assetBinaryConn.removeAllListeners(); assetBinaryConn.close(); } catch { /* noop */ }
+    }
+    const realtimeConn = this.realtimeConns.get(peerId);
+    if (realtimeConn) {
+      try { realtimeConn.removeAllListeners(); realtimeConn.close(); } catch { /* noop */ }
+    }
 
     this.dataConns.delete(peerId);
+    this.realtimeConns.delete(peerId);
     this.mediaConns.delete(peerId);
     this.binaryConns.delete(peerId);
+    this.assetBinaryConns.delete(peerId);
+    this.pendingAssetBinaryRequests.delete(peerId);
     this.pendingEnvelopes.delete(peerId);
+    this.pendingRealtimeEnvelopes.delete(peerId);
     this.peers.delete(peerId);
     this.peerRoles.delete(peerId);
     this.peerNames.delete(peerId);
@@ -837,7 +1203,12 @@ export class NetworkService {
     if (this.localAudioStream) {
       call.answer(this.localAudioStream);
     } else {
-      try { call.answer(); } catch { /* noop */ }
+      // We don't have a mic yet; defer answering so the caller gets
+      // our audio once the local stream is available.
+      this.pendingMediaCalls.add(call);
+      call.on('close', () => this.pendingMediaCalls.delete(call));
+      call.on('error', () => this.pendingMediaCalls.delete(call));
+      return;
     }
     this.mediaConns.set(call.peer, call);
 
@@ -847,6 +1218,13 @@ export class NetworkService {
     });
     call.on('close', () => this.mediaConns.delete(call.peer));
     call.on('error', () => this.mediaConns.delete(call.peer));
+  }
+
+  private answerPendingMediaCalls(): void {
+    for (const call of this.pendingMediaCalls) {
+      this.pendingMediaCalls.delete(call);
+      this.acceptMediaCall(call);
+    }
   }
 
   // ===========================================================================
@@ -860,12 +1238,15 @@ export class NetworkService {
       const pd = payload as AssetSpawnData;
       if (pd.fileData instanceof ArrayBuffer) {
         if (pd.fileData.byteLength > MAX_INLINED_FILE_BYTES) {
-          // Strip the binary and flag the envelope so receivers render
-          // a "Too Large" placeholder instead of crashing on the
-          // 100MB+ base64 round-trip the Quest browser can't allocate.
-          // The host already has the asset locally; the size cap only
-          // affects the broadcast side.
-          prepared = { ...pd, fileData: undefined, fileDataOversized: true };
+          // Store the buffer so peers can request it later
+          this.hostedAssets.set(pd.id, pd.fileData);
+          prepared = {
+            ...pd,
+            fileData: undefined,
+            fileDataOversized: true,
+            p2pTransferHint: { id: pd.id, size: pd.fileData.byteLength },
+            senderPeerId: this.localPeerId
+          };
         } else {
           prepared = { ...pd, fileData: arrayBufferToBase64(pd.fileData) };
         }
@@ -887,7 +1268,14 @@ export class NetworkService {
         assets: pd.assets.map((a) => {
           if (a.fileData instanceof ArrayBuffer) {
             if (a.fileData.byteLength > MAX_INLINED_FILE_BYTES) {
-              return { ...a, fileData: undefined, fileDataOversized: true };
+              this.hostedAssets.set(a.id, a.fileData);
+              return {
+                ...a,
+                fileData: undefined,
+                fileDataOversized: true,
+                p2pTransferHint: { id: a.id, size: a.fileData.byteLength },
+                senderPeerId: this.localPeerId
+              };
             }
             return { ...a, fileData: arrayBufferToBase64(a.fileData) };
           }
@@ -979,6 +1367,14 @@ export class NetworkService {
       case 'ping':
         // Lightweight heartbeat ping; lastSeenPeers already updated above
         break;
+      case 'mod': {
+        const modPayload = env.payload as ModerationActionPayload;
+        if (modPayload.action === 'silence') this.mutedPeers.add(modPayload.targetPeerId);
+        else if (modPayload.action === 'unsilence') this.mutedPeers.delete(modPayload.targetPeerId);
+        else if (modPayload.action === 'ban') this.bannedPeers.add(modPayload.targetPeerId);
+        for (const cb of this.onModerationCallbacks) cb(modPayload);
+        break;
+      }
       case 'trans':
         for (const cb of this.onTransformCallbacks) cb(env.payload as TransformUpdate);
         break;
@@ -997,9 +1393,14 @@ export class NetworkService {
         for (const cb of this.onSpawnCallbacks) cb(data);
         break;
       }
-      case 'rem':
-        for (const cb of this.onRemoveCallbacks) cb(env.payload as string);
+      case 'rem': {
+        const removedId = env.payload as string;
+        // Drop any hosted oversized asset buffer for the removed id so
+        // we don't leak large ArrayBuffers after the asset is gone.
+        this.hostedAssets.delete(removedId);
+        for (const cb of this.onRemoveCallbacks) cb(removedId);
         break;
+      }
       case 'chat':
         for (const cb of this.onChatCallbacks) cb(env.payload as ChatMessage);
         break;
@@ -1026,14 +1427,6 @@ export class NetworkService {
           this.notifySystemChat(`Your permission role was updated to: ${data.newRole.toUpperCase()}`);
         }
         for (const cb of this.onRoleCallbacks) cb(data);
-        break;
-      }
-      case 'mod': {
-        const data = env.payload as ModerationActionPayload;
-        if (data.action === 'silence') this.mutedPeers.add(data.targetPeerId);
-        else if (data.action === 'unsilence') this.mutedPeers.delete(data.targetPeerId);
-        else if (data.action === 'ban') this.bannedPeers.add(data.targetPeerId);
-        for (const cb of this.onModCallbacks) cb(data);
         break;
       }
       case 'hs': {
@@ -1162,9 +1555,9 @@ export class NetworkService {
       // Send chunks in a burst as long as bufferedAmount stays below threshold
       while (i < total && conn.open) {
         const dc = (conn as any).dataChannel as RTCDataChannel | undefined;
-        if (dc && dc.bufferedAmount > 512 * 1024) {
+        if (dc && dc.bufferedAmount > 1024 * 1024) {
           // Send buffer is filling up; yield to let WebRTC flush
-          setTimeout(sendNext, 4);
+          setTimeout(sendNext, 1);
           return;
         }
         const chunkStr = jsonStr.substring(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, jsonStr.length));
@@ -1172,12 +1565,12 @@ export class NetworkService {
           conn.send({ type: 'chunk', payload: { id: msgId, i, total, data: chunkStr } });
         } catch (err) {
           console.warn('[PeerJS] chunked send failed at', i, 'of', total, 'for', conn.peer, err);
-          setTimeout(sendNext, 10);
+          setTimeout(sendNext, 5);
           return;
         }
         i++;
         if (!dc) {
-          if (i < total) setTimeout(sendNext, 3);
+          if (i < total) setTimeout(sendNext, 1);
           return;
         }
       }
@@ -1185,7 +1578,15 @@ export class NetworkService {
     sendNext();
   }
 
+  private isRealtimeEnvelope(env: Envelope): boolean {
+    return NetworkService.REALTIME_TYPES.has(env.type);
+  }
+
   private broadcastEnvelope(env: Envelope, targetPeerId?: string): void {
+    if (this.isRealtimeEnvelope(env)) {
+      this.broadcastRealtimeEnvelope(env, targetPeerId);
+      return;
+    }
     if (!targetPeerId) {
       for (const conn of this.dataConns.values()) {
         this.sendEnvelopeTo(conn, env);
@@ -1193,6 +1594,27 @@ export class NetworkService {
     } else {
       const conn = this.dataConns.get(targetPeerId);
       if (conn) this.sendEnvelopeTo(conn, env);
+    }
+  }
+
+  private broadcastRealtimeEnvelope(env: Envelope, targetPeerId?: string): void {
+    if (!targetPeerId) {
+      for (const [peerId, reliableConn] of this.dataConns) {
+        const realtimeConn = this.realtimeConns.get(peerId);
+        if (realtimeConn) {
+          this.sendRealtimeEnvelopeTo(realtimeConn, env);
+        } else {
+          this.sendEnvelopeTo(reliableConn, env);
+        }
+      }
+    } else {
+      const realtimeConn = this.realtimeConns.get(targetPeerId);
+      if (realtimeConn) {
+        this.sendRealtimeEnvelopeTo(realtimeConn, env);
+      } else {
+        const reliableConn = this.dataConns.get(targetPeerId);
+        if (reliableConn) this.sendEnvelopeTo(reliableConn, env);
+      }
     }
   }
 
@@ -1484,6 +1906,9 @@ export class NetworkService {
 
   public broadcastRemove(id: string): void {
     if (this.mode === 'offline') return;
+    // Free the oversized asset buffer we were hosting for P2P chunk
+    // transfer. The receiver no longer needs it once the asset is gone.
+    this.hostedAssets.delete(id);
     this.broadcastEnvelope(this.buildEnvelope('rem', id));
   }
 
@@ -1526,6 +1951,8 @@ export class NetworkService {
       // peer.call() to every currently-connected peer. New peers joining
       // later will be called by acceptDataConnection → open → call.
       for (const peerId of this.peers) this.callPeerForAudio(peerId);
+      // Answer any inbound calls that arrived before the mic was ready.
+      this.answerPendingMediaCalls();
       return true;
     } catch (err) {
       console.warn('Microphone access denied or unavailable:', err);
@@ -1535,13 +1962,19 @@ export class NetworkService {
 
   public async toggleMute(): Promise<boolean> {
     if (!this.localAudioStream) {
-      await this.enableVoiceChat();
+      const ok = await this.enableVoiceChat();
+      if (!ok) return this.isMuted;
       this.isMuted = false;
       return this.isMuted;
     }
     this.isMuted = !this.isMuted;
     if (this.localAudioStream) {
       this.localAudioStream.getAudioTracks().forEach((t) => { t.enabled = !this.isMuted; });
+    }
+    // Re-establish outbound calls when unmuting so peers that joined
+    // while we were muted (or before we got a mic) still receive audio.
+    if (!this.isMuted) {
+      for (const peerId of this.peers) this.callPeerForAudio(peerId);
     }
     return this.isMuted;
   }
@@ -1562,6 +1995,11 @@ export class NetworkService {
       }
       this.localAudioStream = stream;
       stream.getAudioTracks().forEach(t => { t.enabled = !this.isMuted; });
+      // Tear down old calls so the new stream is actually used.
+      for (const call of this.mediaConns.values()) {
+        try { call.removeAllListeners(); call.close(); } catch { /* noop */ }
+      }
+      this.mediaConns.clear();
       for (const peerId of this.peers) this.callPeerForAudio(peerId);
       return true;
     } catch (err) {
@@ -1610,12 +2048,20 @@ export class NetworkService {
       try { call.removeAllListeners(); call.close(); } catch { /* noop */ }
     }
     this.mediaConns.clear();
+    this.pendingMediaCalls.clear();
 
     // Same for data connections.
     for (const conn of this.dataConns.values()) {
       try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
     }
     this.dataConns.clear();
+
+    // Same for realtime connections.
+    for (const conn of this.realtimeConns.values()) {
+      try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
+    }
+    this.realtimeConns.clear();
+    this.pendingRealtimeEnvelopes.clear();
 
     // Phase 3A: tear down binary channels (Phase 3A video streams).
     // Distinct from dataConns because they're not routed through
@@ -1624,11 +2070,23 @@ export class NetworkService {
       try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
     }
     this.binaryConns.clear();
+    // Phase 3B: tear down asset-binary channels.
+    for (const conn of this.assetBinaryConns.values()) {
+      try { conn.removeAllListeners(); conn.close(); } catch { /* noop */ }
+    }
+    this.assetBinaryConns.clear();
+    this.pendingAssetBinaryRequests.clear();
     // Pending one-shot listeners we're never going to satisfy (the
     // peer is gone). Clear so a fresh session doesn't accidentally
     // fire on the very first video of the new room against a peer
     // whose peerId collides with a stale one from the previous room.
     this.inboundBinaryListeners.clear();
+
+    // Drop any in-flight reassembly / transfer state so a fresh
+    // session can't be polluted by stale chunks from the previous room.
+    this.hostedAssets.clear();
+    this.chunkedMessages.clear();
+    this.pendingEnvelopes.clear();
 
     if (this.peer && !this.peer.destroyed) {
       // Peer.destroy() unregisters from the broker and tears down
@@ -1639,6 +2097,10 @@ export class NetworkService {
       this.peer = null;
     }
 
+    this.onRoleCallbacks.clear();
+    this.onModerationCallbacks.clear();
+    this.onP2PChunkDataCallbacks.clear();
+    this.onPendingSpawnCallbacks.clear();
     this.peers.clear();
     this.peerRoles.clear();
     this.peerNames.clear();
@@ -1717,8 +2179,8 @@ export class NetworkService {
     return () => this.onRoleCallbacks.delete(cb);
   }
   public onModerationAction(cb: (data: ModerationActionPayload) => void): () => void {
-    this.onModCallbacks.add(cb);
-    return () => this.onModCallbacks.delete(cb);
+    this.onModerationCallbacks.add(cb);
+    return () => this.onModerationCallbacks.delete(cb);
   }
   public onPendingSpawn(cb: (data: PendingSpawnData) => void): () => void {
     this.onPendingSpawnCallbacks.add(cb);
@@ -1856,4 +2318,70 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
+}
+
+// =============================================================================
+// Asset-binary chunk framing
+// =============================================================================
+//
+// Oversized assets are transferred over a dedicated raw-binary
+// DataConnection. Each chunk is prefixed with a small fixed header:
+//   - 4 bytes magic ('NEXA' as little-endian uint32)
+//   - 4 bytes assetId length
+//   - 4 bytes start offset
+//   - 4 bytes end offset
+//   - assetId UTF-8 bytes
+//   - raw chunk bytes
+// This avoids base64 expansion and JSON.stringify overhead, which is
+// what crashes Quest on large fileData payloads.
+
+const ASSET_BINARY_MAGIC = 0x4E455841; // 'NEXA'
+// Maximum bytes the host will return in a single asset-binary chunk.
+// Keeps each WebRTC message well under the 64 KB JSON chunk ceiling
+// and avoids a single reply from bloating the SCTP send buffer.
+const MAX_ASSET_BINARY_CHUNK_BYTES = 256 * 1024;
+
+function encodeAssetBinaryChunk(
+  id: string,
+  start: number,
+  end: number,
+  source: ArrayBuffer,
+  sourceOffset: number,
+  sourceLength: number
+): ArrayBuffer {
+  const idBytes = new TextEncoder().encode(id);
+  const headerSize = 16 + idBytes.length;
+  const total = headerSize + sourceLength;
+  const buf = new ArrayBuffer(total);
+  const view = new DataView(buf);
+  let offset = 0;
+  view.setUint32(offset, ASSET_BINARY_MAGIC, true); offset += 4;
+  view.setUint32(offset, idBytes.length, true); offset += 4;
+  view.setUint32(offset, start, true); offset += 4;
+  view.setUint32(offset, end, true); offset += 4;
+  const u8 = new Uint8Array(buf);
+  u8.set(idBytes, offset);
+  offset += idBytes.length;
+  u8.set(new Uint8Array(source, sourceOffset, sourceLength), offset);
+  return buf;
+}
+
+function decodeAssetBinaryChunk(buf: ArrayBuffer): P2PChunkData {
+  const view = new DataView(buf);
+  let offset = 0;
+  const magic = view.getUint32(offset, true); offset += 4;
+  if (magic !== ASSET_BINARY_MAGIC) {
+    throw new Error(`Invalid asset-binary magic: 0x${magic.toString(16)}`);
+  }
+  const idLen = view.getUint32(offset, true); offset += 4;
+  const start = view.getUint32(offset, true); offset += 4;
+  const end = view.getUint32(offset, true); offset += 4;
+  if (offset + idLen > buf.byteLength) {
+    throw new Error('Asset-binary header claims id length beyond buffer');
+  }
+  const idBytes = new Uint8Array(buf, offset, idLen);
+  const id = new TextDecoder().decode(idBytes);
+  offset += idLen;
+  const data = buf.slice(offset);
+  return { id, start, end, data };
 }

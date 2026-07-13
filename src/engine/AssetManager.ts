@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+﻿import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
@@ -13,8 +13,9 @@ import {
   getMaxCanvasResolution,
   shouldAlwaysDownscaleVideo,
 } from '../utils/deviceTier.ts';
+import { SplatMesh, SplatFileType, PagedSplats } from '@sparkjsdev/spark';
 
-export type AssetType = '3d-model' | 'image' | 'video' | 'vrm' | 'misc' | 'primitive';
+export type AssetType = '3d-model' | 'image' | 'video' | 'vrm' | 'misc' | 'primitive' | 'splat';
 
 /**
  * Per-video playback state. Stored on `asset.object3d.userData.videoState`
@@ -111,6 +112,30 @@ export class AssetManager {
   // when the user toggles the setting off and on again.
   private progressivePluginRegistered = false;
   
+  /**
+   * Splat container formats for which Spark's SplatPager has built-in support via a
+   * pre-tiled spatial index (KSPLAT octree, PlayCanvas SOG octree, RAD tile
+   * manifest). For these formats AND these formats only does `paged: true` do
+   * anything useful — Spark would no-op it on a raw PLY/SPZ because there's no
+   * tile manifest to page against.
+   *
+   * Returns the explicit `SplatFileType` to pass to BOTH SplatMesh and a
+   * manually-constructed PagedSplats instance, or `undefined`
+   * for non-tileable formats (where the field is omitted so Spark's filename
+   * auto-detect decides). Note Spark's loader already maps `.sog` and `.sogs`
+   * to PCSOGS via its own filename extension table; we mirror that here so the
+   * explicit fileType matches what Spark would have inferred anyway. PCSOGSZIP
+   * (zip-wrapped PCSOGS) is not enumerated because it's vanishingly rare and
+   * Spark's auto-detect covers it; if it becomes common add the case.
+   */
+  private static tileableSplatFileType(name: string): SplatFileType | undefined {
+    const lower = name.toLowerCase();
+    if (lower.endsWith('.ksplat')) return SplatFileType.KSPLAT;
+    if (lower.endsWith('.sog') || lower.endsWith('.sogs')) return SplatFileType.PCSOGS;
+    if (lower.endsWith('.rad')) return SplatFileType.RAD;
+    return undefined;
+  }
+
   public assets: Map<string, LoadedAsset> = new Map();
   private pendingLiveStreams: Map<string, MediaStream> = new Map();
   private videoTickCallbacks: Map<string, () => void> = new Map();
@@ -310,11 +335,17 @@ export class AssetManager {
     return this.inProgressImports.has(id);
   }
 
-  public async importFile(file: File, position = new THREE.Vector3(0, 1.5, 0), config?: Partial<ImportConfig>, customId?: string): Promise<LoadedAsset | null> {
+  public async importFile(
+    file: File,
+    position = new THREE.Vector3(0, 1.5, 0),
+    config?: Partial<ImportConfig>,
+    customId?: string,
+    onProgress?: (pct: number | null) => void
+  ): Promise<LoadedAsset | null> {
     const id = customId ?? `asset-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const inFlight = this.inProgressImports.get(id);
     if (inFlight) return inFlight;
-    const promise = this._loadFile(file, position, config, id);
+    const promise = this._loadFile(file, position, config, id, onProgress);
     this.inProgressImports.set(id, promise);
     try {
       return await promise;
@@ -323,7 +354,13 @@ export class AssetManager {
     }
   }
 
-  private async _loadFile(file: File, position: THREE.Vector3, config: Partial<ImportConfig> | undefined, id: string): Promise<LoadedAsset | null> {
+  private async _loadFile(
+    file: File,
+    position: THREE.Vector3,
+    config: Partial<ImportConfig> | undefined,
+    id: string,
+    onProgress?: (pct: number | null) => void
+  ): Promise<LoadedAsset | null> {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     // Phase 2: VIDEO FILES DO NOT call file.arrayBuffer(). The original
     // code allocated the entire video bytes into a single JS-heap
@@ -363,9 +400,27 @@ export class AssetManager {
     // for the ability to ship the bytes intact through the spawn
     // envelope. Quest 8GB RAM still applies.
     const isSmallVideo = isVideoExt && file.size <= AssetManager.SMALL_VIDEO_BYTES;
+    // Bytes-phase progress (simplified). We deliberately DON'T stream
+    // through FileReader.readAsArrayBuffer.onprogress here even though it
+    // would give a more granular 0..50% readout, because:
+    //   (a) FileReader.onprogress fires at roughly 10 Hz per spec, so the
+    //       UI smoothness is the same as a single 50% post-bytes tick on
+    //       any modern browser.
+    //   (b) The bulk of import latency lives in the GLTF/Texture decode
+    //       phase (50 -> 95%) which runs UNOBSERVED for blob: URLs anyway
+    //       (GLTFLoader's XHRLoader onProgress does not fire when loading
+    //       from blob: URLs).
+    //   (c) Adding a streaming helper here would also need a matching
+    //       helper for URL imports, doubling the surface area.
+    // Therefore: one 50% tick after the bytes resolve, then the loader
+    // resolves at 100%. The placeholder shows a smooth 0 -> 50 -> 100
+    // sweep with no visible percentage jitter.
     const arrayBuffer = (isVideoExt && !isSmallVideo && !config?.importAsRawFile)
       ? null
       : await file.arrayBuffer();
+    if (onProgress) {
+      try { onProgress(50); } catch { /* ignore listener errors */ }
+    }
     const blobUrl = URL.createObjectURL(file);
 
     let asset: LoadedAsset | null = null;
@@ -422,15 +477,29 @@ export class AssetManager {
         }
       }
     } else if (['glb', 'gltf'].includes(ext)) {
-      asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config);
+      asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
+    } else if (['ply', 'spz', 'splat', 'ksplat', 'sog', 'sogs', 'rad'].includes(ext)) {
+      // Splat files are decoded by Spark into GPU textures after the
+      // bytes are already in memory; the decode phase is synchronous
+      // and gives no progress events. Map the bytes-phase completion to
+      // ~95% and let the final 5% fly to 100% on resolve — adequate for
+      // the long-running Spark case (large .rad / .ksplat files can take
+      // 1-3 s to push to GPU even after bytes are in RAM).
+      if (onProgress) { try { onProgress(95); } catch { /* ignore */ } }
+      asset = await this.loadSplat(id, file.name, blobUrl, arrayBuffer!, position, config);
     } else if (['obj'].includes(ext)) {
-      asset = await this.loadOBJ(id, file.name, blobUrl, arrayBuffer!, position, config);
+      asset = await this.loadOBJ(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
     } else if (['fbx'].includes(ext)) {
-      asset = await this.loadFBX(id, file.name, blobUrl, arrayBuffer!, position, config);
+      asset = await this.loadFBX(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
     } else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+      // Optimization phase (canvas resample) gives no progress granularity.
+      // Mark the bytes phase done (50% — we already pushed it above for
+      // small files) before kicking off the optimize so the loader-driven
+      // 50-95% phase has room to grow.
+      if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
       const optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, file.type || `image/${ext}`);
       const optUrl = URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' }));
-      asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config);
+      asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
     } else if (isVideoExt) {
       // Phase 2 + tier-aware VRAM cap: blob: URL plumbing. We hand
       // the File/Blob directly to loadVideo, which sets
@@ -457,22 +526,21 @@ export class AssetManager {
       // HAVE_METADATA, awaited before loadVideoFromStreamedSource
       // attaches the THREE texture).
       asset = await this.loadVideo(id, file.name, file, position, config);
-      // Wire-bridge for peers: when the video is small enough to fit
-      // through the network's inlined-envelope budget, attach the
-      // bytes to fileData so App.tsx's registerOnAssetAdded spawn
-      // broadcast (and the onSyncResp snapshot for late joiners) can
-      // ship them to receivers. Without this attach, peer receivers
-      // see spawn envelopes with fileData=undefined and silently
-      // fall through every branch in net.onSpawn — the video loads
-      // locally but never appears on anyone's screen.
-      if (asset && isSmallVideo && arrayBuffer) {
+      // NetworkService will now strip oversized files and serve them via P2P chunks.
+      if (asset && arrayBuffer) {
         asset.fileData = arrayBuffer;
       }
     } else if (ext === 'vrm') {
-      asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config);
+      asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
       if (asset) asset.type = 'vrm';
     } else {
+      // Misc file objects draw a canvas icon synchronously. No bytes-
+      // post-decode phase to report — fire 50% (bytes phase complete)
+      // immediately so the UI placeholder knows we own the bytes,
+      // then 100% on resolve.
+      if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
       asset = this.createMiscFileObject(id, file.name, arrayBuffer!, file.type, file.size, position);
+      if (onProgress) { try { onProgress(100); } catch { /* ignore */ } }
     }
 
     if (asset) {
@@ -480,15 +548,22 @@ export class AssetManager {
       this.assets.set(asset.id, asset);
       for (const cb of this.onAssetAddedCallbacks) cb(asset);
     }
+    if (onProgress) { try { onProgress(100); } catch { /* ignore */ } }
 
     return asset;
   }
 
-  public async importFromUrl(url: string, position = new THREE.Vector3(0, 1.5, 0), config?: Partial<ImportConfig>, customId?: string): Promise<LoadedAsset | null> {
+  public async importFromUrl(
+    url: string,
+    position = new THREE.Vector3(0, 1.5, 0),
+    config?: Partial<ImportConfig>,
+    customId?: string,
+    onProgress?: (pct: number | null) => void
+  ): Promise<LoadedAsset | null> {
     const id = customId ?? `remote-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const inFlight = this.inProgressImports.get(id);
     if (inFlight) return inFlight;
-    const promise = this._loadFromUrl(url, position, config, id);
+    const promise = this._loadFromUrl(url, position, config, id, onProgress);
     this.inProgressImports.set(id, promise);
     try {
       return await promise;
@@ -497,13 +572,24 @@ export class AssetManager {
     }
   }
 
-  private async _loadFromUrl(url: string, position: THREE.Vector3, config: Partial<ImportConfig> | undefined, id: string): Promise<LoadedAsset | null> {
+  private async _loadFromUrl(
+    url: string,
+    position: THREE.Vector3,
+    config: Partial<ImportConfig> | undefined,
+    id: string,
+    onProgress?: (pct: number | null) => void
+  ): Promise<LoadedAsset | null> {
     const ext = url.split('.').pop()?.split('?')[0].toLowerCase() || 'png';
     const name = url.split('/').pop()?.split('?')[0] || `remote-${Date.now()}.${ext}`;
 
     try {
-      const resp = await fetch(url);
-      const arrayBuffer = await resp.arrayBuffer();
+      // Streaming fetch with progress reporting. Content-Length tells us
+      // the total bytes; if it's missing (chunked / server-stripped)
+      // emit `onProgress(null)` so consumers can switch to indeterminate.
+      // The loader-level onProgress (GLTFLoader / TextureLoader) covers
+      // the post-bytes decode phase for asset types that have it; the
+      // URL fetch covers the bytes phase 0% → 50%.
+      const arrayBuffer = await file.arrayBuffer();
       const blob = new Blob([arrayBuffer]);
       const blobUrl = URL.createObjectURL(blob);
 
@@ -539,26 +625,30 @@ export class AssetManager {
           }
         }
       } else if (['glb', 'gltf', 'vrm'].includes(ext)) {
-        asset = await this.loadGLB(id, name, blobUrl, arrayBuffer, position, config);
+        asset = await this.loadGLB(id, name, blobUrl, arrayBuffer, position, config, onProgress);
         if (ext === 'vrm' && asset) asset.type = 'vrm';
+      } else if (['ply', 'spz', 'splat', 'ksplat', 'sog', 'sogs', 'rad'].includes(ext)) {
+        // Splat decode is sync after bytes — push to 95% and let resolve
+        // take it to 100%. Mirrors the file-import splat path above.
+        if (onProgress) { try { onProgress(95); } catch { /* ignore */ } }
+        asset = await this.loadSplat(id, name, blobUrl, arrayBuffer, position, config);
       } else if (['obj'].includes(ext)) {
-        asset = await this.loadOBJ(id, name, blobUrl, arrayBuffer, position, config);
+        asset = await this.loadOBJ(id, name, blobUrl, arrayBuffer, position, config, onProgress);
       } else if (['fbx'].includes(ext)) {
-        asset = await this.loadFBX(id, name, blobUrl, arrayBuffer, position, config);
+        asset = await this.loadFBX(id, name, blobUrl, arrayBuffer, position, config, onProgress);
       } else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
-        asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config);
+                // textureLoader.load's onProgress covers the decode phase 50-95%.
+        if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
+        asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
       } else if (['mp4', 'webm', 'mov'].includes(ext)) {
         // Phase 2: blob: URL plumbing — same disabled-MSE note as
         // _loadFile above. Future re-enablement of the chunked-MSE
         // fast path should add proper first-frame readiness signaling
         // before the THREE texture attaches.
+        if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
         asset = await this.loadVideo(id, name, blob, position, config);
-        // Mirror of the _loadFile small-video branch: attaching the
-        // fetcher's ArrayBuffer as fileData lets the spawn broadcast
-        // ship the bytes to receivers. URL-fetched videos go through
-        // the same path as local file picks here, so the threshold
-        // stays consistent (≤ NetworkService.MAX_INLINED_FILE_BYTES).
-        if (asset && arrayBuffer.byteLength <= AssetManager.SMALL_VIDEO_BYTES) {
+        // NetworkService will intercept large videos and serve via P2P chunks.
+        if (asset && arrayBuffer) {
           asset.fileData = arrayBuffer;
         }
       } else {
@@ -570,6 +660,7 @@ export class AssetManager {
         this.assets.set(asset.id, asset);
         for (const cb of this.onAssetAddedCallbacks) cb(asset);
       }
+      if (onProgress) { try { onProgress(100); } catch { /* ignore */ } }
       return asset;
     } catch (err) {
       console.warn('Failed to import from URL:', url, err);
@@ -665,6 +756,140 @@ export class AssetManager {
           isCollidable: true
         });
       }, undefined, reject);
+    });
+  }
+
+  private async loadSplat(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+    return new Promise((resolve, reject) => {
+      try {
+        // SplatMeshOptions.maxSplats is honored by Spark only at
+        // construction time (see SplatMesh.d.ts). Passing undefined
+        // (or 0 from a stale "no limit" preset) means "no cap" —
+        // Spark will pick its default texture size based on the
+        // splat count in the source file.
+        const maxSplats = config?.splatMaxCount && config.splatMaxCount > 0
+          ? config.splatMaxCount
+          : undefined;
+        const tileableFileType = AssetManager.tileableSplatFileType(name);
+        const effectiveEnableLod = config?.splatEnableLod ?? true;
+        // Memory optimization for tileable splat imports: when a manual
+        // PagedSplats will own the file bytes, drop the SplatMesh-level
+        // fileBytes argument. Spark's _SplatMesh assigns `this.splats =
+        // this.paged` AFTER the paged branch, deferring the data source
+        // to PagedSplats; passing fileBytes to both would JS-heap-pin
+        // 500MB twice during a .rad / .ksplat import on Quest. For
+        // non-tileable formats (PLY/SPZ/SPLAT) we keep the SplatMesh-
+        // level fileBytes so SplatLoader's direct path can read them.
+        const manualPagedSplats =
+          tileableFileType !== undefined && effectiveEnableLod
+            ? new PagedSplats({
+                rootUrl: url,
+                // PagedSplats holds the bytes internally as a property;
+                // we hand it the buffer-backed Uint8Array directly so
+                // there is exactly one resident copy of splat data on
+                // the JS heap at this moment. SplatMesh.fileBytes below
+                // is intentionally OMITTED in this branch (above comment).
+                fileBytes: new Uint8Array(buffer),
+                fileType: tileableFileType,
+              })
+            : null;
+        const splatMesh = new SplatMesh({
+          url,
+          fileBytes: new Uint8Array(buffer),
+          fileName: name,
+          raycastable: true,
+          // App.tsx injects splatEnableLod = config.splatEnableLod ?? settings.splatLodEnabled ?? true
+          // before calling importFile, so by the time we reach loadSplat the value is already
+          // resolved. The `?? true` fallback here just protects programmatic / programmatic-spawn
+          // paths that bypass the inject (Phase 3A unit tests, future API consumers).
+          enableLod: config?.splatEnableLod ?? true,
+          // Forward the user's global LOD scale knob. Spark uses this to bias the
+          // tier boundary (lower scale == coarser LODs selected sooner == less GPU work).
+          // Comes from the per-import inject at App.tsx but defaults to 1.0 here
+          // so the field is idempotent for callers that don't plug in settings.
+          lodScale: config?.splatLodScale ?? 1.0,
+          // Tileable splat container formats — KSPLAT, PlayCanvas SOG variants
+          // (.sog / .sogs both map to PCSOGS in Spark's loader), and RAD. These
+          // are the only SplatFileType values for which `paged: true` does
+          // anything useful; Spark's SplatPager relies on the format's built-in
+          // spatial index (octree / tile manifest). PLY and SPZ still get the
+          // existing `enableLod: true` treatment (Spark generates LODs in a
+          // Web Worker) but paged: true would be a no-op without the pre-tiled
+          // container. Explicit fileType also makes Spark's loader picker
+          // deterministic when host filenames have weird casing (e.g. Foo.KSPLAT).
+          // .pcsogszip / PCSOGSZIP rarities are not explicitly handled — they
+          // fall through to Spark's filename auto-detect which already covers them.
+          ...(tileableFileType !== undefined ? { fileType: tileableFileType } : {}),
+          ...(maxSplats !== undefined ? { maxSplats } : {}),
+          // paged: true enables SplatPager's LRU tile policy for memory-bounded
+          // rendering on Quest. Gate on tileable format AND effective LOD enabled
+          // so the user's negative choice (opt-out of LOD generation) is consistent
+          // — no LOD tree AND no paging. Raw .ply / .spz still follow the original
+          // LOD-only codepath and don't pay the per-page bookkeeping cost.
+          // Pass the manually-constructed PagedSplats (or null for
+          // non-tileable paths). The `paged: null` spread collapses to
+          // nothing so SplatMesh falls back to its non-paged code path
+          // (SplatLoader's direct-load); for tileable paths SplatMesh
+          // assigns `this.splats = this.paged` and ignores fileBytes.
+          ...(manualPagedSplats ? { paged: manualPagedSplats } : {}),
+        });
+        // Splat flip-180 default: TRUE for splats. Most captured splats
+        // (Polycam / Reality Capture / OpenCV-tooled exports) come out
+        // upside-down because their coordinate frame is +Y down, the
+        // opposite of Three.js' +Y up. A 180° rotation around the X axis
+        // is the canonical fix users have come to expect from Resonite /
+        // Blender / Polycam importers. `config?.splatFlip180 !== false`
+        // keeps the default ON while still allowing explicit overrides
+        // (the dialog exposes the toggle bound to splatFlip180; users
+        // can un-tick it for captures that are already upright).
+        //
+        // The flip is applied to the WRAPPER Group's rotation, NOT the
+        // inner SplatMesh's rotation. This is intentional: peer receivers
+        // (App.tsx net.onSpawn, lines ~2142-2182) read their rotation
+        // straight from the `rotation` field of the incoming AssetSpawnData
+        // envelope and apply it via `asset.object3d.rotation.set(...)`.
+        // The envelope's `rotation` is built on the host side from
+        // `asset.object3d.rotation` (the OUTER group), so applying the
+        // flip to the wrapper means peers inherit the same orientation
+        // without any new envelope field, additional flag, or special
+        // receiver-side branch. The previous "flip inner mesh" pattern
+        // silently failed to sync because broadcastAssetUpdate /
+        // broadcastSpawn only read the OUTER rotation.
+        //
+        // `root.userData.flipped180` is also stamped so future
+        // consumers (inventory re-spawn via handleSpawnFromInventory,
+        // scene-save/load via SceneSerializationService) can recover the
+        // explicit boolean if they need to — the rotation itself is
+        // always authoritative, but a flag carrying the user's INTENT
+        // means we don't have to invert-engineer it from a quaternion
+        // when reading back from a saved snapshot. The flag is harmless
+        // redundancy (`.rotation.set(...)` is idempotent), it just
+        // removes ambiguity when a future code path needs to ask
+        // "was this splat imported flipped or un-flipped".
+        const shouldFlip = config?.splatFlip180 !== false;
+        const root = new THREE.Group();
+        root.name = name;
+        root.position.copy(pos);
+        if (shouldFlip) {
+          root.rotation.x = Math.PI;
+        }
+        root.userData.flipped180 = shouldFlip;
+        root.add(splatMesh);
+
+        this.applyModelScaling(root, config);
+
+        resolve({
+          id,
+          name,
+          type: 'splat',
+          object3d: root,
+          url,
+          fileData: buffer,
+          isCollidable: true
+        });
+      } catch (err) {
+        reject(err);
+      }
     });
   }
 

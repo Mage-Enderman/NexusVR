@@ -1,0 +1,91 @@
+5190:                 ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
+5191:                 : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
+5192:               }
+5193:               {/* Subtle pulse ring on panel hover */}
+5194:               {overPanel && (
+5195:                 <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
+5196:               )}
+5197:             </svg>
+5198:           );
+5199:         })()}
+5200:       </div>
+5201: 
+5202:       {/* Top Glass Navigation Bar */}
+5203:       <Navbar
+5204:         mode={mode}
+5205:         roomId={roomId}
+5206:         peerCount={peerCount}
+5207:         isHost={isHost}
+5208:         cameraMode={cameraMode}
+5209:         onToggleCameraMode={handleToggleCameraMode}
+5210:         onOpenWorldEnv={() => setShowWorldEnvModal(true)}
+5211:         onOpenSaveLoad={() => setShowSaveLoadModal(true)}
+5212:         onOpenShare={() => { setShareModalTab('multiplayer'); setShowShareModal(true); }}
+5213:         onOpenPairing={() => { setShareModalTab('pairing'); setShowShareModal(true); }}
+5214:         onOpenDashMenu={() => {
+5215:           inventoryServiceRef.current.getItems().then((items) => {
+5216:             setInventoryItems(items);
+5217:             if (sceneEngineRef.current?.renderer.xr.isPresenting) {
+5218:               vrHudRef.current?.setItems(items);
+5219:               vrHudRef.current?.toggle();
+5220:             } else {
+5221:               setShowDashMenu(true);
+5222:             }
+5223:           });
+5224:         }}
+5225:         onOpenSettings={() => setShowSettingsModal(true)}
+5226:         onToggleChat={() => { setShowChatPanel(!showChatPanel); setUnreadChatCount(0); }}
+5227:         onEnterVR={() => sceneEngineRef.current?.enterVR()}
+5228:         unreadChatCount={unreadChatCount}
+5229:       />
+5230: 
+5231:       {/* First-Person HUD stack — a single flex column anchors the
+5232:           locomotion banner AND the equipped-tool chip so they stack
+5233:           with a guaranteed `gap-2` clearance regardless of banner
+5234:           height (the banner's content can wrap on narrow viewports, placeholderId, onProgress)asset = await assetManager.importFile(file, pos);
+5235:       if (asset) {
+5236:         if (item.materialState) {
+5237:           AssetManager.applyMaterialUpdate(asset, item.materialState);
+5238:           broadcastInventoryMaterialState(asset.id, item.materialState);
+5239:         }
+5240:         if (!item.previewUrl) {
+5241:           generateAssetThumbnail(asset).then((url) => {
+5242:             if (url) {
+5243:               item.previewUrl = url;
+5244:               inventoryServiceRef.current.saveItem(item);
+5245:             }
+5246:           });
+5247:         }
+5248:         if (asset.type !== 'video') {
+5249:           manipulationManagerRef.current?.selectAsset(asset);
+5250:         } else {
+5251:           setActiveVideoAssetId(asset.id);
+5252:           resetVideoInactivityTimer();
+5253:         }
+5254:         recordSpawnUndo(asset);
+5255:       }
+5256:     } else if (item.url) {
+5257:       // Remote URL item
+5258:       const response = await fetch(item.url);
+5259:       const blob = await response.blob();
+5260:       const file = new File([blob], item.name);
+5261:       const asset = await assetManager.importFile(file, pos);
+5262:       if (asset) {
+5263:         if (item.materialState) {
+5264:           AssetManager.applyMaterialUpdate(asset, item.materialState);
+5265:           broadcastInventoryMaterialState(asset.id, item.materialState);
+5266:         }
+5267:         if (!item.previewUrl) {
+5268:           generateAssetThumbnail(asset).then((url) => {
+5269:             if (url) {
+5270:               item.previewUrl = url;
+5271:               inventoryServiceRef.current.saveItem(item);
+5272:             }
+5273:           });
+5274:         }
+5275:         if (asset.type !== 'video') {
+5276:           manipulationManagerRef.current?.selectAsset(asset);
+5277:         } else {
+5278:           setActiveVideoAssetId(asset.id);
+5279:           resetVideoInactivityTimer();
+5280:         }

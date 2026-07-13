@@ -1,0 +1,86 @@
+4925:       if (net.mode !== 'offline') {
+4926:         net.broadcastPendingCancel(placeholderId);
+4927:       }
+4928:       console.warn('[Import] Failed:', err);
+4929:     }
+4930:   };
+4931: 
+4932:   const handleSpawnFromInventory = async (item: InventoryItem) => {
+4933:     const assetManager = assetManagerRef.current;
+4934:     if (!assetManager) return;
+4935: 
+4936:     if (item.type === 'tool') {
+4937:       setActiveTool((item.toolType as ToolType) || 'dev');
+4938:       setShowToolsPanel(true);
+4939:       setShowInventoryModal(false);
+4940:       setShowDashMenu(false);
+4941:       return;
+4942:     }
+4943: 
+4944:     const pos = getSpawnPositionInFrontOfUser(2.0);
+4945:     
+4946:     const broadcastInventoryMaterialState = (targetId: string, matState: any) => {
+4947:       if (!matState) return;
+4948:       const mats = Array.isArray(matState)
+4949:         ? matState
+4950:         : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+4951:         ? Object.values(matState)
+4952:         : [matState];
+4953:       mats.forEach((m: any) => {
+4954:         networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: targetId });
+4955:       });
+4956:     };
+4957: 
+4958:     if (item.type === 'primitive' && item.primitiveType) {
+4959:       const prim = assetManager.spawnPrimitive(item.primitiveType, pos);
+4960:       if (prim && item.materialState) {
+4961:         AssetManager.applyMaterialUpdate(prim, item.materialState);
+4962:         broadcastInventoryMaterialState(prim.id, item.materialState);
+4963:       }
+4964:       if (prim && !item.previewUrl) {
+4965:         generateAssetThumbnail(prim).then((url) => {
+4966:           if (url) {
+4967:             item.previewUrl = url;
+4968:             inventoryServiceRef.current.saveItem(item);
+4969:           }
+4970:         });
+4971:       }
+4972:       manipulationManagerRef.current?.selectAsset(prim);
+4973:       if (prim) recordSpawnUndo(prim);
+4974:     } else if (item.fileData) {
+4975:       const blob = new Blob([item.fileData], { type: item.metadata?.mimeType || 'application/octet-stream' });
+4976:       const file = new File([blob], item.name);
+4977:       const asset = await assetManager.importFile(file, pos);
+4978:       if (asset) {
+4979:         if (item.materialState) {
+4980:           AssetManager.applyMaterialUpdate(asset, item.materialState);
+4981:           broadcastInventoryMaterialState(asset.id, item.materialState);
+4982:         }
+4983:         if (!item.previewUrl) {
+4984:           generateAssetThumbnail(asset).then((url) => {
+4985:             if (url) {
+4986:               item.previewUrl = url;
+4987:               inventoryServiceRef.current.saveItem(item);
+4988:             }
+4989:           });
+4990:         }
+4991:         if (asset.type !== 'video') {
+4992:           manipulationManagerRef.current?.selectAsset(asset);
+4993:         } else {
+4994:           setActiveVideoAssetId(asset.id);
+4995:           resetVideoInactivityTimer();
+4996:         }
+4997:         recordSpawnUndo(asset);
+4998:       }
+4999:     } else if (item.url) {
+5000:       // Remote URL item
+5001:       const response = await fetch(item.url);
+5002:       const blob = await response.blob();
+5003:       const file = new File([blob], item.name);
+5004:       const asset = await assetManager.importFile(file, pos);
+5005:       if (asset) {
+5006:         if (item.materialState) {
+5007:           AssetManager.applyMaterialUpdate(asset, item.materialState);
+5008:           broadcastInventoryMaterialState(asset.id, item.materialState);
+5009:         }
+5010:         if (!item.previewUrl) {
