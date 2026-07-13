@@ -1,16 +1,62 @@
-2:46:22 PM [vite] Internal server error: Transform failed with 1 error:
+D:\0-Antigravity\NexusVR\NexusVR>npm run build
 
-[PARSE_ERROR] Unexpected token
-     ╭─[ src/engine/AssetManager.ts:412:12 ]
-     │
- 412 │     const  = file.size >= 1024 * 1024 && !isVideoExt;
-     │            ┬
-     │            ╰──
-─────╯
+> vr-modelviewer-web@0.0.0 build
+> tsc -b && vite build
 
-  Plugin: vite:oxc
-  File: D:/0-Antigravity/NexusVR/NexusVR/src/engine/AssetManager.ts
-      at transformWithOxc (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:3661:19)
-      at TransformPluginContext.transform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:3732:26)
-      at EnvironmentPluginContainer.transform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:29745:51)
-      at async loadAndTransform (file:///D:/0-Antigravity/NexusVR/NexusVR/node_modules/vite/dist/node/chunks/node.js:19729:26)
+src/engine/AssetManager.ts:480:90 - error TS2554: Expected 5-6 arguments, but got 7.
+
+480       asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
+                                                                                             ~~~~~~~~~~
+
+src/engine/AssetManager.ts:491:90 - error TS2554: Expected 5-6 arguments, but got 7.
+
+491       asset = await this.loadOBJ(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
+                                                                                             ~~~~~~~~~~
+
+src/engine/AssetManager.ts:493:90 - error TS2554: Expected 5-6 arguments, but got 7.
+
+493       asset = await this.loadFBX(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
+                                                                                             ~~~~~~~~~~
+
+src/engine/AssetManager.ts:502:85 - error TS2554: Expected 5-6 arguments, but got 7.
+
+502       asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
+                                                                                        ~~~~~~~~~~
+
+src/engine/AssetManager.ts:534:90 - error TS2554: Expected 5-6 arguments, but got 7.
+
+534       asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
+                                                                                             ~~~~~~~~~~
+
+src/engine/AssetManager.ts:592:33 - error TS2552: Cannot find name 'file'. Did you mean 'File'?
+
+592       const arrayBuffer = await file.arrayBuffer();
+                                    ~~~~
+
+  node_modules/typescript/lib/lib.dom.d.ts:14440:13
+    14440 declare var File: {
+                      ~~~~
+    'File' is declared here.
+
+src/engine/AssetManager.ts:628:86 - error TS2554: Expected 5-6 arguments, but got 7.
+
+628         asset = await this.loadGLB(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+                                                                                         ~~~~~~~~~~
+
+src/engine/AssetManager.ts:636:86 - error TS2554: Expected 5-6 arguments, but got 7.
+
+636         asset = await this.loadOBJ(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+                                                                                         ~~~~~~~~~~
+
+src/engine/AssetManager.ts:638:86 - error TS2554: Expected 5-6 arguments, but got 7.
+
+638         asset = await this.loadFBX(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+                                                                                         ~~~~~~~~~~
+
+src/engine/AssetManager.ts:642:88 - error TS2554: Expected 5-6 arguments, but got 7.
+
+642         asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+                                                                                           ~~~~~~~~~~
+
+
+Found 10 errors.

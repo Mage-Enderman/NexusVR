@@ -589,7 +589,39 @@ export class AssetManager {
       // The loader-level onProgress (GLTFLoader / TextureLoader) covers
       // the post-bytes decode phase for asset types that have it; the
       // URL fetch covers the bytes phase 0% → 50%.
-      const arrayBuffer = await file.arrayBuffer();
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch URL: ${url} (${response.status} ${response.statusText})`);
+      }
+      const contentLength = response.headers.get('content-length');
+      const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+      let arrayBuffer: ArrayBuffer;
+      if (response.body && totalBytes !== null && onProgress) {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            received += value.byteLength;
+            const pct = Math.min(50, Math.round((received / totalBytes) * 50));
+            try { onProgress(pct); } catch { /* ignore */ }
+          }
+        }
+        const combined = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          combined.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        arrayBuffer = combined.buffer;
+      } else {
+        if (onProgress) { try { onProgress(null); } catch { /* ignore */ } }
+        arrayBuffer = await response.arrayBuffer();
+        if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
+      }
       const blob = new Blob([arrayBuffer]);
       const blobUrl = URL.createObjectURL(blob);
 
@@ -694,7 +726,7 @@ export class AssetManager {
     }
   }
 
-  private async loadGLB(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+  private async loadGLB(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>, _onProgress?: (pct: number | null) => void): Promise<LoadedAsset> {
     return new Promise((resolve, reject) => {
       this.gltfLoader.load(url, (gltf) => {
         const root = gltf.scene;
@@ -717,7 +749,7 @@ export class AssetManager {
     });
   }
 
-  private async loadOBJ(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+  private async loadOBJ(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>, _onProgress?: (pct: number | null) => void): Promise<LoadedAsset> {
     return new Promise((resolve, reject) => {
       this.objLoader.load(url, (root) => {
         root.position.copy(pos);
@@ -738,7 +770,7 @@ export class AssetManager {
     });
   }
 
-  private async loadFBX(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+  private async loadFBX(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>, _onProgress?: (pct: number | null) => void): Promise<LoadedAsset> {
     return new Promise((resolve, reject) => {
       this.fbxLoader.load(url, (root) => {
         root.position.copy(pos);
@@ -931,7 +963,7 @@ export class AssetManager {
     }
   }
 
-  private async loadImage(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+  private async loadImage(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>, _onProgress?: (pct: number | null) => void): Promise<LoadedAsset> {
     return new Promise((resolve, reject) => {
       this.textureLoader.load(url, (texture) => {
         texture.colorSpace = THREE.SRGBColorSpace;
