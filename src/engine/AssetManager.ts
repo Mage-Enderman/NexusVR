@@ -840,6 +840,11 @@ export class AssetManager {
           // Comes from the per-import inject at App.tsx but defaults to 1.0 here
           // so the field is idempotent for callers that don't plug in settings.
           lodScale: config?.splatLodScale ?? 1.0,
+          // Spark uses the `lod` option to decide whether to build the
+          // hierarchical LOD tree at import time. Without this flag, .ply
+          // and other non-tileable formats never generate LODs, so runtime
+          // `lodSplatCount` / `lodSplatScale` changes have no effect.
+          lod: config?.splatEnableLod ?? true,
           // Tileable splat container formats — KSPLAT, PlayCanvas SOG variants
           // (.sog / .sogs both map to PCSOGS in Spark's loader), and RAD. These
           // are the only SplatFileType values for which `paged: true` does

@@ -1,0 +1,611 @@
+diff --git a/dist/index.html b/dist/index.html
+index 8f2c373..6ec776e 100644
+--- a/dist/index.html
++++ b/dist/index.html
+@@ -9,7 +9,7 @@
+     <link rel="preconnect" href="https://fonts.googleapis.com">
+     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+-    <script type="module" crossorigin src="./assets/index-B1qtvLN5.js"></script>
++    <script type="module" crossorigin src="./assets/index-Ctk0TDsd.js"></script>
+     <link rel="modulepreload" crossorigin href="./assets/rolldown-runtime-QTnfLwEv.js">
+     <link rel="modulepreload" crossorigin href="./assets/three-vrm-g_h9pERO.js">
+     <link rel="modulepreload" crossorigin href="./assets/vendor-C1ZjFP5V.js">
+diff --git a/src/App.tsx b/src/App.tsx
+index 03c1636..c303a51 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,5 +1,6 @@
+ import React, { useEffect, useRef, useState, useCallback } from 'react';
+ import * as THREE from 'three';
++import { findObjectByUUID } from './utils/findObjectByUUID.ts';
+ import confetti from 'canvas-confetti';
+
+ import { SceneEngine } from './engine/SceneEngine.ts';
+@@ -10,7 +11,7 @@ import { ManipulationManager } from './engine/ManipulationManager.ts';
+ import type { TransformMode } from './engine/ManipulationManager.ts';
+ import { AvatarManager } from './engine/AvatarManager.ts';
+ import { NetworkService } from './services/NetworkService.ts';
+-import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate } from './services/NetworkService.ts';
++import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate, InspectorUpdateData } from './services/NetworkService.ts';
+ import { VideoStreamingService } from './services/VideoStreamingService.ts';
+
+ // Phase 3A: streaming threshold mirrors NetworkService.MAX_INLINED_FILE_BYTES
+@@ -49,7 +50,7 @@ import { RadialContextMenu } from './components/RadialContextMenu.tsx';
+ import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
+ import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
+ import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
+-import { DEFAULT_LIGHT_CONFIG } from './engine/ResoniteLightSync.ts';
++import { DEFAULT_LIGHT_CONFIG, removeLightComponent, syncThreeLightFromConfig } from './engine/ResoniteLightSync.ts';
+ import { X } from 'lucide-react';
+
+ /**
+@@ -305,6 +306,35 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
+   // being re-created every time showSceneInspector changes.
+   const showSceneInspectorRef = useRef(false);
+   showSceneInspectorRef.current = showSceneInspector;
++
++  // Bug fix — host→peer inspector object sync (Issue 2). The previous
++  // openInspectorFromLocal/closeInspectorFromLocal helpers used to call
++  // broadcastPanelState on every transition; an in-place refactor of
++  // App.tsx replaced those helpers with a direct setShowSceneInspector
++  // toggle and the panelstate broadcast was lost, so peers stopped
++  // mirroring the host's inspector open/close and selection state.
++  // This effect re-broadcasts on every showSceneInspector OR
++  // selectedAsset.id change so the host's inspector state propagates
++  // live. Receive handler's echo-suppression (drops envelopes whose
++  // originatorPeerId === localPeerId) makes the redundant broadcast on
++  // initial mount harmless apart from one envelope byte. We don't
++  // broadcast 'close' here — peers' mirrors stay open until they
++  // manually close, which is the gentler UX for the case where the
++  // host stops inspecting but a peer is still mid-edit.
++  useEffect(() => {
++    if (!showSceneInspector) return;
++    const ns = networkServiceRef.current;
++    if (!ns || ns.mode === 'offline') return;
++    ns.broadcastPanelState({
++      action: 'open',
++      panelId: 'inspector',
++      originatorPeerId: ns.localPeerId,
++      originatorUserName: userName,
++      originatorRole: localRole,
++      targetAssetId: selectedAsset?.id ?? null,
++      ts: Date.now(),
++    });
++  }, [showSceneInspector, selectedAsset?.id]);
+   // Set true by Ctrl+Shift+V keydown so the next paste event is treated as
+   // plain text (no URL / data-URI import handling). Cleared in handlePaste
+   // on the following paste event, or by a keyup safety net.
+@@ -2012,6 +2042,72 @@ const vrHud = new VRHUDManager(
+         const sel = selectedAssetRef.current;
+         if (sel && sel.id === update.assetId) {
+           setSelectedAsset({ ...asset });
++
++    // Apply generic inspector updates from peers (active, persistent, name,
++    // light config, component attach/detach, mesh enabled, hierarchy).
++    disposers.push(net.onInspectorUpdate((update) => {
++      if (update.senderPeerId === net.localPeerId) return;
++      const asset = assetManager.assets.get(update.assetId);
++      if (!asset) return;
++      const targetNode = update.nodeUuid
++        ? findObjectByUUID(asset.object3d, update.nodeUuid)
++        : asset.object3d;
++      if (!targetNode) return;
++
++      if (update.name !== undefined) {
++        asset.name = update.name;
++        targetNode.name = update.name;
++      }
++      if (update.active !== undefined) {
++        targetNode.visible = update.active;
++      }
++      if (update.persistent !== undefined) {
++        targetNode.userData.isPersistent = update.persistent;
++      }
++      if (update.meshEnabled !== undefined) {
++        targetNode.traverse((child) => {
++          if ((child as THREE.Mesh).isMesh) {
++            child.visible = update.meshEnabled!;
++          }
++        });
++      }
++      if (update.resoniteLight !== undefined) {
++        if (update.resoniteLight === null) {
++          removeLightComponent(targetNode);
++        } else {
++          syncThreeLightFromConfig(targetNode, { ...DEFAULT_LIGHT_CONFIG, ...update.resoniteLight });
++        }
++      }
++      if (update.rotatorSpeed !== undefined) {
++        targetNode.userData.rotatorSpeed = update.rotatorSpeed;
++      }
++      if (update.bobbingSpeed !== undefined) {
++        targetNode.userData.bobbingSpeed = update.bobbingSpeed;
++      }
++      if (update.hierarchyAction) {
++        const ha = update.hierarchyAction;
++        if (ha.type === 'insertParent') {
++          const newParent = new THREE.Group();
++          newParent.name = `Parent_of_${targetNode.name || 'Slot'}`;
++          if (ha.newNodeUuid) newParent.uuid = ha.newNodeUuid;
++          newParent.attach(targetNode);
++        } else if (ha.type === 'addChild') {
++          const newChild = new THREE.Group();
++          newChild.name = `Child_of_${targetNode.name || 'Slot'}`;
++          if (ha.newNodeUuid) newChild.uuid = ha.newNodeUuid;
++          newChild.position.set(0, 0.5, 0);
++          targetNode.add(newChild);
++        } else if (ha.type === 'parentToWorld') {
++          if (!sceneEngine?.worldRoot) return;
++          sceneEngine.worldRoot.attach(targetNode);
++        }
++      }
++
++      const sel = selectedAssetRef.current;
++      if (sel && sel.id === update.assetId) {
++        setSelectedAsset({ ...asset });
++      }
++    }));
+         }
+       }
+     });
+@@ -5009,6 +5105,13 @@ const vrHud = new VRHUDManager(
+         onBroadcastMaterial={(update) => {
+           networkServiceRef.current.broadcastMaterialUpdate(update);
+         }}
++        onBroadcastInspectorUpdate={(update: InspectorUpdateData) => {
++          networkServiceRef.current.broadcastInspectorUpdate(update);
++        }}
++        onBroadcastAssetUpdate={(asset) => {
++          networkServiceRef.current.broadcastAssetUpdate(asset);
++        }}
++        worldRoot={sceneEngineRef.current?.worldRoot ?? null}
+         onDeleteAsset={handleDeleteSelected}
+         onJumpToAsset={(asset) => {
+           if (sceneEngineRef.current) {
+diff --git a/src/components/SceneInspectorWindow.tsx b/src/components/SceneInspectorWindow.tsx
+index 3e0a966..d5d3144 100644
+--- a/src/components/SceneInspectorWindow.tsx
++++ b/src/components/SceneInspectorWindow.tsx
+@@ -1,8 +1,9 @@
+ import React, { useState, useEffect, useRef } from 'react';
+ import * as THREE from 'three';
++import { findObjectByUUID } from '../utils/findObjectByUUID.ts';
+ import { SpatialPopUpWrapper } from './SpatialPopUpWrapper.tsx';
+ import { AssetManager, type LoadedAsset } from '../engine/AssetManager.ts';
+-import type { MaterialUpdate } from '../services/NetworkService.ts';
++import type { MaterialUpdate, InspectorUpdateData } from '../services/NetworkService.ts';
+ import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
+ import { VideoControls } from './VideoControls.tsx';
+ import {
+@@ -23,6 +24,25 @@ export interface SceneInspectorWindowProps {
+   onSelectAsset?: (asset: LoadedAsset | null) => void;
+   onUpdateAsset: (asset: LoadedAsset) => void;
+   onBroadcastMaterial?: (update: MaterialUpdate) => void;
++  onBroadcastInspectorUpdate?: (update: InspectorUpdateData) => void;
++  /**
++   * Broadcast a transform-only update via the realtime `trans`
++   * channel. Wired by App.tsx to NetworkService.broadcastAssetUpdate,
++   * which encodes the asset's CURRENT transform (object3d.position
++   * / .rotation / .scale) into a TransformUpdate envelope that
++   * peers apply via ManipulationManager.applyRemoteTransform.
++   * Same channel the gizmo uses, so inspector-driven edits feel
++   * identical to drag-driven edits on the wire (no JSON
++   * overhead, no head-of-line blocking on the reliable channel).
++   *
++   * Used by:
++   *   - applyTransform (keyboard-typed position/rotation/scale
++   *     inputs + per-axis Reset Pos/Rot/Scale + Reset All)
++   *   - the Center Pivot button
++   * Gizmo drags do NOT need this — manipulationManager already
++   * broadcasts every transformChange directly via its own listener.
++   */
++  onBroadcastAssetUpdate?: (asset: LoadedAsset) => void;
+   onDeleteAsset: (id: string) => void;
+   onJumpToAsset: (asset: LoadedAsset) => void;
+   onBringAsset: (asset: LoadedAsset) => void;
+@@ -30,6 +50,17 @@ export interface SceneInspectorWindowProps {
+   camera?: THREE.Camera;
+   assetManager?: AssetManager;
+   spatialPanelManager?: SpatialPanelManager;
++  /**
++   * Optional world-root Group3D — pass when there are TWO distinct
++   * containers in scene (e.g. THREE.Scene itself vs a dedicated
++   * `worldRoot` Group). When provided, the inspector's
++   * 'Parent Under World' hierarchy button re-parents under this
++   * node instead of `scene`, matching the receive-side path
++   * (`sceneEngine.worldRoot.attach(...)`) so the broadcast is
++   * symmetric across all peers. When null/missing, the inspector
++   * falls back to attaching to `scene`.
++   */
++  worldRoot?: THREE.Object3D | null;
+   /**
+    * Video action callbacks. Only used when the selected asset is a
+    * video; null when not. Wired by App.tsx to forward into
+@@ -83,16 +114,6 @@ export interface VideoActions {
+   onClose: () => void;
+ }
+
+-function findObjectByUUID(root: THREE.Object3D, uuid: string | null): THREE.Object3D | null {
+-  if (!uuid) return null;
+-  if (root.uuid === uuid) return root;
+-  for (const child of root.children) {
+-    const found = findObjectByUUID(child, uuid);
+-    if (found) return found;
+-  }
+-  return null;
+-}
+-
+ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+   isOpen,
+   onClose,
+@@ -100,6 +121,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+   onSelectAsset,
+   onUpdateAsset,
+   onBroadcastMaterial,
++  onBroadcastInspectorUpdate,
++  onBroadcastAssetUpdate,
+   onDeleteAsset,
+   onJumpToAsset,
+   onBringAsset,
+@@ -109,6 +132,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+   spatialPanelManager,
+   videoActions,
+   targetObject,
++  worldRoot,
+   interactivePermissionGranted,
+   originatorHeader,
+ }) => {
+@@ -180,6 +204,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+     setLightConfig(nextConfig);
+     syncThreeLightFromConfig(selectedAsset.object3d, nextConfig);
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastInspectorUpdate?.({
++      assetId: selectedAsset.id,
++      nodeUuid: undefined,
++      resoniteLight: nextConfig,
++    });
+   };
+   const [meshEnabled, setMeshEnabled] = useState(true);
+
+@@ -192,6 +221,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+       }
+     });
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastInspectorUpdate?.({
++      assetId: selectedAsset.id,
++      nodeUuid: undefined,
++      meshEnabled: enabled,
++    });
+   };
+
+   const handleDeleteMeshGizmo = () => {
+@@ -207,6 +241,12 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+       if ((m as THREE.Mesh).geometry) (m as THREE.Mesh).geometry.dispose();
+     });
+     setMeshEnabled(false);
++    // Sync mesh-renderer toggle to peers — same `meshEnabled` field
++    // already wired on the receive side (`if (update.meshEnabled
++    // !== undefined) child.visible = update.meshEnabled!`), so the
++    // peer's hide-mesh-on-disable path runs identically for both
++    // the Enabled checkbox and the Del Mesh button.
++    onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, meshEnabled: false });
+     onUpdateAsset({ ...selectedAsset });
+   };
+
+@@ -342,6 +382,29 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+   }, [selectedAsset?.id]);
+
++  // External-state reconcile (Bug fix - "active toggle doesn't sync to peers").
++  // The receive site in App.tsx sets `selectedAsset = {...asset}` on every
++  // peer-side inspector envelope, which IS the right side-effect for
++  // re-rendering this inspector with the new asset ref. But the existing
++  // useState initial-sync above is keyed on `[selectedAsset?.id]`, which
++  // DOESN'T change after a spread — so a remote broadcast that toggles
++  // active toggles the Three.js scene correctly, but never refreshes our
++  // checkbox state. This effect (with no deps, so it runs after every
++  // render) reads the Three.js source of truth and reconciles the three
++  // externally-mutated UI flags. setState to the same value is a React
++  // no-op so we don't trigger render thrash.
++  useEffect(() => {
++    if (!selectedAsset) return;
++    setActive(selectedAsset.object3d.visible);
++    const ud = selectedAsset.object3d.userData as Record<string, unknown>;
++    setPersistent((ud?.isPersistent as boolean | undefined) ?? true);
++    let visibleMesh = false;
++    selectedAsset.object3d.traverse((c) => {
++      if ((c as THREE.Mesh).isMesh && (c as THREE.Mesh).visible) visibleMesh = true;
++    });
++    setMeshEnabled(visibleMesh);
++  });
++
+   // Heavy meshStats + initial material props: full scene-graph traverse.
+   // Runs ONCE per selection change — never per-frame during drags. This
+   // was the main fps killer (meshStats traverse compounds with React
+@@ -501,7 +564,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+     setSelectedNodeUUID(null);
+     setExpandedNodes(new Set());
+     setInspectorRootUUID(null);
+-  }, [selectedAsset?.id]);  const applyTransform = (newPos = pos, newRot = rot, newScale = scale) => {
++  }, [selectedAsset?.id]);
++
++  const applyTransform = (newPos = pos, newRot = rot, newScale = scale) => {
+     // Multiplayer panel-broadcast (Issue 2 fix): gate the apply path at
+     // the handler level. The read-only mirror UI already has
+     // pointer-events-none on its body, but Tab-key navigation can still
+@@ -520,6 +585,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+     );
+     selectedAsset.object3d.scale.set(newScale.x, newScale.y, newScale.z);
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastAssetUpdate?.(selectedAsset);
+   };
+
+   const handleResetPos = () => {
+@@ -587,7 +653,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+   const imageAssets = assetManager ? Array.from(assetManager.assets.values()).filter((a) => a.type === 'image') : [];
+
+   const handleApplyTextureSlot = (slotName: string, url: string | null) => {
+-    if (!selectedAsset) return;
++    // Mirror-safety: same exploit class as the 4 onChange handlers we
++    // already gated (Active toggle was the user's #1 priority).
++    // Texture slot dropdown can be fired via keyboard, since the
++    // pointer-events:none CSS only blocks mouse clicks.
++    if (!interactive || !selectedAsset) return;
+
+     const update: MaterialUpdate = {
+       assetId: selectedAsset.id,
+@@ -622,6 +692,25 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+       selectedAsset.object3d.userData.bobbingSpeed = 2.0;
+     }
+     onUpdateAsset({ ...selectedAsset });
++    if (compType === 'Light Source') {
++      onBroadcastInspectorUpdate?.({
++        assetId: selectedAsset.id,
++        nodeUuid: undefined,
++        resoniteLight: selectedAsset.object3d.userData.resoniteLight,
++      });
++    } else if (compType === 'Rotator Script') {
++      onBroadcastInspectorUpdate?.({
++        assetId: selectedAsset.id,
++        nodeUuid: undefined,
++        rotatorSpeed: selectedAsset.object3d.userData.rotatorSpeed,
++      });
++    } else if (compType === 'Bobbing / Float') {
++      onBroadcastInspectorUpdate?.({
++        assetId: selectedAsset.id,
++        nodeUuid: undefined,
++        bobbingSpeed: selectedAsset.object3d.userData.bobbingSpeed,
++      });
++    }
+   };
+
+   // Insert an empty THREE.Group above the currently-selected node and
+@@ -642,6 +731,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+       return next;
+     });
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastInspectorUpdate?.({
++      assetId: selectedAsset.id,
++      nodeUuid: selectedNodeUUID ?? undefined,
++      hierarchyAction: { type: 'insertParent', newNodeUuid: newParent.uuid },
++    });
+   };
+
+   // Append an empty THREE.Group as a child of the currently-selected
+@@ -662,6 +756,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+       return next;
+     });
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastInspectorUpdate?.({
++      assetId: selectedAsset.id,
++      nodeUuid: selectedNodeUUID ?? undefined,
++      hierarchyAction: { type: 'addChild', newNodeUuid: newChild.uuid },
++    });
+   };
+
+   // Scope the left-pane tree to a chosen descendant — useful for deep
+@@ -693,10 +792,17 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+   // root (Three.Object3D.attach() preserves world pose).
+   const handleParentUnderWorld = () => {
+     if (!interactive) return;
+-    if (!selectedAsset || !scene) return;
++    if (!selectedAsset) return;
++    const attachRoot = worldRoot ?? scene;
++    if (!attachRoot) return;
+     const target = findObjectByUUID(selectedAsset.object3d, selectedNodeUUID) ?? selectedAsset.object3d;
+-    scene.attach(target);
++    attachRoot.attach(target);
+     onUpdateAsset({ ...selectedAsset });
++    onBroadcastInspectorUpdate?.({
++      assetId: selectedAsset.id,
++      nodeUuid: selectedNodeUUID ?? undefined,
++      hierarchyAction: { type: 'parentToWorld' },
++    });
+   };
+
+   return (
+@@ -1213,7 +1319,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+                 <input
+                   type="text"
+                   value={assetName}
+-                  onChange={(e) => { setAssetName(e.target.value); if (selectedAsset) { selectedAsset.name = e.target.value; onUpdateAsset({ ...selectedAsset }); } }}
++                  onChange={(e) => { setAssetName(e.target.value); if (!interactive || !selectedAsset) return; selectedAsset.name = e.target.value; onUpdateAsset({ ...selectedAsset }); onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, name: e.target.value }); }}
+                   className="flex-1 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white focus:border-cyan-500 focus:outline-none"
+                 />
+               </div>
+@@ -1237,7 +1343,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+                   <input
+                     type="checkbox"
+                     checked={active}
+-                    onChange={(e) => { setActive(e.target.checked); if (selectedAsset) { selectedAsset.object3d.visible = e.target.checked; onUpdateAsset({ ...selectedAsset }); } }}
++                    onChange={(e) => { setActive(e.target.checked); if (!interactive || !selectedAsset) return; selectedAsset.object3d.visible = e.target.checked; onUpdateAsset({ ...selectedAsset }); onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, active: e.target.checked }); }}
+                     className="w-3.5 h-3.5 accent-cyan-500 rounded"
+                   />
+                   <span className="font-bold text-slate-300">Active</span>
+@@ -1252,10 +1358,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+                       // synchronization, future "save world" action,
+                       // and the inspector's hierarchy orange-dot indicator)
+                       // see the persisted bit, not just local UI state.
+-                      if (selectedAsset) {
+-                        selectedAsset.object3d.userData.isPersistent = e.target.checked;
+-                        onUpdateAsset({ ...selectedAsset });
+-                      }
++                      if (!interactive || !selectedAsset) return;
++                      selectedAsset.object3d.userData.isPersistent = e.target.checked;
++                      onUpdateAsset({ ...selectedAsset });
++                      onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, persistent: e.target.checked });
+                     }}
+                     className="w-3.5 h-3.5 accent-cyan-500 rounded"
+                   />
+@@ -1327,7 +1433,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+               <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800/80">
+                 <div className="flex gap-2">
+                   <button onClick={() => { handleResetPos(); handleResetRot(); handleResetScale(); }} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-[10px]">Reset All</button>
+-                  <button onClick={() => { if (selectedAsset) { selectedAsset.object3d.position.set(0, 1.5, 0); onUpdateAsset({ ...selectedAsset }); } }} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-[10px]">Center Pivot</button>
++                  <button onClick={() => { if (selectedAsset) { selectedAsset.object3d.position.set(0, 1.5, 0); onUpdateAsset({ ...selectedAsset }); onBroadcastAssetUpdate?.(selectedAsset); } }} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-[10px]">Center Pivot</button>
+                 </div>
+                 <div className="flex items-center gap-1.5 text-[10px]">
+                   <span className="text-slate-400 font-bold">Parent Under:</span>
+@@ -1375,11 +1481,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
+                     title="Remove Light Component"
+                     onClick={(e) => {
+                       e.stopPropagation();
+-                      if (selectedAsset) {
+-                        removeLightComponent(selectedAsset.object3d);
+-                        setAttachedComponents(attachedComponents.filter((c) => c !== 'Light Source'));
+-                        onUpdateAsset({ ...selectedAsset });
+-                      }
++                      if (!interactive || !selectedAsset) return;
++                      removeLightComponent(selectedAsset.object3d);
++                      setAttachedComponents(attachedComponents.filter((c) => c !== 'Light Source'));
++                      onUpdateAsset({ ...selectedAsset });
++                      onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, resoniteLight: null });
+                     }}
+                     className="p-1 rounded bg-rose-600/20 hover:bg-rose-600/40 text-rose-400 border border-rose-500/40 transition"
+                   >
+diff --git a/src/engine/AssetManager.ts b/src/engine/AssetManager.ts
+index 09bc417..554b103 100644
+--- a/src/engine/AssetManager.ts
++++ b/src/engine/AssetManager.ts
+@@ -840,6 +840,11 @@ export class AssetManager {
+           // Comes from the per-import inject at App.tsx but defaults to 1.0 here
+           // so the field is idempotent for callers that don't plug in settings.
+           lodScale: config?.splatLodScale ?? 1.0,
++          // Spark uses the `lod` option to decide whether to build the
++          // hierarchical LOD tree at import time. Without this flag, .ply
++          // and other non-tileable formats never generate LODs, so runtime
++          // `lodSplatCount` / `lodSplatScale` changes have no effect.
++          lod: config?.splatEnableLod ?? true,
+           // Tileable splat container formats — KSPLAT, PlayCanvas SOG variants
+           // (.sog / .sogs both map to PCSOGS in Spark's loader), and RAD. These
+           // are the only SplatFileType values for which `paged: true` does
+diff --git a/src/services/NetworkService.ts b/src/services/NetworkService.ts
+index 01e4601..2dca389 100644
+--- a/src/services/NetworkService.ts
++++ b/src/services/NetworkService.ts
+@@ -4,6 +4,7 @@ import type { TransformUpdate } from '../engine/ManipulationManager.ts';
+ import type { AvatarTransform } from '../engine/AvatarManager.ts';
+ import type { AssetType, LoadedAsset } from '../engine/AssetManager.ts';
+ import type { UserRole, ModerationActionPayload, RoleUpdatePayload } from '../types/permissions.ts';
++import type { ResoniteLightConfig } from '../engine/ResoniteLightSync.ts';
+
+ export type ConnectionMode = 'offline' | 'online' | 'paired';
+
+@@ -81,6 +82,42 @@ export interface MaterialUpdate {
+   aoMap?: string | null;
+ }
+
++/**
++ * Inspector-driven object/component update. Mirrors the editable
++ * fields exposed by SceneInspectorWindow that are NOT already covered
++ * by the dedicated transform / material / video channels.
++ */
++export interface InspectorUpdateData {
++  assetId: string;
++  /** If provided, the update targets this descendant node by UUID;
++   *  otherwise the update applies to the asset's root object3d. */
++  nodeUuid?: string;
++  /** Peer that originated this update. Receivers can skip re-applying
++   *  their own broadcasts (echo suppression). */
++  senderPeerId?: string;
++
++  // Basic object bits
++  name?: string;
++  active?: boolean;
++  persistent?: boolean;
++  tag?: string;
++
++  // Mesh renderer toggle
++  meshEnabled?: boolean;
++
++  // Component operations
++  resoniteLight?: Partial<ResoniteLightConfig> | null;
++  rotatorSpeed?: { x: number; y: number; z: number } | null;
++  bobbingSpeed?: number | null;
++
++  // Hierarchy actions
++  hierarchyAction?: {
++    type: 'insertParent' | 'addChild' | 'parentToWorld';
++    /** UUID assigned to the newly-created node so peers stay in sync. */
++    newNodeUuid?: string;
++  };
++}
++
+ /**
+  * Action + identity payload for a shared UI panel (inspector /
+  * import dialog). Sent whenever one user opens OR closes a panel
+@@ -228,6 +265,7 @@ type EnvelopeType =
+   //                      peers opting out of their mirror view do not
+   //                      accidentally close the originator's panel.
+   | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat'
++  | 'inspector'
+   | 'leave' | 'ping';
+
+ interface Envelope {
+@@ -434,6 +472,7 @@ export class NetworkService {
+   private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
+   private onPanelStateCallbacks: Set<(data: PanelStateData) => void> = new Set();
+   private onMaterialCallbacks: Set<(update: MaterialUpdate) => void> = new Set();
++  private onInspectorUpdateCallbacks: Set<(data: InspectorUpdateData) => void> = new Set();
+
+   constructor() {
+     this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
+@@ -1404,6 +1443,9 @@ export class NetworkService {
+       case 'mat':
+         for (const cb of this.onMaterialCallbacks) cb(env.payload as MaterialUpdate);
+         break;
++      case 'inspector':
++        for (const cb of this.onInspectorUpdateCallbacks) cb(env.payload as InspectorUpdateData);
++        break;
+       case 'av': {
+         const av = env.payload as AvatarTransform;
+         av.peerId = fromPeerId;
+@@ -1715,6 +1757,16 @@ export class NetworkService {
+     this.broadcastEnvelope(this.buildEnvelope('mat', update));
+   }
+
++  /**
++   * Broadcast a generic inspector update (active, persistent, name,
++   * light config, component attach/detach, mesh enabled, hierarchy
++   * actions, etc.) to all connected peers.
++   */
++  public broadcastInspectorUpdate(update: InspectorUpdateData): void {
++    if (this.mode === 'offline') return;
++    this.broadcastEnvelope(this.buildEnvelope('inspector', { ...update, senderPeerId: this.localPeerId }));
++  }
++
+   public broadcastAssetUpdate(asset: LoadedAsset): void {
+     if (this.mode === 'offline') return;
+     const obj = asset.object3d;
+@@ -2194,6 +2246,10 @@ export class NetworkService {
+     this.onMaterialCallbacks.add(cb);
+     return () => this.onMaterialCallbacks.delete(cb);
+   }
++  public onInspectorUpdate(cb: (data: InspectorUpdateData) => void): () => void {
++    this.onInspectorUpdateCallbacks.add(cb);
++    return () => this.onInspectorUpdateCallbacks.delete(cb);
++  }
+   public onSyncReq(cb: (fromPeerId: string) => void): () => void {
+     this.onSyncReqCallbacks.add(cb);
+     return () => this.onSyncReqCallbacks.delete(cb);

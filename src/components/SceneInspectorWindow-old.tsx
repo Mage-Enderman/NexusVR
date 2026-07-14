@@ -142,13 +142,6 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // propping the spatial wrapper's parentObject to selectedAsset?.object3d.
   const interactive = interactivePermissionGranted ?? true;
   const dockTarget = targetObject ?? selectedAsset?.object3d ?? undefined;
-  // The actual top of the scene graph — used as the hierarchy tree's
-  // default root so the left pane shows the WHOLE scene (parents,
-  // siblings, everything) the way Resonite's Scene Inspector does,
-  // not just the selected asset's own subtree. Falls back to the
-  // selected asset itself if this component is ever used without
-  // scene/worldRoot wired up.
-  const trueRoot: THREE.Object3D | null = worldRoot ?? scene ?? null;
 
   if (!isOpen) return null;
 
@@ -258,6 +251,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
 
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  // @ts-ignore
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('root');
 
   // Hierarchy-tree state. selectedNodeUUID identifies the Object3D row
   // the user clicked in the left pane, expandedNodes remembers which
@@ -280,7 +275,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   };
   const [showMaterialModal, setShowMaterialModal] = useState(false);
   const [openSlotDropdown, setOpenSlotDropdown] = useState<string | null>(null);
-  const [showHierarchy, setShowHierarchy] = useState(true);
+  // @ts-ignore
+  const [showHierarchy, setShowHierarchy] = useState(false);
   const [selectedMaterialIndex, setSelectedMaterialIndex] = useState<number>(0);
 
   // Refs for live pos/rot/scale display. The values are updated by a rAF
@@ -404,24 +400,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setMeshEnabled(visibleMesh);
   }, [selectedAsset]);
 
-  // Auto-expand the tree branches between the scene root and whatever
-  // is currently selected, so the selected item is immediately visible
-  // in place (matching Resonite's Scene Inspector, where the selected
-  // slot shows expanded in the hierarchy without manual clicking).
-  // Only walks UP from the asset (cheap) rather than re-deriving the
-  // whole tree.
-  useEffect(() => {
-    if (!selectedAsset) return;
-    setExpandedNodes(prev => {
-      const next = new Set(prev);
-      let cur: THREE.Object3D | null = selectedAsset.object3d.parent;
-      while (cur) {
-        next.add(cur.uuid);
-        cur = cur.parent;
-      }
-      return next;
-    });
-  }, [selectedAsset?.id]);
+  // Heavy meshStats + initial material props: full scene-graph traverse.
   // Runs ONCE per selection change — never per-frame during drags. This
   // was the main fps killer (meshStats traverse compounds with React
   // render of a 1000+ line panel to drop framerate to ~20fps).
@@ -779,47 +758,28 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     });
   };
 
-  // Walk up from any clicked tree node to find which tracked
-  // LoadedAsset owns it (the node itself, or the nearest ancestor
-  // that IS a LoadedAsset.object3d). Structural scene nodes that
-  // aren't spawned assets (e.g. Controllers, Skybox, Ground) return
-  // undefined — clicking those just scopes the sub-selection, it
-  // doesn't change which asset is being inspected.
-  const findOwningAsset = (node: THREE.Object3D): LoadedAsset | undefined => {
-    if (!assetManager) return undefined;
-    let cur: THREE.Object3D | null = node;
-    while (cur) {
-      for (const asset of assetManager.assets.values()) {
-        if (asset.object3d === cur) return asset;
-      }
-      cur = cur.parent;
-    }
-    return undefined;
-  };
-
   // Scope the left-pane tree to a chosen descendant — useful for deep
-  // hierarchies where the top-level name list gets unreadable. This
-  // is the "focus" action (Resonite's blue-arrow button): re-roots
-  // the DISPLAYED tree at the selected node without changing what's
-  // actually selected/inspected.
+  // hierarchies where the top-level name list gets unreadable.
   const handleSetInspectorRoot = () => {
     if (!selectedNodeUUID) return;
     setInspectorRootUUID(selectedNodeUUID);
   };
 
+  // @ts-ignore
   const handleResetInspectorRoot = () => {
     setInspectorRootUUID(null);
   };
 
+  // @ts-ignore
   const handleStepUpInspectorRoot = () => {
-    if (!inspectorRootUUID || !trueRoot) return;
-    const node = findObjectByUUID(trueRoot, inspectorRootUUID);
-    if (node && node.parent) {
-      setInspectorRootUUID(node.parent.uuid);
-    } else {
-      // Focused node has no parent left within the tree (or wasn't
-      // found) — just clear focus back to the full scene root.
-      setInspectorRootUUID(null);
+    if (!inspectorRootUUID) return;
+    const allAssets = assetManager ? Array.from(assetManager.assets.values()) : [];
+    for (const asset of allAssets) {
+      const node = findObjectByUUID(asset.object3d, inspectorRootUUID);
+      if (node && node.parent) {
+        setInspectorRootUUID(node.parent.uuid);
+        return;
+      }
     }
   };
 
@@ -1141,110 +1101,84 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           </div>
         </div>
       ) : (
-        <div className="flex flex-row gap-3 font-sans text-xs select-none pb-4 min-h-0">
-          {/* LEFT COLUMN: HIERARCHY TREE — always-visible scene tree,
-              mirrors Resonite's "Root: X" left pane. Fixed width so it
-              doesn't crowd the Slot detail column on narrower panels. */}
-        <div className={`w-[200px] shrink-0 bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 min-h-0 ${
+        <div className="flex flex-col gap-3 font-sans text-xs select-none pb-4">
+          {/* COMPACT HIERARCHY / PATH BAR (Collapsible Top Section) */}
+        <div className={`bg-slate-950/80 border border-slate-800 rounded-xl p-2.5 flex flex-col gap-2 ${
           !interactive ? 'pointer-events-none opacity-80' : ''
         }`}>
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between gap-1">
-              <span className="font-bold text-slate-300 font-mono text-[11px] truncate">
-                Root: <span className="text-amber-300 normal-case">
-                  {inspectorRootUUID
-                    ? (trueRoot && findObjectByUUID(trueRoot, inspectorRootUUID)?.name) || '...'
-                    : (trueRoot?.name || 'Scene')}
-                </span>
-              </span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 min-w-0">
               <button
                 onClick={() => setShowHierarchy(!showHierarchy)}
-                title={showHierarchy ? 'Hide hierarchy tree' : 'Show hierarchy tree'}
-                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 shrink-0 transition"
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-bold text-[11px] flex items-center gap-1.5 transition shrink-0"
               >
                 <Layers className="w-3.5 h-3.5" />
+                <span>{showHierarchy ? 'Hide Hierarchy Tree' : 'Show Hierarchy Tree'}</span>
               </button>
+              <span className="font-bold text-slate-300 font-mono text-[11px] truncate">
+                {inspectorRootUUID
+                  ? <>View: <span className="text-amber-300 normal-case">{findObjectByUUID(selectedAsset?.object3d ?? new THREE.Object3D(), inspectorRootUUID)?.name || '...'}</span></>
+                  : <>Root: <span className="text-amber-300 normal-case">{assetName}</span></>}
+              </span>
             </div>
-            <div className="flex gap-1 flex-wrap">
+            <div className="flex gap-1.5 shrink-0">
               <button
                 onClick={() => onSelectAsset?.(null)}
                 title="Return to full scene hierarchy to select another object"
-                className="px-1.5 py-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-cyan-300 font-bold text-[10px] flex items-center gap-1 transition"
+                className="px-2 py-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-cyan-300 font-bold text-[11px] flex items-center gap-1 transition shrink-0"
               >
-                <Layers className="w-3 h-3" />
-                <span>All</span>
+                <Layers className="w-3.5 h-3.5" />
+                <span>All Objects</span>
               </button>
               {inspectorRootUUID && (
-                <>
-                  <button
-                    onClick={handleStepUpInspectorRoot}
-                    title="Step up one level"
-                    className="p-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition"
-                  >
-                    <ArrowUpRight className="w-3 h-3" />
-                  </button>
-                  <button
-                    onClick={handleResetInspectorRoot}
-                    title="Back to top of hierarchy"
-                    className="px-1.5 py-1 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 font-bold text-[10px] transition"
-                  >
-                    Top
-                  </button>
-                </>
+                <button
+                  onClick={handleResetInspectorRoot}
+                  title="Back to top of hierarchy (Top)"
+                  className="p-1.5 rounded bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition"
+                >
+                  <ArrowUpRight className="w-3.5 h-3.5" />
+                </button>
               )}
               <button
                 onClick={handleSetInspectorRoot}
                 disabled={!selectedNodeUUID}
-                title="Focus in on the selected item (shows only its own children)"
-                className="p-1 rounded bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 disabled:opacity-30 disabled:hover:bg-slate-800 transition"
+                title="Set selected as visible hierarchy root (Set Root)"
+                className="p-1.5 rounded bg-slate-800 hover:bg-amber-500/20 text-slate-300 hover:text-amber-300 disabled:opacity-30 disabled:hover:bg-slate-800 transition"
               >
-                <Layers className="w-3 h-3" />
+                <Layers className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
 
           {showHierarchy && (
-            <div className="flex flex-col gap-1 flex-1 min-h-0 overflow-y-auto border-t border-slate-800 pt-2 custom-scrollbar">
+            <div className="flex flex-col gap-1 mt-1 max-h-48 overflow-y-auto border-t border-slate-800 pt-2 custom-scrollbar">
+              <div
+                onClick={() => setSelectedNodeId('root')}
+                className={`flex items-center gap-2 px-2.5 py-1.5 rounded-lg cursor-pointer font-bold transition ${
+                  selectedNodeId === 'root' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'text-slate-300 hover:bg-slate-900'
+                }`}
+              >
+                <Box className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="truncate">&bull; {assetName}</span>
+              </div>
+
               {(() => {
                 if (!selectedAsset) return null;
                 const visibleRoot = inspectorRootUUID
-                  ? (trueRoot && findObjectByUUID(trueRoot, inspectorRootUUID)) || selectedAsset.object3d
-                  : (trueRoot ?? selectedAsset.object3d);
+                  ? (findObjectByUUID(selectedAsset.object3d, inspectorRootUUID) ?? selectedAsset.object3d)
+                  : selectedAsset.object3d;
                 if (!visibleRoot) return null;
                 const renderNode = (node: THREE.Object3D, depth: number): React.ReactNode => {
                   const expanded = expandedNodes.has(node.uuid);
-                  const isAssetRoot = node.uuid === selectedAsset.object3d.uuid;
-                  const isSubSelected = !isAssetRoot && selectedNodeUUID === node.uuid;
+                  const highlight = selectedNodeUUID === node.uuid;
                   const isNonPersistent = node.userData?.isPersistent === false;
                   return (
                     <div key={node.uuid}>
                       <div
-                        onClick={() => {
-                          setSelectedNodeUUID(node.uuid);
-                          const owningAsset = findOwningAsset(node);
-                          if (owningAsset && owningAsset.id !== selectedAsset.id) {
-                            onSelectAsset?.(owningAsset);
-                          }
-                        }}
-                        onDoubleClick={() => {
-                          setSelectedNodeUUID(node.uuid);
-                          const owningAsset = findOwningAsset(node);
-                          if (owningAsset && owningAsset.id !== selectedAsset.id) {
-                            onSelectAsset?.(owningAsset);
-                          }
-                          // Double-click both selects AND focuses in one
-                          // step — re-roots the visible tree at this node,
-                          // same as clicking the row once then pressing
-                          // the focus button, matching Resonite's
-                          // double-click-to-drill-in hierarchy behavior.
-                          setInspectorRootUUID(node.uuid);
-                        }}
-                        title="Click to select · double-click to focus in"
+                        onClick={() => setSelectedNodeUUID(node.uuid)}
                         style={{ paddingLeft: `${depth * 12 + 4}px` }}
                         className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
-                          isAssetRoot
-                            ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold'
-                            : isSubSelected
+                          highlight
                             ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-bold'
                             : 'text-slate-300 hover:bg-slate-900 border border-transparent'
                         }`}

@@ -1226,20 +1226,6 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                             onSelectAsset?.(owningAsset);
                           }
                         }}
-                        onDoubleClick={() => {
-                          setSelectedNodeUUID(node.uuid);
-                          const owningAsset = findOwningAsset(node);
-                          if (owningAsset && owningAsset.id !== selectedAsset.id) {
-                            onSelectAsset?.(owningAsset);
-                          }
-                          // Double-click both selects AND focuses in one
-                          // step — re-roots the visible tree at this node,
-                          // same as clicking the row once then pressing
-                          // the focus button, matching Resonite's
-                          // double-click-to-drill-in hierarchy behavior.
-                          setInspectorRootUUID(node.uuid);
-                        }}
-                        title="Click to select · double-click to focus in"
                         style={{ paddingLeft: `${depth * 12 + 4}px` }}
                         className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
                           isAssetRoot

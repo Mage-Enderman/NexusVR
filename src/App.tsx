@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
+import { findObjectByUUID } from './utils/findObjectByUUID.ts';
 import confetti from 'canvas-confetti';
 
 import { SceneEngine } from './engine/SceneEngine.ts';
@@ -10,7 +11,7 @@ import { ManipulationManager } from './engine/ManipulationManager.ts';
 import type { TransformMode } from './engine/ManipulationManager.ts';
 import { AvatarManager } from './engine/AvatarManager.ts';
 import { NetworkService } from './services/NetworkService.ts';
-import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate } from './services/NetworkService.ts';
+import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate, InspectorUpdateData } from './services/NetworkService.ts';
 import { VideoStreamingService } from './services/VideoStreamingService.ts';
 
 // Phase 3A: streaming threshold mirrors NetworkService.MAX_INLINED_FILE_BYTES
@@ -49,7 +50,7 @@ import { RadialContextMenu } from './components/RadialContextMenu.tsx';
 import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
 import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
 import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
-import { DEFAULT_LIGHT_CONFIG } from './engine/ResoniteLightSync.ts';
+import { DEFAULT_LIGHT_CONFIG, removeLightComponent, syncThreeLightFromConfig } from './engine/ResoniteLightSync.ts';
 import { X } from 'lucide-react';
 
 /**
@@ -305,6 +306,35 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // being re-created every time showSceneInspector changes.
   const showSceneInspectorRef = useRef(false);
   showSceneInspectorRef.current = showSceneInspector;
+
+  // Bug fix — host→peer inspector object sync (Issue 2). The previous
+  // openInspectorFromLocal/closeInspectorFromLocal helpers used to call
+  // broadcastPanelState on every transition; an in-place refactor of
+  // App.tsx replaced those helpers with a direct setShowSceneInspector
+  // toggle and the panelstate broadcast was lost, so peers stopped
+  // mirroring the host's inspector open/close and selection state.
+  // This effect re-broadcasts on every showSceneInspector OR
+  // selectedAsset.id change so the host's inspector state propagates
+  // live. Receive handler's echo-suppression (drops envelopes whose
+  // originatorPeerId === localPeerId) makes the redundant broadcast on
+  // initial mount harmless apart from one envelope byte. We don't
+  // broadcast 'close' here — peers' mirrors stay open until they
+  // manually close, which is the gentler UX for the case where the
+  // host stops inspecting but a peer is still mid-edit.
+  useEffect(() => {
+    if (!showSceneInspector) return;
+    const ns = networkServiceRef.current;
+    if (!ns || ns.mode === 'offline') return;
+    ns.broadcastPanelState({
+      action: 'open',
+      panelId: 'inspector',
+      originatorPeerId: ns.localPeerId,
+      originatorUserName: userName,
+      originatorRole: localRole,
+      targetAssetId: selectedAsset?.id ?? null,
+      ts: Date.now(),
+    });
+  }, [showSceneInspector, selectedAsset?.id]);
   // Set true by Ctrl+Shift+V keydown so the next paste event is treated as
   // plain text (no URL / data-URI import handling). Cleared in handlePaste
   // on the following paste event, or by a keyup safety net.
@@ -927,12 +957,34 @@ const vrHud = new VRHUDManager(
                 // ---- Toggles ----
                 if (actionId === 'inspect.toggle:visible') {
                   o3d.visible = !o3d.visible;
+                  // dirty()'s broadcastAssetUpdate only carries
+                  // position/rotation/scale — it silently drops
+                  // visibility. Broadcast the actual change over the
+                  // 'inspector' channel too, same as the desktop
+                  // Active checkbox in SceneInspectorWindow, or peers
+                  // never see this toggle take effect.
+                  networkServiceRef.current?.broadcastInspectorUpdate({
+                    assetId: sel.id,
+                    nodeUuid: undefined,
+                    active: o3d.visible
+                  });
                   dirty();
                   return;
                 }
                 if (actionId === 'inspect.toggle:active') {
-                  const ud = o3d.userData as { active?: boolean };
-                  ud.active = !(ud.active ?? true);
+                  // Match the desktop inspector's semantics, where
+                  // "Active" IS object3d.visible (see
+                  // SceneInspectorWindow's Active checkbox and the
+                  // onInspectorUpdate handler above, which sets
+                  // targetNode.visible = update.active). The previous
+                  // userData.active flag was never read anywhere, so
+                  // this toggle did nothing — not locally, not for peers.
+                  o3d.visible = !o3d.visible;
+                  networkServiceRef.current?.broadcastInspectorUpdate({
+                    assetId: sel.id,
+                    nodeUuid: undefined,
+                    active: o3d.visible
+                  });
                   dirty();
                   return;
                 }
@@ -2015,6 +2067,72 @@ const vrHud = new VRHUDManager(
         }
       }
     });
+
+    // Apply generic inspector updates from peers (active, persistent, name,
+    // light config, component attach/detach, mesh enabled, hierarchy).
+    disposers.push(net.onInspectorUpdate((update) => {
+      if (update.senderPeerId === net.localPeerId) return;
+      const asset = assetManager.assets.get(update.assetId);
+      if (!asset) return;
+      const targetNode = update.nodeUuid
+        ? findObjectByUUID(asset.object3d, update.nodeUuid)
+        : asset.object3d;
+      if (!targetNode) return;
+
+      if (update.name !== undefined) {
+        asset.name = update.name;
+        targetNode.name = update.name;
+      }
+      if (update.active !== undefined) {
+        targetNode.visible = update.active;
+      }
+      if (update.persistent !== undefined) {
+        targetNode.userData.isPersistent = update.persistent;
+      }
+      if (update.meshEnabled !== undefined) {
+        targetNode.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.visible = update.meshEnabled!;
+          }
+        });
+      }
+      if (update.resoniteLight !== undefined) {
+        if (update.resoniteLight === null) {
+          removeLightComponent(targetNode);
+        } else {
+          syncThreeLightFromConfig(targetNode, { ...DEFAULT_LIGHT_CONFIG, ...update.resoniteLight });
+        }
+      }
+      if (update.rotatorSpeed !== undefined) {
+        targetNode.userData.rotatorSpeed = update.rotatorSpeed;
+      }
+      if (update.bobbingSpeed !== undefined) {
+        targetNode.userData.bobbingSpeed = update.bobbingSpeed;
+      }
+      if (update.hierarchyAction) {
+        const ha = update.hierarchyAction;
+        if (ha.type === 'insertParent') {
+          const newParent = new THREE.Group();
+          newParent.name = `Parent_of_${targetNode.name || 'Slot'}`;
+          if (ha.newNodeUuid) newParent.uuid = ha.newNodeUuid;
+          newParent.attach(targetNode);
+        } else if (ha.type === 'addChild') {
+          const newChild = new THREE.Group();
+          newChild.name = `Child_of_${targetNode.name || 'Slot'}`;
+          if (ha.newNodeUuid) newChild.uuid = ha.newNodeUuid;
+          newChild.position.set(0, 0.5, 0);
+          targetNode.add(newChild);
+        } else if (ha.type === 'parentToWorld') {
+          if (!sceneEngine?.worldRoot) return;
+          sceneEngine.worldRoot.attach(targetNode);
+        }
+      }
+
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === update.assetId) {
+        setSelectedAsset({ ...asset });
+      }
+    }));
 
     net.onAvatar((update) => {
       avatarManager.updatePeerAvatar(update);
@@ -5009,6 +5127,13 @@ const vrHud = new VRHUDManager(
         onBroadcastMaterial={(update) => {
           networkServiceRef.current.broadcastMaterialUpdate(update);
         }}
+        onBroadcastInspectorUpdate={(update: InspectorUpdateData) => {
+          networkServiceRef.current.broadcastInspectorUpdate(update);
+        }}
+        onBroadcastAssetUpdate={(asset) => {
+          networkServiceRef.current.broadcastAssetUpdate(asset);
+        }}
+        worldRoot={sceneEngineRef.current?.worldRoot ?? null}
         onDeleteAsset={handleDeleteSelected}
         onJumpToAsset={(asset) => {
           if (sceneEngineRef.current) {

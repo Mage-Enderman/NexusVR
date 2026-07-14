@@ -4,6 +4,7 @@ import type { TransformUpdate } from '../engine/ManipulationManager.ts';
 import type { AvatarTransform } from '../engine/AvatarManager.ts';
 import type { AssetType, LoadedAsset } from '../engine/AssetManager.ts';
 import type { UserRole, ModerationActionPayload, RoleUpdatePayload } from '../types/permissions.ts';
+import type { ResoniteLightConfig } from '../engine/ResoniteLightSync.ts';
 
 export type ConnectionMode = 'offline' | 'online' | 'paired';
 
@@ -79,6 +80,42 @@ export interface MaterialUpdate {
   metalnessMap?: string | null;
   emissiveMap?: string | null;
   aoMap?: string | null;
+}
+
+/**
+ * Inspector-driven object/component update. Mirrors the editable
+ * fields exposed by SceneInspectorWindow that are NOT already covered
+ * by the dedicated transform / material / video channels.
+ */
+export interface InspectorUpdateData {
+  assetId: string;
+  /** If provided, the update targets this descendant node by UUID;
+   *  otherwise the update applies to the asset's root object3d. */
+  nodeUuid?: string;
+  /** Peer that originated this update. Receivers can skip re-applying
+   *  their own broadcasts (echo suppression). */
+  senderPeerId?: string;
+
+  // Basic object bits
+  name?: string;
+  active?: boolean;
+  persistent?: boolean;
+  tag?: string;
+
+  // Mesh renderer toggle
+  meshEnabled?: boolean;
+
+  // Component operations
+  resoniteLight?: Partial<ResoniteLightConfig> | null;
+  rotatorSpeed?: { x: number; y: number; z: number } | null;
+  bobbingSpeed?: number | null;
+
+  // Hierarchy actions
+  hierarchyAction?: {
+    type: 'insertParent' | 'addChild' | 'parentToWorld';
+    /** UUID assigned to the newly-created node so peers stay in sync. */
+    newNodeUuid?: string;
+  };
 }
 
 /**
@@ -228,6 +265,7 @@ type EnvelopeType =
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
   | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat'
+  | 'inspector'
   | 'leave' | 'ping';
 
 interface Envelope {
@@ -434,6 +472,7 @@ export class NetworkService {
   private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
   private onPanelStateCallbacks: Set<(data: PanelStateData) => void> = new Set();
   private onMaterialCallbacks: Set<(update: MaterialUpdate) => void> = new Set();
+  private onInspectorUpdateCallbacks: Set<(data: InspectorUpdateData) => void> = new Set();
 
   constructor() {
     this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
@@ -1404,6 +1443,9 @@ export class NetworkService {
       case 'mat':
         for (const cb of this.onMaterialCallbacks) cb(env.payload as MaterialUpdate);
         break;
+      case 'inspector':
+        for (const cb of this.onInspectorUpdateCallbacks) cb(env.payload as InspectorUpdateData);
+        break;
       case 'av': {
         const av = env.payload as AvatarTransform;
         av.peerId = fromPeerId;
@@ -1713,6 +1755,16 @@ export class NetworkService {
   public broadcastMaterialUpdate(update: MaterialUpdate): void {
     if (this.mode === 'offline') return;
     this.broadcastEnvelope(this.buildEnvelope('mat', update));
+  }
+
+  /**
+   * Broadcast a generic inspector update (active, persistent, name,
+   * light config, component attach/detach, mesh enabled, hierarchy
+   * actions, etc.) to all connected peers.
+   */
+  public broadcastInspectorUpdate(update: InspectorUpdateData): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('inspector', { ...update, senderPeerId: this.localPeerId }));
   }
 
   public broadcastAssetUpdate(asset: LoadedAsset): void {
@@ -2193,6 +2245,10 @@ export class NetworkService {
   public onMaterialUpdate(cb: (update: MaterialUpdate) => void): () => void {
     this.onMaterialCallbacks.add(cb);
     return () => this.onMaterialCallbacks.delete(cb);
+  }
+  public onInspectorUpdate(cb: (data: InspectorUpdateData) => void): () => void {
+    this.onInspectorUpdateCallbacks.add(cb);
+    return () => this.onInspectorUpdateCallbacks.delete(cb);
   }
   public onSyncReq(cb: (fromPeerId: string) => void): () => void {
     this.onSyncReqCallbacks.add(cb);
