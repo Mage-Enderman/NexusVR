@@ -52,6 +52,12 @@ export interface SpatialPanelEntry {
   frameGroup: THREE.Group;
   /** HTMLMesh used during an active XR session */
   htmlMesh: HTMLMesh | null;
+  /** Cached reference to the last-seen CanvasTexture map so we can detect
+   *  when HTMLMesh regenerates its texture (DOM mutations) and re-apply
+   *  the Y-flip immediately instead of waiting for the next render loop.
+   *  Without this, the texture appears upside-down for one frame after
+   *  every DOM mutation (e.g. clicking a settings button). */
+  _lastMapRef: THREE.Texture | null;
   /** InteractiveGroup wrapping the HTMLMesh for controller raycasting */
   interactiveGroup: InteractiveGroup | null;
   /** Whether this panel is currently visible */
@@ -281,6 +287,7 @@ export class SpatialPanelManager {
       group,
       frameGroup,
       htmlMesh: null,
+      _lastMapRef: null,
       interactiveGroup: null,
       visible: true,
       cssWidth,
@@ -582,6 +589,25 @@ export class SpatialPanelManager {
   }
 
   /**
+   * Walk up from `obj` to find a spatial panel's HTMLMesh and return the
+   * panel id + group. Used by App.tsx's tryVrGrab to detect when a grip
+   * raycast hits a spatial panel (HTMLMesh or InteractiveGroup child)
+   * and resolve it to the panel group for grabbing.
+   */
+  public getPanelInfoForObject(obj: THREE.Object3D): { panelId: string; group: THREE.Group } | null {
+    let cur: THREE.Object3D | null = obj;
+    while (cur) {
+      for (const [id, entry] of this.panels) {
+        if (entry.htmlMesh === cur) {
+          return { panelId: id, group: entry.group };
+        }
+      }
+      cur = cur.parent;
+    }
+    return null;
+  }
+
+  /**
    * Return all active HTMLMesh instances for VR raycasting / click delivery.
    */
   public getAllHTMLMeshes(): THREE.Object3D[] {
@@ -716,6 +742,31 @@ export class SpatialPanelManager {
         entry.group.updateMatrixWorld();
         entry.group.getWorldPosition(entry.htmlMesh.position);
         entry.group.getWorldQuaternion(entry.htmlMesh.quaternion);
+        // Re-apply canvas-texture Y-flip each frame.  HTMLMesh may
+        // regenerate its CanvasTexture on DOM mutations; the geometry-
+        // level UV flip is NOT used (it breaks raycaster UV coords).
+        const mat2 = entry.htmlMesh.material as THREE.MeshBasicMaterial;
+        if (mat2 && mat2.map) {
+          // Detect when HTMLMesh has regenerated its texture (e.g. after
+          // a DOM mutation from a button click). A new texture has
+          // default repeat.y=1 (not flipped), so the first frame after
+          // regeneration renders upside-down. By comparing the map
+          // reference against the cached last-seen reference we can
+          // re-apply the flip on the SAME frame the regeneration
+          // happened, eliminating the one-frame upside-down glitch.
+          if (mat2.map !== entry._lastMapRef) {
+            entry._lastMapRef = mat2.map;
+            mat2.map.repeat.set(1, -1);
+            mat2.map.offset.set(0, 1);
+            mat2.map.needsUpdate = true;
+          } else if (mat2.map.repeat.y !== -1) {
+            // Fallback: if the map reference didn't change but the
+            // repeat was reset by something else (shouldn't happen,
+            // but belt-and-suspenders).
+            mat2.map.repeat.set(1, -1);
+            mat2.map.offset.set(0, 1);
+          }
+        }
         // Scale: MULTIPLY the baseline cssSize (set in _buildHTMLMesh
         // as `cssWidth*cssScale × cssHeight*cssScale`) by the group's
         // compounded parent worldScale. Just COPYING
@@ -852,6 +903,51 @@ export class SpatialPanelManager {
       return;
     }
 
+    // Fix upside-down rendering: canvas textures in Three.js HTMLMesh
+    // rasterise with origin at top-left, but the PlaneGeometry UVs
+    // expect origin at bottom-left.  Flip the Y axis so text and UI
+    // read right-side-up in VR (same fix applied to the loading
+    // placeholder sprites and VRRadialMenuMesh).
+    const mat = htmlMesh.material as THREE.MeshBasicMaterial;
+    if (mat && mat.map) {
+      mat.map.repeat.set(1, -1);
+      mat.map.offset.set(0, 1);
+      mat.map.needsUpdate = true;
+    }
+    // NOTE: DO NOT flip the geometry UVs — that changes the raycaster
+    // hit.uv coordinates, which would break dispatchDOMClickAtUV's
+    // Y-coordinate calculation (it already does 1-uv.y internally).
+
+    // ---- Curved geometry (cylindrical bend matching VRHUDManager) ----
+    // Only curve wide panels (≥700 px) — the dash menu benefits from
+    // wrapping around the user; small inspector / video-control panels
+    // stay flat so text and precision controls remain readable.
+    // The geometry dimensions before scaling are (cssWidth*0.001) ×
+    // (cssHeight*0.001).  The curvature radius is chosen so the panel
+    // subtends a comfortable ~60° arc.
+    if (
+      entry.cssWidth >= 700 &&
+      htmlMesh.geometry &&
+      htmlMesh.geometry.type === 'PlaneGeometry'
+    ) {
+      const geo = htmlMesh.geometry;
+      const posAttr = geo.attributes.position;
+      // Matches VRHUDManager's radius-to-width ratio.
+      const panelWidth = entry.cssWidth * 0.001;
+      const radius = panelWidth * 1.125;  // ~1.8m radius for a 1.6m-wide panel
+      for (let i = 0; i < posAttr.count; i++) {
+        const x = posAttr.getX(i);
+        const y = posAttr.getY(i);
+        const angle = x / radius;
+        const newX = Math.sin(angle) * radius;
+        // Curve toward the viewer so the front face (-Z after lookAt)
+        // is visible — matches the VRHUDManager convention.
+        const newZ = (1 - Math.cos(angle)) * radius;
+        posAttr.setXYZ(i, newX, y, newZ);
+      }
+      geo.computeVertexNormals();
+    }
+
     // Three.js HTMLMesh creates a PlaneGeometry sized (width * 0.001) x (height * 0.001).
     // To achieve world dimensions of (width * cssScale) x (height * cssScale),
     // we scale uniformly by (cssScale / 0.001) = cssScale * 1000.
@@ -870,6 +966,7 @@ export class SpatialPanelManager {
 
     entry.htmlMesh = htmlMesh;
     entry.interactiveGroup = ig;
+    entry._lastMapRef = mat.map ?? null;
     entry.css3dObject.visible = false;
   }
 
@@ -890,6 +987,7 @@ export class SpatialPanelManager {
       m.geometry?.dispose();
       entry.htmlMesh = null;
       entry.interactiveGroup = null;
+      entry._lastMapRef = null;
       entry.css3dObject.visible = true;
     }
   }

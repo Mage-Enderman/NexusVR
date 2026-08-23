@@ -40,6 +40,11 @@ export interface SpatialPopUpWrapperProps {
   anchorOffset?: THREE.Vector3;
   frameless?: boolean;
   dockToParent?: boolean;
+  /** Optional callback for the 'Bring' button in the header.
+   *  When provided, the button calls this instead of just repositioning
+   *  the panel — typically teleports the inspected asset to in front
+   *  of the camera and broadcasts the new transform. */
+  onBringToMe?: () => void;
 }
 
 /**
@@ -78,6 +83,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   anchorOffset,
   frameless = false,
   dockToParent = false,
+  onBringToMe,
 }) => {
   const id = panelId ?? `spatial_${title.replace(/\s+/g, '_').toLowerCase()}`;
   const [isPinned, setIsPinned] = useState<boolean>(initialPinned);
@@ -157,6 +163,12 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   // ---- Bring to me ---------------------------------------------------------
 
   const handleBringToMe = () => {
+    // If a custom bring-to-me handler is provided (e.g. teleport the
+    // inspected asset to the user), call it AND still reposition the
+    // panel so the UI stays with the user.
+    if (onBringToMe) {
+      onBringToMe();
+    }
     if (camera && isPinned && spatialPanelManager) {
       spatialPanelManager.bringToCamera(id, camera);
     }
@@ -211,8 +223,8 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
 
   const panelUI = frameless ? (
     <div
-      className="w-full h-full bg-transparent overflow-hidden select-none pointer-events-none"
-      style={{ width: defaultWidth, height: defaultHeight }}
+      className="w-full h-full bg-transparent overflow-hidden select-none"
+      style={{ width: defaultWidth, height: defaultHeight, pointerEvents: 'auto' }}
     >
       {children}
     </div>
@@ -258,7 +270,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
         >
           <button
             onClick={handleBringToMe}
-            title="Snap window in front of you"
+            title={onBringToMe ? 'Bring asset to me & snap window in front' : 'Snap window in front of you'}
             className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-400 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40 text-xs flex items-center gap-1"
           >
             <Magnet className="w-3.5 h-3.5" />

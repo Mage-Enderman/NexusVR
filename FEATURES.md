@@ -66,6 +66,14 @@ src/
 - **In-flight loading placeholders:** peers see a pulsing cyan mesh + label `"Loading / <name> / by <user>"` until the real asset lands. Optimized for small per-frame cost (sin pulse + cheap rotation).
 - **Oversized file protection:** `buildEnvelope` strips the binary payload above the per-asset cap; receivers render a static red `"Too Large"` indicator instead of attempting to import a binary that was never sent.
 
+### Grabbable Component (`GrabbableComponent.ts`)
+- **Resonite-style component** that gates whether an object can be grabbed — without an enabled Grabbable, the grab raycasts pass through
+- **Fields:** enabled, scalable, allowSteal, grabPriority, editModeOnly, destroyOnRelease, reparentOnRelease, preserveUserSpace, dropOnDisable, allowedUsers
+- **Backward-compatible** with legacy `userData.grabbable` boolean toggle (dev tool key `7`)
+- **Inspector UI:** dedicated Grabbable section with toggles for all boolean fields + GrabPriority input
+- **Network-synced:** serialized in spawn envelopes and scene snapshots so peers see the same grab state
+- **Desktop + VR:** `isGrabbable()` gate in both RMB grab and VR grip grab paths; `isScalable()` gate for two-handed scale
+
 ### Manipulation (`ManipulationManager.ts`)
 - **Transform gizmos:** translate (W/G), rotate (R/E), scale (S)
 - **Local vs world space** toggle (Tools bar button)
@@ -135,7 +143,7 @@ src/
 |------|------|
 | Radial grab tab — bottom slice | Snap-grid *toggle* is a placeholder (logs no-op) |
 | Radial grab tab — left slice | Collision *toggle* works, but icon color cue is sometimes inconsistent |
-| SpatialPopUpWrapper "Bring to me" button | Not fully wired through to scene-engine teleport |
+| SpatialPopUpWrapper "Bring to me" button | ✅ Wired — teleports asset to in front of camera + broadcasts transform |
 | Progressive LOD | Opt-in only; no automatic enable based on GPU tier |
 | Avatar expression / blink | VRM blendshapes not exposed |
 | World persistence | Scenes are not saved to disk — only inventory items persist |

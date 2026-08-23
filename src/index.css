@@ -378,6 +378,11 @@ button {
 .overflow-hidden { overflow: hidden; }
 .overflow-y-auto { overflow-y: auto; }
 .overflow-x-hidden { overflow-x: hidden; }
+.max-h-\[40vh\] { max-height: 40vh; }
+.max-h-\[50vh\] { max-height: 50vh; }
+.max-h-\[60vh\] { max-height: 60vh; }
+.max-w-\[95vw\] { max-width: 95vw; }
+.max-w-\[90vw\] { max-width: 90vw; }
 
 /* Flexbox & Grid */
 .flex { display: flex; }
@@ -437,6 +442,31 @@ button {
   .lg\:grid-cols-7 { grid-template-columns: repeat(7, minmax(0, 1fr)); }
   .lg\:grid-cols-8 { grid-template-columns: repeat(8, minmax(0, 1fr)); }
   .lg\:grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+}
+
+/* Responsive Display Utilities */
+.hidden { display: none; }
+.block { display: block; }
+@media (min-width: 640px) {
+  .sm\:hidden { display: none; }
+  .sm\:block { display: block; }
+  .sm\:flex { display: flex; }
+  .sm\:inline { display: inline; }
+  .sm\:inline-flex { display: inline-flex; }
+}
+@media (min-width: 768px) {
+  .md\:hidden { display: none; }
+  .md\:block { display: block; }
+  .md\:flex { display: flex; }
+  .md\:inline { display: inline; }
+  .md\:inline-flex { display: inline-flex; }
+}
+@media (min-width: 1024px) {
+  .lg\:hidden { display: none; }
+  .lg\:block { display: block; }
+  .lg\:flex { display: flex; }
+  .lg\:inline { display: inline; }
+  .lg\:inline-flex { display: inline-flex; }
 }
 .gap-1 { gap: 0.25rem; }
 .gap-1\.5 { gap: 0.375rem; }

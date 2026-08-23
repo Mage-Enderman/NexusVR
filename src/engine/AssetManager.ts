@@ -141,6 +141,7 @@ export class AssetManager {
   private videoTickCallbacks: Map<string, () => void> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
   private onAssetRemovedCallbacks: Set<(id: string) => void> = new Set();
+  private onVideoPlaybackChangedCallbacks: Set<(id: string) => void> = new Set();
   // In-progress import dedup. Concurrent calls to `importFile` /
   // `importFromUrl` with the same customId return the same Promise
   // instead of each starting their own async work, so we never end up
@@ -320,6 +321,17 @@ export class AssetManager {
   public registerOnAssetRemoved(cb: (id: string) => void): () => void {
     this.onAssetRemovedCallbacks.add(cb);
     return () => this.onAssetRemovedCallbacks.delete(cb);
+  }
+
+  /**
+   * Subscribe to video playback state changes that happen outside
+   * the normal applyVideoState path — specifically the HTMLVideoElement
+   * 'ended' event. App.tsx uses this to trigger a React re-render so
+   * the play/pause button icon stays in sync when a video finishes.
+   */
+  public registerOnVideoPlaybackChanged(cb: (id: string) => void): () => void {
+    this.onVideoPlaybackChangedCallbacks.add(cb);
+    return () => this.onVideoPlaybackChangedCallbacks.delete(cb);
   }
 
   /**
@@ -1067,6 +1079,16 @@ export class AssetManager {
     });
   }
 
+
+  /**
+   * Draw a video frame to canvas with rotation compensation.
+   * The browser's <video> applies tkhd rotation internally, but
+   * canvas.drawImage() captures raw unrotated pixels. This helper
+   * applies a compensating canvas rotation so the texture and
+   * captureStream() output are correctly oriented.
+   */
+
+
   private async loadVideo(id: string, name: string, source: string | File | Blob, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
     // Phase 2: source can now be a File/Blob directly — no ArrayBuffer
     // needed in JS heap. URL imports still pass through with a string
@@ -1251,6 +1273,7 @@ export class AssetManager {
     const screenMat = new THREE.MeshBasicMaterial({ map: texture });
     const screenMesh = new THREE.Mesh(screenGeo, screenMat);
     screenMesh.position.z = 0.042;
+    screenMesh.scale.y = -1; // Flip video — Three.js reads raw unrotated frames
     group.add(screenMesh);
 
     // Source-of-truth playback state lives on userData. UI components
@@ -1318,8 +1341,10 @@ export class AssetManager {
     });
     video.addEventListener('ended', () => {
       videoState.playing = false;
+      // Notify subscribers (e.g. App.tsx) so the React play/pause
+      // icon updates without waiting for an unrelated re-render.
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
     });
-    video.play().catch(() => {});
 
     // Phase 2 fix-up: stash the downscale-mode + cleanup handles on
     // userData so removeAsset's existing customDispose hook can cancel
@@ -1459,6 +1484,8 @@ export class AssetManager {
     videoElement.preload = 'auto';
     videoElement.playsInline = true;
 
+    
+
     const downscalePlan = await this.shouldDownscaleVideoForVRAM(videoElement, name);
     let texture: THREE.VideoTexture | THREE.CanvasTexture;
     let rVfcHandle: number | null = null;
@@ -1499,6 +1526,8 @@ export class AssetManager {
     const screenMat = new THREE.MeshBasicMaterial({ map: texture });
     const screenMesh = new THREE.Mesh(screenGeo, screenMat);
     screenMesh.position.z = 0.042;
+    screenMesh.scale.y = -1; // Flip video — Three.js reads raw unrotated frames
+
     group.add(screenMesh);
     const videoState: VideoPlaybackState = {
       playing: false, currentTime: 0, duration: 0,
@@ -1590,8 +1619,10 @@ export class AssetManager {
     videoElement.addEventListener('play', () => { videoState.playing = true; });
     videoElement.addEventListener('pause', () => { videoState.playing = false; });
     videoElement.addEventListener('volumechange', () => { videoState.muted = videoElement.muted; });
-    videoElement.addEventListener('ended', () => { videoState.playing = false; });
-    videoElement.play().catch(() => {});
+    videoElement.addEventListener('ended', () => {
+      videoState.playing = false;
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
+    });
     group.userData.dispose = () => {
       try { videoElement.pause(); } catch { /* noop */ }
       // rVfcHandle holds whichever scheduling primitive the browser
@@ -1966,41 +1997,30 @@ export class AssetManager {
     });
 
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.copy(pos);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
-    // Persist the primitive type string on the mesh's userData so it
-    // round-trips through every downstream consumer that reads it back:
-    //   - App.tsx's `registerOnAssetAdded` broadcasts a spawn envelope
-    //     to peers and includes it in scene snapshots
-    //   - `handleDuplicateSelected` re-spawns the primitive
-    //   - `handleDeleteSelected`, `recordSpawnUndo`, and
-    //     `respawnFromSnapshot` all hit `obj.userData.primitiveType`
-    //     to reconstruct the asset after undo/redo
-    //   - `handleSpawnFromInventory` likewise reads it for re-import
-    // Without this, all four of those paths silently degraded to
-    // fall-through no-ops on primitives — the most visible symptom
-    // being that host-spawned cube/torus never appeared on guests in
-    // the network sync flow.
-    mesh.userData.primitiveType = type;
-    // Default every freshly-spawned primitive to persistent=true so
-    // the network broadcast's read-from-userData sources always has a
-    // defined value. Without this, a host that never opened the
-    // Scene Inspector for a given primitive would broadcast
-    // `isPersistent: undefined`, every receiver guard would skip, and
-    // the guest's checkbox would silently default-to-true via the
-    // inspector's `?? true` fallback — visible by coincidence, not by
-    // design. This makes the userData byte well-defined from asset
-    // birth so every downstream consumer reads consistent bytes.
-    mesh.userData.isPersistent = true;
 
-    this.worldRoot.add(mesh);
+    // Wrap the mesh in a Group so object3d is a container separate
+    // from the mesh child. This lets "Active" (object3d.visible) and
+    // "Mesh Renderer" (child mesh visibility) be independent toggles.
+    // Previously, primitives were bare Meshes — toggling the Mesh
+    // Renderer would also flip object3d.visible, coupling the two.
+    const group = new THREE.Group();
+    group.name = `Primitive ${type.toUpperCase()}`;
+    group.position.copy(pos);
+    group.add(mesh);
+    // Persist the primitive type string on userData so it round-trips
+    // through every downstream consumer that reads it back.
+    group.userData.primitiveType = type;
+    group.userData.isPersistent = true;
+
+    this.worldRoot.add(group);
 
     const asset: LoadedAsset = {
       id,
       name: `Primitive ${type.toUpperCase()}`,
       type: 'primitive',
-      object3d: mesh,
+      object3d: group,
       isCollidable: true
     };
 

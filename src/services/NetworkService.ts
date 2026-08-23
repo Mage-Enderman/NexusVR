@@ -43,6 +43,7 @@ export interface AssetSpawnData {
   isPersistent?: boolean;
   materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
+  grabbable?: Record<string, unknown>;
   // Phase 3A: when the host imports a video too large for the sync
   // envelope, the spawn carries `fileData: undefined` +
   // `fileDataOversized: true` AND this streamingHint. Receivers use it
@@ -109,6 +110,7 @@ export interface InspectorUpdateData {
   resoniteLight?: Partial<ResoniteLightConfig> | null;
   rotatorSpeed?: { x: number; y: number; z: number } | null;
   bobbingSpeed?: number | null;
+  grabbable?: Record<string, unknown> | null;
 
   // Hierarchy actions
   hierarchyAction?: {
@@ -309,7 +311,7 @@ export class NetworkService {
     this.localUserName = trimmed;
     try {
       localStorage.setItem('nexus_username', trimmed);
-    } catch {}
+    } catch { /* localStorage may be unavailable in incognito or full-screen */ }
     if (this.mode !== 'offline') {
       this.broadcastEnvelope(this.buildEnvelope('hs', {
         peerId: this.localPeerId,

@@ -68,7 +68,10 @@ import type { NetworkService } from './NetworkService.ts';
  * the fields we read here so the rest of the file stays typed.
  */
 interface MP4Info {
-  tracks: Array<{ id: number; codec: string }>;
+  tracks: Array<{
+    id: number;
+    codec: string;
+  }>;
   duration?: number;
   timescale?: number;
   isFragmented?: boolean;
@@ -785,7 +788,7 @@ export class VideoStreamingService {
     }
   }
 
-  private finishReceiverSession(session: ReceiverSession): void {
+  private async finishReceiverSession(session: ReceiverSession): Promise<void> {
     if (session.finished) return;
     session.finished = true;
     try {

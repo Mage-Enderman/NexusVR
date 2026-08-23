@@ -15,6 +15,8 @@ import {
 export interface DashMenuProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Render inside a spatial panel (VR) instead of full-viewport overlay. */
+  variant?: 'desktop' | 'spatial';
   userName?: string;
   onUpdateUserName?: (name: string) => void;
   networkService: NetworkService;
@@ -55,6 +57,7 @@ export interface DashMenuProps {
 export const DashMenu: React.FC<DashMenuProps> = ({
   isOpen,
   onClose,
+  variant = 'desktop',
   userName = 'Traveler',
   onUpdateUserName,
   networkService,
@@ -107,6 +110,8 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
   if (!isOpen) return null;
 
+  const isSpatial = variant === 'spatial';
+
   const permissions = ROLE_PERMISSIONS[localRole] || ROLE_PERMISSIONS.guest;
   const canModerate = permissions.canModerate || permissions.canAdmin;
   const canAdmin = permissions.canAdmin;
@@ -142,17 +147,23 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200">
-      <div className="w-full max-w-5xl h-[80vh] flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden">
+    <div className={isSpatial
+      ? 'w-full h-full flex'
+      : 'fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-md p-2 sm:p-4 animate-in fade-in duration-200'
+    }>
+      <div className={isSpatial
+        ? 'w-full h-full flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden'
+        : 'w-full max-w-5xl h-[80vh] flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden'
+      }>
         
         {/* Top Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
+        <div className={isSpatial ? 'px-3 py-2 border-b border-slate-800 flex items-center justify-between bg-slate-950/60' : 'px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60'}>
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20">
-              <Sparkles className="w-6 h-6" />
+            <div className={isSpatial ? 'p-1.5 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20' : 'p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20'}>
+              <Sparkles className={isSpatial ? 'w-4 h-4' : 'w-6 h-6'} />
             </div>
             <div>
-              <h2 className="text-xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+              <h2 className={isSpatial ? 'text-base font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent' : 'text-xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent'}>
                 NexusVR Dash Menu
               </h2>
               <p className="text-xs text-slate-400">
@@ -164,7 +175,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
             onClick={onClose}
             className="btn-dash-close"
           >
-            <X className="w-5 h-5" />
+            <X className={isSpatial ? 'w-4 h-4' : 'w-5 h-5'} />
           </button>
         </div>
 
@@ -172,58 +183,58 @@ export const DashMenu: React.FC<DashMenuProps> = ({
         <div className="flex-1 flex overflow-hidden">
           
           {/* Left Navigation Tabs */}
-          <div className="w-60 border-r border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-1.5">
+          <div className={isSpatial ? 'w-48 border-r border-slate-800 bg-slate-950/40 p-2 flex flex-col gap-1' : 'w-60 border-r border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-1.5'}>
             <button
               onClick={() => setActiveTab('session')}
-              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'session' ? 'dash-tab-active-cyan' : 'dash-tab'}`}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'session' ? 'dash-tab-active-cyan' : 'dash-tab'}`}
             >
-              <Users className="w-5 h-5 text-cyan-400" />
+              <Users className={isSpatial ? 'w-4 h-4 text-cyan-400' : 'w-5 h-5 text-cyan-400'} />
               <div className="flex-1">
-                <div>Session & Roles</div>
+                <div className={isSpatial ? 'text-xs' : ''}>Session & Roles</div>
                 <div className="text-[10px] text-slate-500 font-normal">{allUsers.length} active players</div>
               </div>
             </button>
 
             <button
               onClick={() => setActiveTab('inventory')}
-              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'inventory' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'inventory' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
             >
-              <Package className="w-5 h-5 text-emerald-400" />
+              <Package className={isSpatial ? 'w-4 h-4 text-emerald-400' : 'w-5 h-5 text-emerald-400'} />
               <div className="flex-1">
-                <div>Quick Inventory</div>
+                <div className={isSpatial ? 'text-xs' : ''}>Quick Inventory</div>
                 <div className="text-[10px] text-slate-500 font-normal">Spawn & Equip assets</div>
               </div>
             </button>
 
             <button
               onClick={() => setActiveTab('controls')}
-              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'controls' ? 'dash-tab-active-purple' : 'dash-tab'}`}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'controls' ? 'dash-tab-active-purple' : 'dash-tab'}`}
             >
-              <HelpCircle className="w-5 h-5 text-purple-400" />
+              <HelpCircle className={isSpatial ? 'w-4 h-4 text-purple-400' : 'w-5 h-5 text-purple-400'} />
               <div className="flex-1">
-                <div>Controls Guide</div>
+                <div className={isSpatial ? 'text-xs' : ''}>Controls Guide</div>
                 <div className="text-[10px] text-slate-500 font-normal">Shortcuts & VR mapping</div>
               </div>
             </button>
 
             <button
               onClick={() => setActiveTab('settings')}
-              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'settings' ? 'dash-tab-active-amber' : 'dash-tab'}`}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'settings' ? 'dash-tab-active-amber' : 'dash-tab'}`}
             >
-              <SettingsIcon className="w-5 h-5 text-amber-400" />
+              <SettingsIcon className={isSpatial ? 'w-4 h-4 text-amber-400' : 'w-5 h-5 text-amber-400'} />
               <div className="flex-1">
-                <div>Settings & Audio</div>
+                <div className={isSpatial ? 'text-xs' : ''}>Settings & Audio</div>
                 <div className="text-[10px] text-slate-500 font-normal">Graphics, Mic & Environment</div>
               </div>
             </button>
 
             <button
               onClick={() => setActiveTab('splats')}
-              className={`flex items-center gap-3 px-4 py-3 text-left ${activeTab === 'splats' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'splats' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
             >
-              <Sparkles className="w-5 h-5 text-emerald-400" />
+              <Sparkles className={isSpatial ? 'w-4 h-4 text-emerald-400' : 'w-5 h-5 text-emerald-400'} />
               <div className="flex-1">
-                <div>Gaussian Splats</div>
+                <div className={isSpatial ? 'text-xs' : ''}>Gaussian Splats</div>
                 <div className="text-[10px] text-slate-500 font-normal">Spark RAD, LODs & Max Splats</div>
               </div>
             </button>
@@ -242,11 +253,11 @@ export const DashMenu: React.FC<DashMenuProps> = ({
           </div>
 
           {/* Right Content Area */}
-          <div className="flex-1 overflow-y-auto p-6">
+          <div className={isSpatial ? 'flex-1 overflow-y-auto p-4' : 'flex-1 overflow-y-auto p-6'}>
             
             {/* SESSION TAB */}
             {activeTab === 'session' && (
-              <div className="space-y-6">
+              <div className={isSpatial ? 'space-y-4' : 'space-y-6'}>
                 {onOpenSaveLoad && (
                   <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-950/40 via-slate-900/80 to-cyan-950/40 border border-purple-500/30 flex items-center justify-between gap-4 shadow-lg">
                     <div>
@@ -1263,7 +1274,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
         </div>
 
         {/* Bottom Footer */}
-        <div className="px-6 py-3 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-xs text-slate-400">
+        <div className={isSpatial ? 'px-3 py-2 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-[10px] text-slate-400' : 'px-6 py-3 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-xs text-slate-400'}>
           <div>Press <kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">TAB</kbd> or <kbd className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">ESC</kbd> to close</div>
           <div className="flex items-center gap-2">
             <span>NexusVR P2P Engine v1.5</span>

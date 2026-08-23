@@ -29,6 +29,10 @@ export interface VideoObjectControlsProps {
   onSyncModeToggle?: (mode: 'persistent' | 'watch-party') => void;
   /** Whether the current user can toggle sync mode (must be host or file owner) */
   canToggleSyncMode?: boolean;
+  /** Flip the video vertically (for videos that display upside-down) */
+  onFlip?: () => void;
+  /** Whether the video is currently flipped */
+  isFlipped?: boolean;
 }
 
 /**
@@ -61,6 +65,8 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   syncMode,
   onSyncModeToggle,
   canToggleSyncMode = true,
+  onFlip,
+  isFlipped = false,
 }) => {
   const fillRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
@@ -251,7 +257,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
           <div
             ref={volumeTrackRef}
             onPointerDown={beginVolumeScrub}
-            onMouseDown={beginVolumeScrub as any}
+            onMouseDown={beginVolumeScrub}
             onClick={(e) => e.stopPropagation()}
             onWheel={(e) => {
               e.stopPropagation();
@@ -345,7 +351,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
           <div
             ref={timelineRef}
             onPointerDown={beginScrub}
-            onMouseDown={beginScrub as any}
+            onMouseDown={beginScrub}
             onClick={(e) => e.stopPropagation()}
             className="relative flex-1 h-3 bg-slate-800/80 rounded-full cursor-pointer overflow-hidden border border-slate-700/60"
           >
@@ -428,8 +434,22 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             </button>
           </div>
 
-          {/* Right Controls: Audio Mode Indicator & Switcher */}
+          {/* Right Controls: Audio Mode, Flip, & Switcher */}
           <div className="flex items-center gap-3">
+            {/* Flip Video Button */}
+            {onFlip && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onFlip();
+                }}
+                title={isFlipped ? 'Unflip video' : 'Flip video vertically (fix upside-down)'}
+                className="px-3 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-amber-500/60 text-slate-200 hover:text-white flex items-center gap-2 text-xs font-bold transition-all cursor-pointer shadow-sm"
+              >
+                <span>↕️ Flip</span>
+              </button>
+            )}
+
             {/* Global / Local Mode Switcher Pill Button */}
             <button
               onClick={(e) => {

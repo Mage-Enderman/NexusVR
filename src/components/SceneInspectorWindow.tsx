@@ -8,7 +8,7 @@ import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
 import { VideoControls } from './VideoControls.tsx';
 import {
   Trash2, RotateCcw, ArrowUpRight, Magnet, Plus, Copy,
-  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye
+  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye, Hand
 } from 'lucide-react';
 import {
   type ResoniteLightConfig,
@@ -16,10 +16,15 @@ import {
   syncThreeLightFromConfig,
   removeLightComponent
 } from '../engine/ResoniteLightSync.ts';
+import { type GrabbableComponent, DEFAULT_GRABBABLE, getGrabbable, setGrabbable } from '../components/grabbable/GrabbableComponent.ts';
 
 export interface SceneInspectorWindowProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Unique identifier for this inspector instance. Used as the
+   *  SpatialPanelManager panel ID so multiple inspector windows each
+   *  get their own CSS3DObject instead of stomping on each other. */
+  instanceId?: string;
   selectedAsset: LoadedAsset | null;
   onSelectAsset?: (asset: LoadedAsset | null) => void;
   onUpdateAsset: (asset: LoadedAsset) => void;
@@ -114,6 +119,46 @@ export interface VideoActions {
   onClose: () => void;
 }
 
+/**
+ * Checkbox-style toggle that is NEVER a real <input type="checkbox">.
+ *
+ * Root cause of the "click Active, lose mouse-look" bug: a native
+ * <input> is a focusable form control, and clicking it shifts DOM
+ * focus off the canvas. Since the pointer lock is held by the canvas
+ * element, that focus shift silently drops Pointer Lock — the browser
+ * does this on its own, no code we write calls exitPointerLock(). The
+ * fix isn't a click handler tweak, it's not using a native form
+ * control at all: this renders as a plain <span> (never focusable)
+ * and the click is handled by a non-form wrapper, so focus never
+ * leaves the canvas and the lock survives. onMouseDown preventDefault
+ * is a second line of defense against any default focus behavior.
+ */
+const ToggleSwitch: React.FC<{
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  size?: string;
+  accentClass?: string;
+  className?: string;
+  title?: string;
+}> = ({ checked, onChange, size = 'w-3.5 h-3.5', accentClass = 'bg-cyan-500 border-cyan-400', className = '', title }) => (
+  <span
+    role="checkbox"
+    aria-checked={checked}
+    title={title}
+    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+    onClick={(e) => { e.stopPropagation(); onChange(!checked); }}
+    className={`inline-flex shrink-0 items-center justify-center rounded border cursor-pointer transition ${size} ${
+      checked ? accentClass : 'bg-slate-950 border-slate-700'
+    } ${className}`}
+  >
+    {checked && (
+      <svg viewBox="0 0 12 12" className="w-2/3 h-2/3 fill-none stroke-white" strokeWidth={2}>
+        <path d="M2 6l3 3 5-6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    )}
+  </span>
+);
+
 export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   isOpen,
   onClose,
@@ -129,6 +174,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   scene,
   camera,
   assetManager,
+  instanceId,
   spatialPanelManager,
   videoActions,
   targetObject,
@@ -156,6 +202,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const [tag, setTag] = useState('null');
   const [active, setActive] = useState(selectedAsset?.object3d.visible ?? true);
   const [persistent, setPersistent] = useState(true);
+  const [grabbable, setGrabbableState] = useState<GrabbableComponent>({ ...DEFAULT_GRABBABLE });
   // const [orderOffset, setOrderOffset] = useState(0);
 
   // Transform states
@@ -222,10 +269,16 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const handleToggleMeshEnabled = (enabled: boolean) => {
     setMeshEnabled(enabled);
     if (!selectedAsset || !interactive) return;
-    selectedAsset.object3d.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) {
-        child.visible = enabled;
-      }
+    // Only toggle child meshes — never the root object3d itself.
+    // The root's .visible is controlled by the "Active" toggle;
+    // the Mesh Renderer toggle should only affect child meshes so
+    // that Active and Mesh Renderer remain independent concepts.
+    selectedAsset.object3d.children.forEach((child) => {
+      child.traverse((c) => {
+        if ((c as THREE.Mesh).isMesh) {
+          c.visible = enabled;
+        }
+      });
     });
     onUpdateAsset({ ...selectedAsset });
     onBroadcastInspectorUpdate?.({
@@ -270,6 +323,12 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // @ts-ignore
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const [inspectorRootUUID, setInspectorRootUUID] = useState<string | null>(null);
+  // Cosmetic "Enabled" toggles on the Material / Texture section headers
+  // (not yet wired to any real component-disable logic upstream) — kept
+  // as local UI state so they're still real toggles, just not native
+  // <input> ones (see ToggleSwitch for why).
+  const [materialSectionEnabled, setMaterialSectionEnabled] = useState(true);
+  const [textureSectionEnabled, setTextureSectionEnabled] = useState(true);
   const [sceneExplorerQuery, setSceneExplorerQuery] = useState('');
   const [expandedExplorerNodes, setExpandedExplorerNodes] = useState<Set<string>>(new Set());
 
@@ -350,6 +409,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     // means a guest opening the inspector on a spawn asset that hasn't
     // had isPersistent broadcast yet still shows the host's intent.
     setPersistent(((selectedAsset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined) ?? true);
+    setGrabbableState(getGrabbable(selectedAsset.object3d));
 
     const existingLight = selectedAsset.object3d.children.find((c) => (c as THREE.Light).isLight) as THREE.Light | undefined;
     const existingLightConfig = (selectedAsset.object3d.userData as Record<string, any>)?.resoniteLight;
@@ -370,8 +430,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     }
 
     let visibleMesh = false;
-    selectedAsset.object3d.traverse((c) => {
-      if ((c as THREE.Mesh).isMesh && (c as THREE.Mesh).visible) visibleMesh = true;
+    selectedAsset.object3d.children.forEach((child) => {
+      child.traverse((c) => {
+        if ((c as THREE.Mesh).isMesh && (c as THREE.Mesh).visible) visibleMesh = true;
+      });
     });
     setMeshEnabled(visibleMesh);
 
@@ -398,8 +460,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     setActive(selectedAsset.object3d.visible);
     setPersistent(((selectedAsset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined) ?? true);
     let visibleMesh = false;
-    selectedAsset.object3d.traverse((c) => {
-      if ((c as THREE.Mesh).isMesh && (c as THREE.Mesh).visible) visibleMesh = true;
+    selectedAsset.object3d.children.forEach((child) => {
+      child.traverse((c) => {
+        if ((c as THREE.Mesh).isMesh && (c as THREE.Mesh).visible) visibleMesh = true;
+      });
     });
     setMeshEnabled(visibleMesh);
   }, [selectedAsset]);
@@ -850,11 +914,14 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       camera={camera}
       assetManager={assetManager}
       spatialPanelManager={spatialPanelManager}
-      panelId="inspector"
+      panelId={instanceId ?? 'inspector'}
       defaultWidth={560}
       defaultHeight={780}
       initialPinned={true}
       parentObject={dockTarget ?? undefined}
+      onBringToMe={() => {
+        if (selectedAsset) onBringAsset(selectedAsset);
+      }}
     >
       {originatorHeader && (
         <div className="mb-2 flex items-center gap-2 bg-purple-500/10 border border-purple-500/40 rounded-lg px-3 py-2">
@@ -1227,19 +1294,21 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                           }
                         }}
                         onDoubleClick={() => {
+                          // Double-click selects only — same as a single
+                          // click, just explicit. It deliberately does NOT
+                          // re-root the hierarchy anymore: that used to
+                          // hide the very row you just clicked (it becomes
+                          // the new root) and collapsed its siblings out of
+                          // view. Zooming in on the hierarchy is now solely
+                          // the Layers-icon focus button's job, so
+                          // selecting and focusing stay independent.
                           setSelectedNodeUUID(node.uuid);
                           const owningAsset = findOwningAsset(node);
                           if (owningAsset && owningAsset.id !== selectedAsset.id) {
                             onSelectAsset?.(owningAsset);
                           }
-                          // Double-click both selects AND focuses in one
-                          // step — re-roots the visible tree at this node,
-                          // same as clicking the row once then pressing
-                          // the focus button, matching Resonite's
-                          // double-click-to-drill-in hierarchy behavior.
-                          setInspectorRootUUID(node.uuid);
                         }}
-                        title="Click to select · double-click to focus in"
+                        title="Click or double-click to select · use the focus button to zoom in"
                         style={{ paddingLeft: `${depth * 12 + 4}px` }}
                         className={`flex items-center gap-1.5 py-0.5 pr-1.5 rounded text-[11px] cursor-pointer transition ${
                           isAssetRoot
@@ -1400,31 +1469,42 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 />
               </div>
               <div className="flex items-center gap-4">
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer select-none"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => { const v = !active; setActive(v); if (!interactive || !selectedAsset) return; selectedAsset.object3d.visible = v; onUpdateAsset({ ...selectedAsset }); onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, active: v }); }}
+                >
+                  <ToggleSwitch
                     checked={active}
-                    onChange={(e) => { setActive(e.target.checked); if (!interactive || !selectedAsset) return; selectedAsset.object3d.visible = e.target.checked; onUpdateAsset({ ...selectedAsset }); onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, active: e.target.checked }); }}
-                    className="w-3.5 h-3.5 accent-cyan-500 rounded"
+                    onChange={(v) => { setActive(v); if (!interactive || !selectedAsset) return; selectedAsset.object3d.visible = v; onUpdateAsset({ ...selectedAsset }); onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, active: v }); }}
                   />
                   <span className="font-bold text-slate-300">Active</span>
                 </label>
-                <label className="flex items-center gap-1.5 cursor-pointer">
-                  <input
-                    type="checkbox"
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer select-none"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    const v = !persistent;
+                    setPersistent(v);
+                    if (!interactive || !selectedAsset) return;
+                    selectedAsset.object3d.userData.isPersistent = v;
+                    onUpdateAsset({ ...selectedAsset });
+                    onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, persistent: v });
+                  }}
+                >
+                  <ToggleSwitch
                     checked={persistent}
-                    onChange={(e) => {
-                      setPersistent(e.target.checked);
+                    onChange={(v) => {
+                      setPersistent(v);
                       // Keep userData in sync so other consumers (peer
                       // synchronization, future "save world" action,
                       // and the inspector's hierarchy orange-dot indicator)
                       // see the persisted bit, not just local UI state.
                       if (!interactive || !selectedAsset) return;
-                      selectedAsset.object3d.userData.isPersistent = e.target.checked;
+                      selectedAsset.object3d.userData.isPersistent = v;
                       onUpdateAsset({ ...selectedAsset });
-                      onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, persistent: e.target.checked });
+                      onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined, persistent: v });
                     }}
-                    className="w-3.5 h-3.5 accent-cyan-500 rounded"
                   />
                   <span className="font-bold text-slate-300">Persistent</span>
                 </label>
@@ -1517,6 +1597,160 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>
           </div>
 
+          {/* COMPONENT: Grabbable Component — always shown, controls grab interaction */}
+          <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
+            <div
+              onClick={() => toggleSection('comp-Grabbable')}
+              className="px-3 py-2 bg-gradient-to-r from-cyan-900/40 via-slate-900 to-cyan-900/40 border-b border-cyan-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-cyan-900/30 transition"
+            >
+              <div className="flex items-center gap-2">
+                <Hand className="w-4 h-4 text-cyan-400" />
+                <span className="font-black text-cyan-300 tracking-wider text-sm">Grabbable</span>
+                <span className="text-[10px] text-slate-500 font-normal ml-1">Component</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${grabbable.enabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/50 text-slate-500'}`}>
+                  {grabbable.enabled ? 'ENABLED' : 'DISABLED'}
+                </span>
+                {!collapsedSections['comp-Grabbable'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
+              </div>
+            </div>
+
+            {!collapsedSections['comp-Grabbable'] && (
+              <div className="p-2 bg-slate-950/90 text-xs">
+                {/* Enabled toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">enabled:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.enabled}
+                    onChange={(v) => {
+                      const next = { ...grabbable, enabled: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                      onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                    }}
+                  />
+                </div>
+
+                {/* Scalable toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">Scalable:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.scalable}
+                    onChange={(v) => {
+                      const next = { ...grabbable, scalable: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                  />
+                </div>
+
+                {/* AllowSteal toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">AllowSteal:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.allowSteal}
+                    onChange={(v) => {
+                      const next = { ...grabbable, allowSteal: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                  />
+                </div>
+
+                {/* GrabPriority */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">GrabPriority:</span>
+                  </div>
+                  <input
+                    type="number"
+                    value={grabbable.grabPriority}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value) || 0;
+                      const next = { ...grabbable, grabPriority: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                    className="w-16 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-white text-right font-mono"
+                  />
+                </div>
+
+                {/* EditModeOnly toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">EditModeOnly:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.editModeOnly}
+                    onChange={(v) => {
+                      const next = { ...grabbable, editModeOnly: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                  />
+                </div>
+
+                {/* ReparentOnRelease toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">ReparentOnRelease:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.reparentOnRelease}
+                    onChange={(v) => {
+                      const next = { ...grabbable, reparentOnRelease: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                  />
+                </div>
+
+                {/* DestroyOnRelease toggle */}
+                <div className="flex items-center justify-between py-1.5 px-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                    <span className="font-mono text-xs font-semibold text-slate-300">DestroyOnRelease:</span>
+                  </div>
+                  <ToggleSwitch
+                    checked={grabbable.destroyOnRelease}
+                    onChange={(v) => {
+                      const next = { ...grabbable, destroyOnRelease: v };
+                      setGrabbableState(next);
+                      if (!interactive || !selectedAsset) return;
+                      setGrabbable(selectedAsset.object3d, next);
+                      onUpdateAsset({ ...selectedAsset });
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* COMPONENT 0: Resonite Light Source Component (Shown at top for light assets) */}
           {attachedComponents.includes('Light Source') && (
             <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl mb-3">
@@ -1563,11 +1797,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                       <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
                       <span className="font-mono text-xs font-semibold text-slate-300">persistent:</span>
                     </div>
-                    <input
-                      type="checkbox"
+                    <ToggleSwitch
                       checked={lightConfig.persistent}
-                      onChange={(e) => handleUpdateLightConfig({ persistent: e.target.checked })}
-                      className="w-4 h-4 rounded bg-slate-800 border-slate-600 text-cyan-500 focus:ring-cyan-500 cursor-pointer"
+                      onChange={(v) => handleUpdateLightConfig({ persistent: v })}
+                      size="w-4 h-4"
                     />
                   </div>
 
@@ -1591,11 +1824,10 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                       <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
                       <span className="font-mono text-xs font-semibold text-slate-300">Enabled:</span>
                     </div>
-                    <input
-                      type="checkbox"
+                    <ToggleSwitch
                       checked={lightConfig.Enabled}
-                      onChange={(e) => handleUpdateLightConfig({ Enabled: e.target.checked })}
-                      className="w-4 h-4 rounded bg-slate-800 border-slate-600 text-cyan-500 focus:ring-cyan-500 cursor-pointer"
+                      onChange={(v) => handleUpdateLightConfig({ Enabled: v })}
+                      size="w-4 h-4"
                     />
                   </div>
 
@@ -1916,12 +2148,11 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 </span>
                 <div className="flex gap-1.5 items-center">
                   <span className="text-[10px] text-slate-400">Order: 0</span>
-                  <label className="flex items-center gap-1 cursor-pointer ml-2" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
+                  <label className="flex items-center gap-1 cursor-pointer ml-2 select-none" onMouseDown={(e) => e.preventDefault()} onClick={(e) => { e.stopPropagation(); handleToggleMeshEnabled(!meshEnabled); }}>
+                    <ToggleSwitch
                       checked={meshEnabled}
-                      onChange={(e) => handleToggleMeshEnabled(e.target.checked)}
-                      className="accent-amber-500 rounded"
+                      onChange={(v) => handleToggleMeshEnabled(v)}
+                      accentClass="bg-amber-500 border-amber-400"
                     />
                     <span className="text-slate-300 font-bold">Enabled</span>
                   </label>
@@ -1966,12 +2197,14 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
 
                 <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
                   <span className="text-slate-400 font-semibold">Wireframe:</span>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="checkbox"
+                  <label
+                    className="flex items-center gap-1.5 cursor-pointer select-none"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => handleUpdateMaterial('wireframe', !matProps.wireframe)}
+                  >
+                    <ToggleSwitch
                       checked={matProps.wireframe}
-                      onChange={(e) => handleUpdateMaterial('wireframe', e.target.checked)}
-                      className="w-3.5 h-3.5 accent-cyan-500 rounded"
+                      onChange={(v) => handleUpdateMaterial('wireframe', v)}
                     />
                     <span className="text-white font-bold">{matProps.wireframe ? 'ON' : 'OFF'}</span>
                   </label>
@@ -2012,8 +2245,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 <span>MeshRenderer & Materials</span>
               </span>
               <div className="flex items-center gap-1.5">
-                <label className="flex items-center gap-1 cursor-pointer" onClick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" defaultChecked className="accent-emerald-500 rounded" />
+                <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={(e) => { e.stopPropagation(); setMaterialSectionEnabled(v => !v); }}>
+                  <ToggleSwitch checked={materialSectionEnabled} onChange={setMaterialSectionEnabled} accentClass="bg-emerald-500 border-emerald-400" />
                   <span className="text-slate-300 font-bold">Enabled</span>
                 </label>
                 <button
@@ -2357,8 +2590,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 <span>StaticTexture2D / Albedo Surface Map</span>
               </span>
               <div className="flex items-center gap-1.5">
-                <label className="flex items-center gap-1 cursor-pointer" onClick={(e) => e.stopPropagation()}>
-                  <input type="checkbox" defaultChecked className="accent-cyan-500 rounded" />
+                <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={(e) => { e.stopPropagation(); setTextureSectionEnabled(v => !v); }}>
+                  <ToggleSwitch checked={textureSectionEnabled} onChange={setTextureSectionEnabled} />
                   <span className="text-slate-300 font-bold">Enabled</span>
                 </label>
                 <button
@@ -2448,8 +2681,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
                   <span className="text-slate-400 font-semibold">MipMaps & Raw:</span>
                   <div className="flex gap-2">
-                    <label className="flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={texProps.mipmaps} onChange={(e) => setTexProps({...texProps, mipmaps: e.target.checked})} className="accent-cyan-400 rounded w-3 h-3" /><span>MipMaps</span></label>
-                    <label className="flex items-center gap-1 cursor-pointer"><input type="checkbox" checked={texProps.uncompressed} onChange={(e) => setTexProps({...texProps, uncompressed: e.target.checked})} className="accent-cyan-400 rounded w-3 h-3" /><span>Raw</span></label>
+                    <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, mipmaps: !texProps.mipmaps})}><ToggleSwitch checked={texProps.mipmaps} onChange={(v) => setTexProps({...texProps, mipmaps: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span>MipMaps</span></label>
+                    <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, uncompressed: !texProps.uncompressed})}><ToggleSwitch checked={texProps.uncompressed} onChange={(v) => setTexProps({...texProps, uncompressed: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span>Raw</span></label>
                   </div>
                 </div>
               </div>

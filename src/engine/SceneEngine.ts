@@ -6,6 +6,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { SparkRenderer } from '@sparkjsdev/spark';
 import { VRInputManager } from './VRInputManager.ts';
 import { SpatialPanelManager } from './SpatialPanelManager.ts';
+import type { EnvironmentManager } from './EnvironmentManager.ts';
 
 export interface GraphicsSettings {
   resolutionScale: number; // 0.5 to 2.0
@@ -167,7 +168,7 @@ export class SceneEngine {
   private fpsTimer = 0;
   public isVRMode = false;
   private vrButtonElement: HTMLElement | null = null;
-  public environmentManager: any = null;
+  public environmentManager: EnvironmentManager | null = null;
 
   public cameraMode: 'orbit' | 'first-person' = 'first-person';
   public locomotionMode: 'walk' | 'flight' | 'noclip' = 'walk';

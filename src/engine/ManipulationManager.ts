@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import type { LoadedAsset } from './AssetManager.ts';
 import type { VRInputManager } from './VRInputManager.ts';
+import { isGrabbable } from '../components/grabbable/GrabbableComponent.ts';
 
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 
@@ -817,6 +818,17 @@ export class ManipulationManager {
       if (ManipulationManager.RMB_DEBUG_ENABLED) {
         console.log(
           `[RMB] onPointerDown EARLY-RETURN  reason=objMap_lookup_undefined  walkedUpObject.name=${cur.name}  objMap.keys.has=${objMap.has(cur)}`,
+        );
+      }
+      return;
+    }
+    // Grabbable component gate — objects without an enabled Grabbable
+    // component are not grabbable. This mirrors Resonite's behavior where
+    // an object MUST have a Grabbable component to be interacted with.
+    if (!isGrabbable(hitAsset.object3d)) {
+      if (ManipulationManager.RMB_DEBUG_ENABLED) {
+        console.log(
+          `[RMB] onPointerDown EARLY-RETURN  reason=not_grabbable  asset.id=${hitAsset.id}  asset.name=${hitAsset.name}`,
         );
       }
       return;

@@ -1960,20 +1960,26 @@ export class VRHUDManager {
     const basicH = 36;
     const basicW = 220;
     let bsx = 56;
-    // VISIBLE (toggle)
-    const isVisibleVal = o3d.visible;
+    // MESH RENDERER (toggle child mesh visibility only —
+    // independent of Active which controls object3d.visible)
+    let anyChildMeshVisible = false;
+    o3d.children.forEach((child) => {
+      child.traverse((c) => {
+        if ((c as THREE.Mesh).isMesh && c.visible) anyChildMeshVisible = true;
+      });
+    });
     drawBtn(
       bsx, basicY, basicW, basicH,
-      isVisibleVal ? 'VISIBLE: ON' : 'VISIBLE: OFF',
-      'inspect.toggle:visible',
-      isVisibleVal ? 'rgba(16,185,129,0.20)' : 'rgba(30,41,59,0.7)',
-      isVisibleVal ? '#34d399' : '#cbd5e1',
-      isVisibleVal ? '#10b981' : '#475569'
+      anyChildMeshVisible ? 'MESH REN: ON' : 'MESH REN: OFF',
+      'inspect.toggle:meshRenderer',
+      anyChildMeshVisible ? 'rgba(16,185,129,0.20)' : 'rgba(30,41,59,0.7)',
+      anyChildMeshVisible ? '#34d399' : '#cbd5e1',
+      anyChildMeshVisible ? '#10b981' : '#475569'
     );
     bsx += basicW + 12;
     // ACTIVE (Three.js default active is `true`; userData.active is the
     // app's extension flag for "logs/spawn logic treats as alive")
-    const isActiveVal = (o3d.userData as { active?: boolean }).active ?? true;
+    const isActiveVal = o3d.visible;
     drawBtn(
       bsx, basicY, basicW, basicH,
       isActiveVal ? 'ACTIVE: ON' : 'ACTIVE: OFF',
@@ -2122,11 +2128,11 @@ export class VRHUDManager {
     const toggleH = 26;
     const toggleRows: Array<{ label: string; action: string; on: boolean; accent: string; bg: string; }> = [
       {
-        label: 'VISIBLE: ' + (o3d.visible ? 'ON' : 'OFF'),
-        action: 'inspect.toggle:visible',
-        on: o3d.visible,
-        accent: o3d.visible ? '#10b981' : '#475569',
-        bg: o3d.visible ? 'rgba(16,185,129,0.20)' : 'rgba(30,41,59,0.7)',
+        label: 'MESH REN: ' + (anyChildMeshVisible ? 'ON' : 'OFF'),
+        action: 'inspect.toggle:meshRenderer',
+        on: anyChildMeshVisible,
+        accent: anyChildMeshVisible ? '#10b981' : '#475569',
+        bg: anyChildMeshVisible ? 'rgba(16,185,129,0.20)' : 'rgba(30,41,59,0.7)',
       },
       {
         label: 'WIREFRAME: ' + ((mat0 as THREE.MeshStandardMaterial | null)?.wireframe ? 'ON' : 'OFF'),

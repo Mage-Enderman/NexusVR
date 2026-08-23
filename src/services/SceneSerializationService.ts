@@ -16,6 +16,7 @@ export interface SavedSceneAsset {
   metadata?: any;
   primitiveType?: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane';
   materialState?: any;
+  grabbable?: Record<string, unknown>;
 }
 
 export interface SavedScene {

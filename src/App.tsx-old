@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import ReactDOM from 'react-dom';
 import * as THREE from 'three';
+import { findObjectByUUID } from './utils/findObjectByUUID.ts';
 import confetti from 'canvas-confetti';
 
 import { SceneEngine } from './engine/SceneEngine.ts';
@@ -11,7 +11,14 @@ import { ManipulationManager } from './engine/ManipulationManager.ts';
 import type { TransformMode } from './engine/ManipulationManager.ts';
 import { AvatarManager } from './engine/AvatarManager.ts';
 import { NetworkService } from './services/NetworkService.ts';
-import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage } from './services/NetworkService.ts';
+import type { ConnectionMode, AssetSpawnData, PendingSpawnData, ChatMessage, MaterialUpdate, InspectorUpdateData } from './services/NetworkService.ts';
+import { VideoStreamingService } from './services/VideoStreamingService.ts';
+
+// Phase 3A: streaming threshold mirrors NetworkService.MAX_INLINED_FILE_BYTES
+// (15 MB). Anything larger strips out of the base64 JSON envelope to avoid
+// the Quest browser's renderer OOM, so peers need a streamingHint in the
+// spawn envelope to pull bytes over a binary DataChannel.
+const VIDEO_STREAMING_THRESHOLD = 15 * 1024 * 1024;
 import { InventoryService } from './services/InventoryService.ts';
 import type { InventoryItem } from './services/InventoryService.ts';
 import { UndoRedoManager } from './services/UndoRedoManager.ts';
@@ -37,18 +44,19 @@ import { BrushManager } from './engine/BrushManager.ts';
 import { WorldToolsPanel } from './components/WorldToolsPanel.tsx';
 import type { ToolType } from './components/WorldToolsPanel.tsx';
 import { SceneInspectorWindow } from './components/SceneInspectorWindow.tsx';
-import { VideoControls } from './components/VideoControls.tsx';
+import { SpatialPopUpWrapper } from './components/SpatialPopUpWrapper.tsx';
 import { VideoObjectControls } from './components/VideoObjectControls.tsx';
-import type { VideoPlaybackState } from './engine/AssetManager.ts';
 import { RadialContextMenu } from './components/RadialContextMenu.tsx';
 import { VRRadialMenuMesh } from './engine/VRRadialMenuMesh.ts';
 import type { VRRadialMenuState, VRRadialMenuCallbacks } from './engine/VRRadialMenuMesh.ts';
+import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
+import { DEFAULT_LIGHT_CONFIG, removeLightComponent, syncThreeLightFromConfig } from './engine/ResoniteLightSync.ts';
 import { X } from 'lucide-react';
 
 /**
  * Build a small 3D loading placeholder at the given world position.
  * Returns the THREE.Group (already positioned, NOT yet parented) plus
- * a `dispose()` cleanup callback that releases all GPU resources —
+ * a `dispose()` cleanup callback that releases all GPU resources -
  * including the Sprite's `CanvasTexture`, which Three.js does NOT
  * auto-dispose when its material is disposed (textures can be shared
  * across multiple materials). Without this explicit call, every
@@ -60,8 +68,9 @@ function createLoadingPlaceholder(
   requesterName: string,
   position: THREE.Vector3,
   isOversized: boolean = false
-): { group: THREE.Group; dispose: () => void } {
+): { group: THREE.Group; dispose: () => void; setProgress: (pct: number | null) => void } {
   const group = new THREE.Group();
+  group.name = `Loading Placeholder (${name})`;
   group.position.copy(position);
 
   // Color palette: cyan = in-flight loading, red = "Too Large" indicator
@@ -73,7 +82,7 @@ function createLoadingPlaceholder(
   const nameHex = isOversized ? '#ff8899' : '#e2e8f0';
   const titleText = isOversized ? 'Too Large' : 'Loading';
 
-  // Wireframe icosahedron — pulses scale to read as "loading" or
+  // Wireframe icosahedron - pulses scale to read as "loading" or
   // stays static for the "Too Large" indicator (handled by the
   // animation loop's `oversized` skip below).
   const icoGeo = new THREE.IcosahedronGeometry(0.4, 0);
@@ -102,7 +111,20 @@ function createLoadingPlaceholder(
   canvas.width = 512;
   canvas.height = 128;
   const ctx = canvas.getContext('2d');
-  if (ctx) {
+  // Live progress percentage (null = indeterminate). Held on a stable
+  // closure-captured cell so setProgress can mutate it without
+  // triggering React re-renders.
+  let currentPct: number | null = null;
+  let disposed = false;
+  let lastRedrawAt = 0;
+
+  const redraw = (force = false) => {
+    if (!ctx || disposed) return;
+    const now = (performance.now && performance.now()) || Date.now();
+    // ~10 Hz throttle; force=true bypasses (used on the first call,
+    // and on the final 100% so the Settled state lands immediately).
+    if (!force && now - lastRedrawAt < 100) return;
+    lastRedrawAt = now;
     ctx.fillStyle = 'rgba(7, 9, 14, 0.78)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.strokeStyle = primaryHex;
@@ -112,13 +134,19 @@ function createLoadingPlaceholder(
     ctx.fillStyle = primaryHex;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(titleText, canvas.width / 2, canvas.height / 2 - 28);
+    // Append " 45%" only when progress is a real number; omit for null
+    // (indeterminate) and the "Too Large" failure case.
+    const titleWithPct =
+      isOversized || currentPct === null
+        ? titleText
+        : `${titleText}… ${currentPct}%`;
+    ctx.fillText(titleWithPct, canvas.width / 2, canvas.height / 2 - 28);
     ctx.font = 'bold 26px sans-serif';
     ctx.fillStyle = nameHex;
     const maxLen = 26;
     const displayName = name.length > maxLen ? name.slice(0, maxLen - 1) + '…' : name;
     ctx.fillText(displayName, canvas.width / 2, canvas.height / 2 + 8);
-    // For oversized the requester line is suppressed — the user already
+    // For oversized the requester line is suppressed - the user already
     // knows why they can't see it, and dropping the line keeps the
     // label visually focused on the failure mode.
     if (!isOversized) {
@@ -126,10 +154,20 @@ function createLoadingPlaceholder(
       ctx.fillStyle = '#a855f7';
       ctx.fillText(`by ${requesterName}`, canvas.width / 2, canvas.height / 2 + 44);
     }
-  }
+    spriteTexture.needsUpdate = true;
+  };
+
   const spriteTexture = new THREE.CanvasTexture(canvas);
   spriteTexture.colorSpace = THREE.SRGBColorSpace;
-  spriteTexture.needsUpdate = true;
+  // Flip the canvas texture vertically so the label reads correctly in
+  // VR (matches the VRRadialMenuMesh fix). Without this the Sprite's
+  // default UV mapping renders the canvas upside-down in-headset.
+  spriteTexture.repeat.y = -1;
+  spriteTexture.offset.y = 1;
+  // First paint happens synchronously so the placeholder looks correct
+  // before any progress ticks arrive.
+  redraw(true);
+
   const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
   const sprite = new THREE.Sprite(spriteMat);
   sprite.scale.set(1.6, 0.4, 1);
@@ -137,6 +175,7 @@ function createLoadingPlaceholder(
   group.add(sprite);
 
   const dispose = () => {
+    disposed = true;
     icoGeo.dispose();
     icoMat.dispose();
     ringGeo.dispose();
@@ -146,7 +185,22 @@ function createLoadingPlaceholder(
     spriteMat.dispose();
   };
 
-  return { group, dispose };
+  // setProgress is the public hook callers use to push new percentages.
+  // null resets to indeterminate. We round to integer percentage to avoid
+  // the throttled redraw chewing CPU when the loader emits sub-frame deltas.
+  const setProgress = (pct: number | null) => {
+    if (disposed) return;
+    if (pct === null) {
+      if (currentPct !== null) { currentPct = null; redraw(true); }
+      return;
+    }
+    const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+    if (currentPct === clamped) return;
+    currentPct = clamped;
+    redraw(clamped === 100);
+  };
+
+  return { group, dispose, setProgress };
 }
 
 /**
@@ -163,41 +217,6 @@ function guessAssetType(filename: string): AssetType {
   return 'misc';
 }
 
-
-      <>
-        VIDEO_CONTROL_PORTAL_RENDER — render the React-side controls
-        into each spatial-panel container we created in the asset-added
-        hook. Mounting happens once per panel; callbacks route to the
-        existing handleVideoAction pipeline. The auto-AR resize in
-        AssetManager.loadVideo already updated the parent video's screen
-        height; we don't resize the dock-panel here.
-        {videoControlPanels.flatMap((p) => {
-          const asset = assetManagerRef.current?.assets.get(p.assetId);
-          if (!asset || asset.type !== 'video' || !asset.videoElement) return [];
-          return [ReactDOM.createPortal(
-            <VideoObjectControls
-              key={p.assetId}
-              state={((asset.object3d.userData as { videoState?: VideoPlaybackState }).videoState) ?? {
-                playing: false,
-                currentTime: 0,
-                duration: 0,
-                globalVolume: 0.8,
-                localVolume: 0.8,
-                volumeMode: 'global',
-                muted: true,
-              }}
-              onPlay={() => handleVideoAction(asset.id, 'play')}
-              onPause={() => handleVideoAction(asset.id, 'pause')}
-              onSeek={(t) => handleVideoAction(asset.id, 'seek', t)}
-              onStep={(d) => handleVideoAction(asset.id, 'step', d)}
-              onVolumeChange={(v) => handleVideoAction(asset.id, 'volume', v)}
-              onVolumeModeToggle={(m) => handleVideoAction(asset.id, 'volumeMode', m)}
-              onMuteToggle={() => handleVideoAction(asset.id, 'mute')}
-            />,
-            p.container
-          )];
-        })}
-      </>
 export const App: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -208,6 +227,11 @@ export const App: React.FC = () => {
   const avatarManagerRef = useRef<AvatarManager | null>(null);
   const environmentManagerRef = useRef<EnvironmentManager | null>(null);
   const networkServiceRef = useRef<NetworkService>(new NetworkService());
+// Phase 3A: peer-side delivery for large videos via a binary DataChannel.
+// Constructor wires net.onPeerLeave so peer teardown is automatic.
+const videoStreamingServiceRef = useRef<VideoStreamingService>(
+  new VideoStreamingService(networkServiceRef.current)
+);
   const inventoryServiceRef = useRef<InventoryService>(new InventoryService());
   const undoRedoManagerRef = useRef<UndoRedoManager>(new UndoRedoManager());
   const vrHudRef = useRef<VRHUDManager | null>(null);
@@ -221,7 +245,17 @@ export const App: React.FC = () => {
   // OR when a remote peer's 'pending' broadcast arrives (net.onPendingSpawn),
   // and removed by registerOnAssetAdded's id-match on asset landing,
   // OR by net.onPendingCancel / net.onRemove / handleDisconnect.
-  const pendingAssetsRef = useRef<Map<string, { group: THREE.Group; dispose: () => void; oversized?: boolean }>>(new Map());
+  const pendingAssetsRef = useRef<Map<string, { group: THREE.Group; dispose: () => void; setProgress?: (pct: number | null) => void; oversized?: boolean }>>(new Map());
+  // Phase 3A: per-asset suppress-Set for the auto-broadcast race.
+  // handleImportFile / handleImportAssetFromConfig add the asset's
+  // placeholderId to this Set BEFORE awaiting AssetManager.importFile;
+  // the registerOnAssetAdded callback's gate consults it and, if
+  // present, deletes-and-returns without firing its own broadcast.
+  // handleImportFile / handleImportAssetFromConfig do the manual
+  // broadcast AFTER the await with the streamingHint attached. A
+  // `finally` block in both handlers cleans up the entry on the
+  // error path (where registerOnAssetAdded never fires).
+  const streamingSuppressedAssetIdsRef = useRef<Set<string>>(new Set());
 
   // UV of the VR HUD's curved screen under the right controller's aim
   // ray. Updated every animate-frame while the HUD is showing in VR;
@@ -250,109 +284,57 @@ export const App: React.FC = () => {
   const [isHost, setIsHost] = useState<boolean>(true);
   const [currentTransformMode, setCurrentTransformMode] = useState<TransformMode>('translate');
   const [selectedAsset, setSelectedAsset] = useState<LoadedAsset | null>(null);
+  const [selectionMode, setSelectionMode] = useState<'single' | 'multi'>('single');
+  const selectionModeRef = useRef<'single' | 'multi'>('single');
+  useEffect(() => { selectionModeRef.current = selectionMode; }, [selectionMode]);
+  const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
+  const videoInactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetVideoInactivityTimer = useCallback(() => {
+    if (videoInactivityTimerRef.current) {
+      clearTimeout(videoInactivityTimerRef.current);
+    }
+    videoInactivityTimerRef.current = setTimeout(() => {
+      setActiveVideoAssetId(null);
+    }, 6000);
+  }, []);
   const [cameraMode, setCameraMode] = useState<'orbit' | 'first-person'>('first-person');
-  const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(true);
+  const [showLocomotionBanner, setShowLocomotionBanner] = useState<boolean>(false);
   const [locomotionMode, setLocomotionMode] = useState<'walk' | 'flight' | 'noclip'>('walk');
   const [showSceneInspector, setShowSceneInspector] = useState<boolean>(false);
-
-  PANEL_BROADCAST_SETUP — shared panel state + helpers for the Inspector
-  // and AssetImportDialog panels. WE open → broadcast panelstate
-  // 'open' to peers. WE close → broadcast 'close' ONLY when we are
-  // the originator (peers that hide their mirror locally must NOT
-  // echo a close, that would race-condition with the originator's
-  // intent and could prematurely close the originator's panel from
-  // a peer's POV). Receive handlers live in the disposers area
-  // below so they're wired alongside the other network subscriptions.
-  type PanelOriginator = { peerId: string; userName?: string; role?: 'admin' | 'builder' | 'moderator' | 'guest' | 'spectator' };
-  const [inspectorPanelOriginator, setInspectorPanelOriginator] = useState<PanelOriginator | null>(null);
-  const [importPanelOriginator, setImportPanelOriginator] = useState<PanelOriginator | null>(null);
-
-  const openInspectorFromLocal = (opts?: { targetAssetId?: string | null }) => {
-    openInspectorFromLocal();
-    const ns = networkServiceRef.current;
-    const originatorId = ns?.localPeerId ?? '__local__';
-    setInspectorPanelOriginator({ peerId: originatorId, userName: localUserName, role: localRole });
-    if (ns && ns.mode !== 'offline' && originatorId !== '__local__') {
-      ns.broadcastPanelState({
-        action: 'open',
-        panelId: 'inspector',
-        originatorPeerId: originatorId,
-        originatorUserName: localUserName,
-        originatorRole: localRole,
-        targetAssetId: opts?.targetAssetId ?? selectedAsset?.id ?? null,
-        ts: Date.now(),
-      });
-    }
-  };
-  const closeInspectorFromLocal = () => {
-    closeInspectorFromLocal();
-    const ns = networkServiceRef.current;
-    if (inspectorPanelOriginator?.peerId === ns?.localPeerId && ns && ns.mode !== 'offline') {
-      ns.broadcastPanelState({
-        action: 'close',
-        panelId: 'inspector',
-        originatorPeerId: ns.localPeerId,
-        ts: Date.now(),
-      });
-    }
-    setInspectorPanelOriginator(null);
-  };
-  const openImportFromLocal = () => {
-    openImportFromLocal();
-    const ns = networkServiceRef.current;
-    const originatorId = ns?.localPeerId ?? '__local__';
-    setImportPanelOriginator({ peerId: originatorId, userName: localUserName, role: localRole });
-    if (ns && ns.mode !== 'offline' && originatorId !== '__local__') {
-      ns.broadcastPanelState({
-        action: 'open',
-        panelId: 'import',
-        originatorPeerId: originatorId,
-        originatorUserName: localUserName,
-        originatorRole: localRole,
-        ts: Date.now(),
-      });
-    }
-  };
-  const closeImportFromLocal = () => {
-    closeImportFromLocal();
-    const ns = networkServiceRef.current;
-    if (importPanelOriginator?.peerId === ns?.localPeerId && ns && ns.mode !== 'offline') {
-      ns.broadcastPanelState({
-        action: 'close',
-        panelId: 'import',
-        originatorPeerId: ns.localPeerId,
-        ts: Date.now(),
-      });
-    }
-    setImportPanelOriginator(null);
-  };
-
-  // Permission gates for shared-panel interactivity. Per the design
-  // analysis recommendation E: gate entirely on the LOCAL role (via
-  // ROLE_PERMISSIONS); the originator's role does NOT augment peer
-  // permissions — peers don't get admin powers just because an admin
-  // opened a panel. The originator themselves also passes the gate
-  // because they intentionally opened the panel.
-  // 'admin' / 'builder' gate on canEditWorld for inspector edits;
-  // 'admin' / 'builder' / 'guest' gate on canSpawnItems for import.
-  const localPerms = ROLE_PERMISSIONS[localRole] || ROLE_PERMISSIONS.guest;
-  const inspectorInteractiveEnabled = !!localPerms?.canEditWorld;
-  const importInteractiveEnabled = !!localPerms?.canSpawnItems;
-  // Originator-header JSX (only rendered when the panel is a peer's
-  // mirror). On the originator's own view this collapses to “null” so
-  // the panel-body banner doesn't show a confusing 'shared by me' line.
-  const myPeerId = networkServiceRef.current?.localPeerId;
-  const inspectorPanelOriginatorHeader = (inspectorPanelOriginator && inspectorPanelOriginator.peerId !== myPeerId)
-    ? (<>Inspector: shared by <span className='text-cyan-200 font-bold'>{inspectorPanelOriginator.userName || 'peer'}</span></>)
-    : null;
-  const importPanelOriginatorHeader = (importPanelOriginator && importPanelOriginator.peerId !== myPeerId)
-    ? (<>Import: shared by <span className='text-cyan-200 font-bold'>{importPanelOriginator.userName || 'peer'}</span></>)
-    : null;
-
   // Ref so the canvas click handler can read the current value without
   // being re-created every time showSceneInspector changes.
   const showSceneInspectorRef = useRef(false);
   showSceneInspectorRef.current = showSceneInspector;
+
+  // Bug fix — host→peer inspector object sync (Issue 2). The previous
+  // openInspectorFromLocal/closeInspectorFromLocal helpers used to call
+  // broadcastPanelState on every transition; an in-place refactor of
+  // App.tsx replaced those helpers with a direct setShowSceneInspector
+  // toggle and the panelstate broadcast was lost, so peers stopped
+  // mirroring the host's inspector open/close and selection state.
+  // This effect re-broadcasts on every showSceneInspector OR
+  // selectedAsset.id change so the host's inspector state propagates
+  // live. Receive handler's echo-suppression (drops envelopes whose
+  // originatorPeerId === localPeerId) makes the redundant broadcast on
+  // initial mount harmless apart from one envelope byte. We don't
+  // broadcast 'close' here — peers' mirrors stay open until they
+  // manually close, which is the gentler UX for the case where the
+  // host stops inspecting but a peer is still mid-edit.
+  useEffect(() => {
+    if (!showSceneInspector) return;
+    const ns = networkServiceRef.current;
+    if (!ns || ns.mode === 'offline') return;
+    ns.broadcastPanelState({
+      action: 'open',
+      panelId: 'inspector',
+      originatorPeerId: ns.localPeerId,
+      originatorUserName: userName,
+      originatorRole: localRole,
+      targetAssetId: selectedAsset?.id ?? null,
+      ts: Date.now(),
+    });
+  }, [showSceneInspector, selectedAsset?.id]);
   // Set true by Ctrl+Shift+V keydown so the next paste event is treated as
   // plain text (no URL / data-URI import handling). Cleared in handlePaste
   // on the following paste event, or by a keyup safety net.
@@ -363,7 +345,7 @@ export const App: React.FC = () => {
   // hooks that mirror the values are placed immediately after the
   // matching useState further down so the const state has already been
   // declared by the time we read it (TS2454 otherwise).
-  const activeToolRef = useRef<ToolType | null>('dev');
+  const activeToolRef = useRef<ToolType | null>(null);
   const cameraModeRef = useRef<'orbit' | 'first-person'>('first-person');
   // Mirror of `locomotionMode` state so the engine-init useEffect's
   // onPanelAction dispatcher (captured with `[]` deps) can read the
@@ -407,6 +389,7 @@ export const App: React.FC = () => {
   // instead of "Duplicate" when the held item is a misc file). Cleared
   // on grab-end; null while nothing is held.
   const [heldAssetType, setHeldAssetType] = useState<AssetType | null>(null);
+  const [heldAssetCustomItems, setHeldAssetCustomItems] = useState<ContextMenuItemDef[] | undefined>(undefined);
   const [radialMenuPos, setRadialMenuPos] = useState<{ x: number; y: number }>({ x: 500, y: 500 });
   // VR radial menu (canvas-textured mesh). `vrRadialOpen` tracks open
   // state; `vrRadialMenuRef` holds the lazily-constructed VRRadialMenuMesh
@@ -414,18 +397,26 @@ export const App: React.FC = () => {
   // texture / geometry aren't churned). `vrRadialActiveSideRef` records
   // which controller placed the mesh so the per-frame aim loop can poll
   // the correct XRTargetRaySpace. We use VRRadialMenuMesh's canvas
-  // texture for VR — pure immersive WebXR can't rasterise the
+  // texture for VR - pure immersive WebXR can't rasterise the
   // React-DOM <svg>-based RadialContextMenu through HTMLMesh's
   // html2canvas path, so any radial menu mounted into SpatialPanelManager
   // came out blank. The desktop <RadialContextMenu> overlay path
   // (`setShowRadialMenu`) is unchanged.
-  const [vrRadialOpen, setVrRadialOpen] = useState(false);
-  const vrRadialMenuRef = useRef<VRRadialMenuMesh | null>(null);
-  // Which controller the menu was placed near. Cached so the per-frame
-  // aim loop can build its ray from the same controller that placed it
-  // (rather than whichever one is being waved at any given moment).
-  // `null` while the menu is closed.
-  const vrRadialActiveSideRef = useRef<'left' | 'right' | null>(null);
+  const [vrRadialLeftOpen, setVrRadialLeftOpen] = useState(false);
+  const [vrRadialRightOpen, setVrRadialRightOpen] = useState(false);
+  const vrRadialMenuLeftRef = useRef<VRRadialMenuMesh | null>(null);
+  const vrRadialMenuRightRef = useRef<VRRadialMenuMesh | null>(null);
+  const heldSideRef = useRef<'left' | 'right' | null>(null);
+  const heldAssetsBySideRef = useRef<{ left: LoadedAsset | null; right: LoadedAsset | null }>({ left: null, right: null });
+  // Track which grip is currently holding a spatial panel (dash menu, inspector).
+  // Separate from ManipulationManager's vrGrabWithController because panels are
+  // directly parented to the grip, not routed through the full grab state machine.
+  const spatialPanelGripRef = useRef<{
+    side: 'left' | 'right';
+    panelId: string;
+    group: THREE.Group;
+    originalParent: THREE.Object3D | null;
+  } | null>(null);
   const [scalingEnabled, setScalingEnabled] = useState<boolean>(true);
   const [laserEnabled, setLaserEnabled] = useState<boolean>(true);
   const [grabMode, setGrabMode] = useState<'auto' | 'precision' | 'palm' | 'laser'>('auto');
@@ -436,24 +427,13 @@ export const App: React.FC = () => {
   const [shareModalTab, setShareModalTab] = useState<'multiplayer' | 'pairing'>('multiplayer');
   const [showInventoryModal, setShowInventoryModal] = useState<boolean>(false);
   const [showImportModal, setShowImportModal] = useState<boolean>(false);
-  // Active in-world video-control panels. Each entry is one spatial
-  // panel docked under a video asset's object3d — the SpatialPanelManager
-  // takes care of the THREE.Group + DOM + HTMLMesh; we just need React
-  // state so the JSX portal render <VideoObjectControls> into the
-  // detached <div> container.
-  type VideoControlPanelEntry = {
-    assetId: string;
-    panelId: string;
-    container: HTMLDivElement;
-  };
-  const [videoControlPanels, setVideoControlPanels] = useState<VideoControlPanelEntry[]>([]);
-
   const [showImportDialog, setShowImportDialog] = useState<boolean>(false);
   const [importInitialFile, setImportInitialFile] = useState<File | null>(null);
   const [showWorldEnvModal, setShowWorldEnvModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
-  const [showChatPanel, setShowChatPanel] = useState<boolean>(false);
+  const [showChatPanel, setShowChatPanel] = useState<boolean>(true);
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
+  const [userName, setUserName] = useState<string>(() => networkServiceRef.current.localUserName);
   // Rolling buffer of recent chat messages; mirrors VRHUDManager's
   // internal _recentMessages for the React-driven setDataContext push
   // (the manager keeps its own copy via appendIncomingChat so the canvas
@@ -470,7 +450,10 @@ export const App: React.FC = () => {
     hostRole: 'admin'
   });
   const [showDashMenu, setShowDashMenu] = useState<boolean>(false);
+  // Mirrors renderer.xr.isPresenting so React re-renders on VR entry/exit.
+  const [isVRPresenting, setIsVRPresenting] = useState<boolean>(false);
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const [inventoryFolders, setInventoryFolders] = useState<string[]>([]);
   // Mirror of inventoryItems state held in a ref so the VR panel-based
   // useEffect dependency array can read fresh data without forcing a
   // re-render every time  is called. Without this
@@ -485,7 +468,7 @@ export const App: React.FC = () => {
   // mirror useEffect further below.
   const selectedAssetRef = useRef<LoadedAsset | null>(null);
   const [showToolsPanel, setShowToolsPanel] = useState<boolean>(false);
-  const [activeTool, setActiveTool] = useState<ToolType | null>('dev');
+  const [activeTool, setActiveTool] = useState<ToolType | null>(null);
   const [brushWidth, setBrushWidth] = useState<number>(0.05);
 
   // Stats & Settings state triggers for reactive UI
@@ -509,6 +492,36 @@ export const App: React.FC = () => {
     ambientIntensity: 0.4,
     dirLightIntensity: 1.5,
   });
+
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState<string>('');
+
+  useEffect(() => {
+    if ((showDashMenu || showRadialMenu) && navigator.mediaDevices?.enumerateDevices) {
+      navigator.mediaDevices.enumerateDevices().then(devices => {
+        const mics = devices.filter(d => d.kind === 'audioinput');
+        setAudioDevices(mics);
+      }).catch(err => console.warn('Failed to enumerate audio devices:', err));
+    }
+  }, [showDashMenu, showRadialMenu]);
+
+  const handleSelectAudioDevice = async (deviceId: string) => {
+    setSelectedAudioDeviceId(deviceId);
+    await networkServiceRef.current.switchAudioInputDevice(deviceId);
+  };
+
+  const handleToggleMute = useCallback(async () => {
+    await networkServiceRef.current.toggleMute();
+    const isMuted = networkServiceRef.current.isMuted;
+    vrRadialMenuLeftRef.current?.setState({ isMuted });
+    vrRadialMenuRightRef.current?.setState({ isMuted });
+    const listener = avatarManagerRef.current?.audioListener;
+    if (listener && listener.context.state === 'suspended') {
+      listener.context.resume().catch(() => {});
+    }
+    setPeerCount(prev => prev);
+  }, []);
+
 
   // Mirror activeTool / cameraMode state into refs so the single-bound
   // animation-loop callback (registered in the engine-init effect
@@ -546,7 +559,7 @@ export const App: React.FC = () => {
   // a slice (analogous to the desktop onPanelAction stale-closure
   // fix that introduced locomotionModeRef). Mirrors update synchronously
   // in a useEffect after each render commit, so the NEXT event tick
-  // already sees fresh values — no per-frame lag.
+  // already sees fresh values - no per-frame lag.
   const grabModeRef = useRef<'auto' | 'precision' | 'palm' | 'laser'>('auto');
   const isHeldRef = useRef<boolean>(false);
   const heldAssetTypeRef = useRef<string | null>(null);
@@ -577,54 +590,58 @@ export const App: React.FC = () => {
   // effect runs the returned cleanup exactly once when the App unmounts.
   useEffect(() => {
     return () => {
-      const m = vrRadialMenuRef.current;
-      if (m) {
-        if (m.group.parent) m.group.parent.remove(m.group);
-        m.dispose();
-        vrRadialMenuRef.current = null;
+      const mL = vrRadialMenuLeftRef.current;
+      if (mL) {
+        if (mL.group.parent) mL.group.parent.remove(mL.group);
+        mL.dispose();
+        vrRadialMenuLeftRef.current = null;
+      }
+      const mR = vrRadialMenuRightRef.current;
+      if (mR) {
+        if (mR.group.parent) mR.group.parent.remove(mR.group);
+        mR.dispose();
+        vrRadialMenuRightRef.current = null;
       }
     };
   }, []);
 
     useEffect(() => {
-    if (!vrRadialOpen) return;
+    if (!vrRadialLeftOpen && !vrRadialRightOpen) return;
     let raf = 0;
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      const mesh = vrRadialMenuRef.current;
       const se = sceneEngineRef.current;
-      const side = vrRadialActiveSideRef.current;
-      if (!mesh || mesh.disposed || !se || !se.renderer.xr.isPresenting || !mesh.isVisible || !side) return;
-      const ctr = se.vrInput?.getController(side);
-      if (!ctr) return;
-      ctr.updateWorldMatrix(true, false);
-      // Allocation-free: hoisted scratch refs (vrRadialAim*Ref) reused
-      // across frames. .copy / .setFrom* mutate in place.
-      vrRadialAimOriginRef.current.setFromMatrixPosition(ctr.matrixWorld);
-      vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctr.matrixWorld);
-      vrRadialAimDirRef.current
-        .set(0, 0, -1)
-        .applyQuaternion(vrRadialAimDirQuatRef.current)
-        .normalize();
-      // Re-place the menu every frame so it follows the active
-      // controller's current pose (origin + laser direction).
-      // The previous flow only placed once on B/Y press, leaving
-      // the menu world-anchored -- wrist motion then drifted the
-      // aim ray off the panel and the user reported the buttons
-      // as 'non-interactive' despite updateAim + select() running
-      // correctly. placeNearController is now allocation-free
-      // (uses scratch refs internally), so re-placing at 90 Hz
-      // is GC-neutral. Must come BEFORE updateAim so the raycast
-      // tests against the freshly-followed mesh position.
-      mesh.placeNearController(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
-      vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
-      mesh.updateAim(vrRadialAimRayRef.current);
-      const ctrlState = side === 'left' ? se.vrInput?.left : se.vrInput?.right;
-      if (ctrlState?.pressedThisFrame?.trigger) mesh.select();
+      if (!se || !se.renderer.xr.isPresenting) return;
+      const ctrRight = se.vrInput?.getController('right');
+      const ctrLeft = se.vrInput?.getController('left');
+
+      const checkAimOnMesh = (mesh: VRRadialMenuMesh) => {
+        if (!mesh || mesh.disposed || !mesh.isVisible) return false;
+        if (ctrRight) {
+          ctrRight.updateWorldMatrix(true, false);
+          vrRadialAimOriginRef.current.setFromMatrixPosition(ctrRight.matrixWorld);
+          vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctrRight.matrixWorld);
+          vrRadialAimDirRef.current.set(0, 0, -1).applyQuaternion(vrRadialAimDirQuatRef.current).normalize();
+          vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
+          if (mesh.updateAim(vrRadialAimRayRef.current)) return true;
+        }
+        if (ctrLeft) {
+          ctrLeft.updateWorldMatrix(true, false);
+          vrRadialAimOriginRef.current.setFromMatrixPosition(ctrLeft.matrixWorld);
+          vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctrLeft.matrixWorld);
+          vrRadialAimDirRef.current.set(0, 0, -1).applyQuaternion(vrRadialAimDirQuatRef.current).normalize();
+          vrRadialAimRayRef.current.set(vrRadialAimOriginRef.current, vrRadialAimDirRef.current);
+          return mesh.updateAim(vrRadialAimRayRef.current);
+        }
+        return false;
+      };
+
+      if (vrRadialMenuLeftRef.current) checkAimOnMesh(vrRadialMenuLeftRef.current);
+      if (vrRadialMenuRightRef.current) checkAimOnMesh(vrRadialMenuRightRef.current);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [vrRadialOpen]);
+  }, [vrRadialLeftOpen, vrRadialRightOpen]);
 
   // Push React state into the lazy VRRadialMenuMesh so slice labels
   // recolour on toggle (e.g. SCALE goes from red to green when
@@ -633,14 +650,27 @@ export const App: React.FC = () => {
   // tracked inputs actually change. Each tick = one setState call,
   // cheap.
   useEffect(() => {
-    vrRadialMenuRef.current?.setState({
-      locomotionMode,
-      scalingEnabled,
-      laserEnabled,
-      grabMode,
-      isHeld,
-      heldAssetType: heldAssetType === null ? null : String(heldAssetType),
-    });
+    const updateMeshState = (mesh: VRRadialMenuMesh | null, menuSide: 'left' | 'right') => {
+      if (!mesh) return;
+      const sideIsHolding = isHeld && (heldSideRef.current === menuSide || heldSideRef.current === null);
+      mesh.setState({
+        locomotionMode,
+        scalingEnabled,
+        laserEnabled,
+        grabMode,
+        isHeld: sideIsHolding,
+        isMuted: networkServiceRef.current.isMuted,
+        heldAssetType: sideIsHolding && heldAssetType !== null ? String(heldAssetType) : null,
+        heldAssetCustomItems: sideIsHolding ? heldAssetCustomItems : undefined,
+      });
+      if (sideIsHolding) {
+        mesh.setActiveTab('held');
+      } else if (mesh.activeTab === 'held') {
+        mesh.setActiveTab('general');
+      }
+    };
+    updateMeshState(vrRadialMenuLeftRef.current, 'left');
+    updateMeshState(vrRadialMenuRightRef.current, 'right');
   }, [locomotionMode, scalingEnabled, laserEnabled, grabMode, isHeld, heldAssetType]);
 
   // Initialize 3D Viewport & Engines
@@ -650,12 +680,12 @@ export const App: React.FC = () => {
     const sceneEngine = new SceneEngine(containerRef.current);
     sceneEngineRef.current = sceneEngine;
 
-    const assetManager = new AssetManager(sceneEngine.scene, sceneEngine.worldRoot);
+    const assetManager = new AssetManager(sceneEngine.scene, sceneEngine.worldRoot, undefined, videoStreamingServiceRef.current);
     assetManagerRef.current = assetManager;
 
     // Pass `assetManager.assets` so the manager's RMB-grab raycast can
     // hit-detect on the same live Map App.tsx spawns into (the Map is
-    // mutated in place — single reference is always current). The 5th
+    // mutated in place - single reference is always current). The 5th
     // arg is what enables the Right-Mouse-Button grab feature called out
     // in Controls-Keybinds.txt.
     const manipulationManager = new ManipulationManager(
@@ -666,13 +696,16 @@ export const App: React.FC = () => {
       assetManager.assets
     );
     manipulationManagerRef.current = manipulationManager;
+    manipulationManager.worldRoot = sceneEngine.worldRoot;
+    networkServiceRef.current.worldRoot = sceneEngine.worldRoot;
     // Wire VR input so the held-asset dolly can read the holding
     // controller's thumbstick Y. SceneEngine constructs
     // VRInputManager synchronously in its constructor (see
     // SceneEngine.setupXR), so this ref is already live by the
     // time the engine-init useEffect wires it. Null safety
-    // guaranteed — the dolly path early-returns without input.
+    // guaranteed - the dolly path early-returns without input.
     manipulationManager.setVRInput(sceneEngine.vrInput);
+    sceneEngine.isVRHandGrabbing = (side) => manipulationManager.isVRHandGrabbing(side);
 
     const avatarManager = new AvatarManager(sceneEngine.scene, sceneEngine.camera, sceneEngine.worldRoot);
     avatarManagerRef.current = avatarManager;
@@ -739,7 +772,7 @@ const vrHud = new VRHUDManager(
                   }
                   break;
                 case 'sys-inspector':
-                  openInspectorFromLocal();
+                  setShowSceneInspector(true);
                   break;
               }
             }
@@ -935,12 +968,34 @@ const vrHud = new VRHUDManager(
                 // ---- Toggles ----
                 if (actionId === 'inspect.toggle:visible') {
                   o3d.visible = !o3d.visible;
+                  // dirty()'s broadcastAssetUpdate only carries
+                  // position/rotation/scale — it silently drops
+                  // visibility. Broadcast the actual change over the
+                  // 'inspector' channel too, same as the desktop
+                  // Active checkbox in SceneInspectorWindow, or peers
+                  // never see this toggle take effect.
+                  networkServiceRef.current?.broadcastInspectorUpdate({
+                    assetId: sel.id,
+                    nodeUuid: undefined,
+                    active: o3d.visible
+                  });
                   dirty();
                   return;
                 }
                 if (actionId === 'inspect.toggle:active') {
-                  const ud = o3d.userData as { active?: boolean };
-                  ud.active = !(ud.active ?? true);
+                  // Match the desktop inspector's semantics, where
+                  // "Active" IS object3d.visible (see
+                  // SceneInspectorWindow's Active checkbox and the
+                  // onInspectorUpdate handler above, which sets
+                  // targetNode.visible = update.active). The previous
+                  // userData.active flag was never read anywhere, so
+                  // this toggle did nothing — not locally, not for peers.
+                  o3d.visible = !o3d.visible;
+                  networkServiceRef.current?.broadcastInspectorUpdate({
+                    assetId: sel.id,
+                    nodeUuid: undefined,
+                    active: o3d.visible
+                  });
                   dirty();
                   return;
                 }
@@ -1072,6 +1127,85 @@ const vrHud = new VRHUDManager(
                   return;
                 }
 
+                // ---- Texture Map Slot Actions ----
+                if (actionId.startsWith('inspect.material.slot:')) {
+                  const slotName = actionId.substring('inspect.material.slot:'.length);
+                  const mm = manipulationManagerRef.current;
+                  const heldImg =
+                    mm?.getHandGrabAsset('right')?.type === 'image'
+                      ? mm.getHandGrabAsset('right')
+                      : mm?.getHandGrabAsset('left')?.type === 'image'
+                        ? mm.getHandGrabAsset('left')
+                        : null;
+                  const applyTextureUrl = (url: string | null) => {
+                    if (!url) {
+                      for (const m of mats) {
+                        (m as any)[slotName] = null;
+                        m.needsUpdate = true;
+                      }
+                      dirty();
+                      return;
+                    }
+                    new THREE.TextureLoader().load(url, (tex) => {
+                      tex.wrapS = THREE.RepeatWrapping;
+                      tex.wrapT = THREE.RepeatWrapping;
+                      if (slotName === 'map' || slotName === 'emissiveMap') {
+                        tex.colorSpace = THREE.SRGBColorSpace;
+                      }
+                      for (const m of mats) {
+                        (m as any)[slotName] = tex;
+                        m.needsUpdate = true;
+                      }
+                      dirty();
+                    });
+                  };
+
+                  if (heldImg && heldImg.url) {
+                    applyTextureUrl(heldImg.url);
+                    return;
+                  }
+                  // NOTE: do NOT redeclare `am` inside Priority 2/3/4 of any handler that also reads this outer `am` - use a distinct name. See Priority 4’s `amPrio4` rename.
+            const am = assetManagerRef.current;
+                  const imgAssets = am
+                    ? Array.from(am.assets.values()).filter(
+                        (a): a is LoadedAsset & { url: string } => a.type === 'image' && typeof a.url === 'string' && a.url.length > 0
+                      )
+                    : [];
+                  if (imgAssets.length > 0) {
+                    const curTex = (mats[0] as any)?.[slotName] as THREE.Texture | null;
+                    const curUrl =
+                      (curTex?.image as any)?.src || (curTex?.source as any)?.data?.src || '';
+                    let nextIdx = 0;
+                    if (curUrl) {
+                      const idx = imgAssets.findIndex((a) => curUrl.includes(a.url) || a.url.includes(curUrl));
+                      nextIdx = (idx + 1) % (imgAssets.length + 1);
+                    }
+                    if (nextIdx === imgAssets.length) {
+                      applyTextureUrl(null);
+                    } else {
+                      applyTextureUrl(imgAssets[nextIdx].url || null);
+                    }
+                  } else {
+                    applyTextureUrl(null);
+                  }
+                  return;
+                }
+
+                if (actionId.startsWith('inspect.material.slotClear:')) {
+                  const slotName = actionId.substring('inspect.material.slotClear:'.length);
+                  for (const m of mats) {
+                    (m as any)[slotName] = null;
+                    m.needsUpdate = true;
+                  }
+                  dirty();
+                  return;
+                }
+
+                if (actionId === 'inspect.openMaterialEditor') {
+                  vrHudRef.current?.openPanel('sys-material');
+                  return;
+                }
+
                 // ---- Slot actions ----
                 if (actionId === 'inspect.destroy:selected') {
                   // handleDeleteSelected already does the right thing
@@ -1098,6 +1232,40 @@ const vrHud = new VRHUDManager(
                   }
                   return;
                 }
+
+                // ---- Video controls (only valid when sel.type === 'video') ----
+                // Mirror of handleVideoAction + handleVideoClose above so
+                // desktop + VR + network all mutate through the same path.
+                if (actionId.startsWith('inspect.video:')) {
+                  if (sel.type !== 'video') return;
+                  const tail = actionId.substring('inspect.video:'.length);
+                  if (tail === 'play') handleVideoAction(sel.id, 'play');
+                  else if (tail === 'pause') handleVideoAction(sel.id, 'pause');
+                  else if (tail === 'togglePlay') {
+                    const vs = assetManagerRef.current?.getVideoState(sel.id);
+                    if (vs) handleVideoAction(sel.id, vs.playing ? 'pause' : 'play');
+                  }
+                  else if (tail === 'seekPrev' || tail === 'seekNext') {
+                    handleVideoAction(sel.id, 'step', tail === 'seekPrev' ? -5 : 5);
+                  }
+                  else if (tail === 'restart') handleVideoAction(sel.id, 'seek', 0);
+                  else if (tail === 'volUp' || tail === 'volDown') {
+                    const vs = assetManagerRef.current?.getVideoState(sel.id);
+                    if (vs) {
+                      const cur = vs.volumeMode === 'global' ? vs.globalVolume : vs.localVolume;
+                      handleVideoAction(sel.id, 'volume', Math.max(0, Math.min(1, cur + (tail === 'volUp' ? 0.1 : -0.1))));
+                    }
+                  }
+                  else if (tail === 'toggleMute') handleVideoAction(sel.id, 'mute');
+                  else if (tail === 'mode:global' || tail === 'mode:local') {
+                    handleVideoAction(sel.id, 'volumeMode', tail === 'mode:global' ? 'global' : 'local');
+                  }
+                  else if (tail === 'close') handleVideoClose(sel.id);
+                  else return;
+                  dirty();
+                  return;
+                }
+
                 if (actionId === 'inspect.bringTo:camera') {
                   // Move the asset to the camera's world position.
                   // Use camera-local forward offset (-2m in camera Z)
@@ -1207,7 +1375,7 @@ const vrHud = new VRHUDManager(
           const mm = manipulationManagerRef.current;
           const am = assetManagerRef.current;
 
-          // A button (either hand): jump / ascend per locomotion mode —
+          // A button (either hand): jump / ascend per locomotion mode -
           // mirrors the desktop Space-key handler in SceneEngine.
           if (button === 'a') {
             se.triggerVRJump();
@@ -1220,36 +1388,46 @@ const vrHud = new VRHUDManager(
             const se = sceneEngineRef.current;
             if (se && se.renderer.xr.isPresenting) {
               // VR path: lazy-create VRRadialMenuMesh on first open, then
-              // toggle visibility. Canvas-textured radial — slices and slice
+              // toggle visibility. Canvas-textured radial - slices and slice
               // labels are drawn with Canvas2D, so they render correctly in
               // pure immersive WebXR. The previous approach tried to use
               // SpatialPanelManager + React portal + SVG <RadialContextMenu>;
               // SVG is invisible through HTMLMesh's html2canvas path, the
               // menu came out blank. Plus _buildHTMLMesh reparents the XR
-              // controllers under the moving panel — now anchored to scene.
-              setVrRadialOpen((prev) => {
+              // controllers under the moving panel - now anchored to scene.
+              setVrRadialRightOpen((prev) => {
                 const next = !prev;
                 const ctr = se.vrInput?.getController('right');
                 if (next) {
-                  if (vrRadialMenuRef.current === null) {
-                    vrRadialMenuRef.current = new VRRadialMenuMesh(
-                      buildVrRadialCallbacks(),
-                      buildVrRadialInitialState()
+                  if (vrRadialMenuRightRef.current === null) {
+                    vrRadialMenuRightRef.current = new VRRadialMenuMesh(
+                      buildVrRadialCallbacks('right'),
+                      buildVrRadialInitialState('right')
                     );
-                    se.scene.add(vrRadialMenuRef.current.group);
+                    se.scene.add(vrRadialMenuRightRef.current.group);
                   }
-                  vrRadialActiveSideRef.current = 'right';
                   if (ctr) {
                     ctr.updateWorldMatrix(true, false);
                     const origin = new THREE.Vector3().setFromMatrixPosition(ctr.matrixWorld);
                     const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctr.matrixWorld);
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
-                    vrRadialMenuRef.current.placeNearController(origin, laserDir);
+                    vrRadialMenuRightRef.current.placeNearController(origin, laserDir);
                   }
-                  vrRadialMenuRef.current.setVisible(true);
+                  const rightHolding = heldSideRef.current === 'right' || (isHeldRef.current && heldSideRef.current === null);
+                  vrRadialMenuRightRef.current.setState({
+                    locomotionMode: locomotionModeRef.current,
+                    scalingEnabled: scalingEnabledRef.current,
+                    laserEnabled: laserEnabledRef.current,
+                    grabMode: grabModeRef.current,
+                    isHeld: rightHolding,
+                    heldAssetType: rightHolding ? heldAssetTypeRef.current : null,
+                  });
+                  vrRadialMenuRightRef.current.setActiveTab(
+                    rightHolding ? 'held' : 'general'
+                  );
+                  vrRadialMenuRightRef.current.setVisible(true);
                 } else {
-                  vrRadialMenuRef.current?.setVisible(false);
-                  vrRadialActiveSideRef.current = null;
+                  vrRadialMenuRightRef.current?.setVisible(false);
                 }
                 return next;
               });
@@ -1269,29 +1447,39 @@ const vrHud = new VRHUDManager(
               // rationale (canvas texture to bypass SVG/HTMLMesh
               // invisibility, scene-root mesh to avoid the XR-controller
               // reparenting feedback loop).
-              setVrRadialOpen((prev) => {
+              setVrRadialLeftOpen((prev) => {
                 const next = !prev;
-                const ctr = se.vrInput?.getController('left');
+                const ctrLeft = se.vrInput?.getController('left');
                 if (next) {
-                  if (vrRadialMenuRef.current === null) {
-                    vrRadialMenuRef.current = new VRRadialMenuMesh(
-                      buildVrRadialCallbacks(),
-                      buildVrRadialInitialState()
+                  if (vrRadialMenuLeftRef.current === null) {
+                    vrRadialMenuLeftRef.current = new VRRadialMenuMesh(
+                      buildVrRadialCallbacks('left'),
+                      buildVrRadialInitialState('left')
                     );
-                    se.scene.add(vrRadialMenuRef.current.group);
+                    se.scene.add(vrRadialMenuLeftRef.current.group);
                   }
-                  vrRadialActiveSideRef.current = 'left';
-                  if (ctr) {
-                    ctr.updateWorldMatrix(true, false);
-                    const origin = new THREE.Vector3().setFromMatrixPosition(ctr.matrixWorld);
-                    const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctr.matrixWorld);
+                  if (ctrLeft) {
+                    ctrLeft.updateWorldMatrix(true, false);
+                    const origin = new THREE.Vector3().setFromMatrixPosition(ctrLeft.matrixWorld);
+                    const dirQuat = new THREE.Quaternion().setFromRotationMatrix(ctrLeft.matrixWorld);
                     const laserDir = new THREE.Vector3(0, 0, -1).applyQuaternion(dirQuat).normalize();
-                    vrRadialMenuRef.current.placeNearController(origin, laserDir);
+                    vrRadialMenuLeftRef.current.placeNearController(origin, laserDir);
                   }
-                  vrRadialMenuRef.current.setVisible(true);
+                  const leftHolding = heldSideRef.current === 'left' || (isHeldRef.current && heldSideRef.current === null);
+                  vrRadialMenuLeftRef.current.setState({
+                    locomotionMode: locomotionModeRef.current,
+                    scalingEnabled: scalingEnabledRef.current,
+                    laserEnabled: laserEnabledRef.current,
+                    grabMode: grabModeRef.current,
+                    isHeld: leftHolding,
+                    heldAssetType: leftHolding ? heldAssetTypeRef.current : null,
+                  });
+                  vrRadialMenuLeftRef.current.setActiveTab(
+                    leftHolding ? 'held' : 'general'
+                  );
+                  vrRadialMenuLeftRef.current.setVisible(true);
                 } else {
-                  vrRadialMenuRef.current?.setVisible(false);
-                  vrRadialActiveSideRef.current = null;
+                  vrRadialMenuLeftRef.current?.setVisible(false);
                 }
                 return next;
               });
@@ -1305,13 +1493,19 @@ const vrHud = new VRHUDManager(
           // Per VRControls.txt: "X button - Open/Close Dash (Left
           // controller)". Previously the LEFT GRIP opened the dash,
           // but the spec says BOTH grips should grab and X opens the
-          // dash — see FIX 1 above. Same toggle pattern as the desktop
+          // dash - see FIX 1 above. Same toggle pattern as the desktop
           // Tab key handler.
           if (button === 'x') {
-            inventoryServiceRef.current.getItems().then((items) => {
-              vrHudRef.current?.setItems(items);
-              vrHudRef.current?.toggle();
-            });
+            // In VR, open the real React DashMenu inside a SpatialPopUpWrapper
+            // so it looks identical to the desktop dash menu.
+            if (se.renderer.xr.isPresenting) {
+              setShowDashMenu((prev) => !prev);
+            } else {
+              inventoryServiceRef.current.getItems().then((items) => {
+                vrHudRef.current?.setItems(items);
+                vrHudRef.current?.toggle();
+              });
+            }
             return;
           }
           // Grip buttons. Left grip opens the VR dash menu (curved HUD);
@@ -1320,7 +1514,7 @@ const vrHud = new VRHUDManager(
             // Per VRControls.txt: BOTH grips grab. The dash is opened
             // by the X button (left controller) further down. Shared
             // raycast+grab helper used by both left and right grips
-            // — keeps HUD-priority + parent-chain walk logic single-
+            // - keeps HUD-priority + parent-chain walk logic single-
             // sourced so the two sides can't drift.
             const tryVrGrab = (grabSide: 'left' | 'right') => {
               if (!mm || !am) return false;
@@ -1350,6 +1544,21 @@ const vrHud = new VRHUDManager(
               const hudForGrip = vrHudRef.current;
               if (hudForGrip && hudForGrip.isVisible) targets.push(hudForGrip.grabBarMesh);
               if (hudForGrip && hudForGrip.activePanel) targets.push(hudForGrip.panelGrabBarMesh);
+              // Spatial panel grabbing: add all active HTMLMesh instances to the
+              // raycast targets so the user can grab the dash menu, inspector, and
+              // any other spatial panel by its visible HTMLMesh surface. Build a
+              // fast lookup map: HTMLMesh -> { panelId, group } for the parent-walk
+              // below so we don't loop panels on every hit resolution.
+              const spm = se.spatialPanelManager;
+              const htmlMeshToPanel = new Map<THREE.Object3D, { panelId: string; group: THREE.Group }>();
+              if (spm) {
+                const allMeshes = spm.getAllHTMLMeshes();
+                allMeshes.forEach((m) => {
+                  targets.push(m);
+                  const info = spm.getPanelInfoForObject(m);
+                  if (info) htmlMeshToPanel.set(m, info);
+                });
+              }
               const hits = se.raycaster.intersectObjects(targets, true);
               if (hits.length === 0) return false;
               let hudCur: THREE.Object3D | null = hits[0].object;
@@ -1364,13 +1573,51 @@ const vrHud = new VRHUDManager(
                 }
                 hudCur = hudCur.parent;
               }
+              // Spatial panel grab: walk up from the hit object to find if it
+              // belongs to a spatial panel's HTMLMesh (or a child thereof).  When
+              // detected, directly parent the panel's GROUP to the controller grip
+              // — bypassing ManipulationManager's full grab state machine which
+              // carries rotation-lock / dolly / two-handed-scale semantics that
+              // don't apply to UI panels.
+              let spCur: THREE.Object3D | null = hits[0].object;
+              while (spCur) {
+                const panelInfo = htmlMeshToPanel.get(spCur);
+                if (panelInfo) {
+                  // Ensure both the panel group and grip have current world
+                // matrices before reparenting — stale matrices cause the
+                // panel to snap to a wrong position ("behind the user").
+                panelInfo.group.updateMatrixWorld();
+                grip.updateMatrixWorld();
+                spatialPanelGripRef.current = {
+                    side: grabSide,
+                    panelId: panelInfo.panelId,
+                    group: panelInfo.group,
+                    originalParent: panelInfo.group.parent,
+                  };
+                  grip.add(panelInfo.group);
+                  return true;
+                }
+                spCur = spCur.parent;
+              }
               let cur: THREE.Object3D | null = hits[0].object;
               while (cur && !objToAsset.has(cur)) cur = cur.parent;
               if (cur) {
                 const found = objToAsset.get(cur);
                 if (found) {
-                  mm.vrGrabWithController(found, grip, grabSide);
+                  mm.vrGrabWithController(found, grip, grabSide, ctr);
                   return true;
+                }
+              } else {
+                const otherSide = grabSide === 'left' ? 'right' : 'left';
+                const otherAsset = mm.getHandGrabAsset(otherSide);
+                if (otherAsset) {
+                  const gripPos = new THREE.Vector3().setFromMatrixPosition(grip.matrixWorld);
+                  const assetPos = new THREE.Vector3();
+                  otherAsset.object3d.getWorldPosition(assetPos);
+                  if (gripPos.distanceTo(assetPos) < 0.75) {
+                    mm.vrGrabWithController(otherAsset, grip, grabSide, ctr);
+                    return true;
+                  }
                 }
               }
               return false;
@@ -1380,16 +1627,63 @@ const vrHud = new VRHUDManager(
               return;
             }
           }
-          // Trigger (right hand only — left triggers are reserved for
-          // future activation; right is the canonical interaction
-          // trigger per the OpenXR mapping).
+          // Trigger - handles VR radial menu select (both sides),
+          // two-handed scale grab detection, and HUD click (right side).
           if (button === 'trigger') {
-            // Both-sides trigger detection: if the trigger on
-            // the OTHER hand is also currently held, the user
-            // is doing a two-handed scale grab. Try to start
-            // one on whichever asset BOTH lasers are pointing
-            // at (must be the same asset, otherwise the user
-            // is just doing two unrelated things at once).
+            if (side === 'left' || side === 'right') {
+              if (mm && mm.getHandGrabAsset(side)) {
+                if (mm.handleVRTriggerPress(side)) {
+                  return;
+                }
+              }
+            }
+            // PRIORITY 1: VR radial menu select.
+            // This MUST happen in onPressed (the XR-frame-synchronous
+            // edge callback) rather than in the aim rAF loop.
+            // Reason: VRInputManager.update() sets pressedThisFrame for
+            // exactly ONE XR frame. The aim rAF loop is a SEPARATE
+            // requestAnimationFrame that runs independently of the XR
+            // frame loop - by the time the rAF tick executes, the XR
+            // loop has already advanced and cleared pressedThisFrame on
+            // its next frame, so the trigger press is always missed.
+            // Handling it here - which fires synchronously inside the
+            // same XR frame that detected the edge - guarantees the
+            // select() call is never dropped.
+            const leftMesh = vrRadialMenuLeftRef.current;
+            const rightMesh = vrRadialMenuRightRef.current;
+            if ((leftMesh && leftMesh.isVisible && !leftMesh.disposed) ||
+                (rightMesh && rightMesh.isVisible && !rightMesh.disposed)) {
+              // PRIORITY 1 must re-aim BEFORE select().
+              const se1 = sceneEngineRef.current;
+              if (se1?.vrInput) {
+                const ctr1 = se1.vrInput.getController(side);
+                if (ctr1) {
+                  ctr1.updateWorldMatrix(true, false);
+                  vrRadialAimOriginRef.current.setFromMatrixPosition(ctr1.matrixWorld);
+                  vrRadialAimDirQuatRef.current.setFromRotationMatrix(ctr1.matrixWorld);
+                  vrRadialAimDirRef.current
+                    .set(0, 0, -1)
+                    .applyQuaternion(vrRadialAimDirQuatRef.current)
+                    .normalize();
+                  vrRadialAimRayRef.current.set(
+                    vrRadialAimOriginRef.current,
+                    vrRadialAimDirRef.current
+                  );
+                  if (leftMesh && leftMesh.isVisible && !leftMesh.disposed && leftMesh.updateAim(vrRadialAimRayRef.current)) {
+                    leftMesh.select();
+                    return;
+                  }
+                  if (rightMesh && rightMesh.isVisible && !rightMesh.disposed && rightMesh.updateAim(vrRadialAimRayRef.current)) {
+                    rightMesh.select();
+                    return;
+                  }
+                }
+              }
+            }
+
+            // PRIORITY 2: Two-handed scale grab.
+            // If the trigger on the OTHER hand is also currently held,
+            // the user is attempting a two-handed scale grab.
             const otherSide: 'left' | 'right' = side === 'left' ? 'right' : 'left';
             const otherSideState = otherSide === 'left' ? se.vrInput?.left : se.vrInput?.right;
             const otherTriggerHeld = otherSideState?.buttons.trigger ?? false;
@@ -1434,26 +1728,110 @@ const vrHud = new VRHUDManager(
                 }
               }
             }
-            // Single-handed right-trigger path: HUD click.
-            // Runs even when the two-handed condition was
-            // checked above (one-shot click is harmless if the
-            // user is now in a two-handed grab instead — the
-            // HUD click already fired before the second
-            // trigger press). Left trigger without a co-held
-            // right trigger is a no-op (left trigger was
-            // previously reserved for future activation).
+            // PRIORITY 3: HUD click (right hand).
             if (side === 'right') {
               const hud = vrHudRef.current;
               if (hud && (hud.isVisible || hud.activePanel)) {
                 const uv = currentVrHudUvRef.current;
-                if (uv) hud.handleRayIntersection(uv);
+                if (uv) {
+                  hud.handleRayIntersection(uv);
+                  return;
+                }
               }
+            }
+            // PRIORITY 3.5: Spatial UI Panel (HTMLMesh) click in VR (Video controls, dialogs).
+            // Direct raycast against active HTMLMesh panels so trigger clicks reliably
+            // dispatch DOM mousedown / mouseup / click events to React buttons & sliders.
+            const uiCtrl = se.vrInput?.getController(side);
+            if (uiCtrl && se.spatialPanelManager) {
+              const panelMeshes = se.spatialPanelManager.getAllHTMLMeshes();
+              if (panelMeshes.length > 0) {
+                uiCtrl.updateWorldMatrix(true, false);
+                const origin = new THREE.Vector3().setFromMatrixPosition(uiCtrl.matrixWorld);
+                const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(
+                  new THREE.Quaternion().setFromRotationMatrix(uiCtrl.matrixWorld)
+                ).normalize();
+                se.raycaster.set(origin, dir);
+                const hits = se.raycaster.intersectObjects(panelMeshes, true);
+                if (hits.length > 0 && hits[0].uv) {
+                  se.spatialPanelManager.dispatchDOMClickAtUV(hits[0].object, hits[0].uv);
+                  return;
+                }
+              }
+            }
+            // PRIORITY 4: Click / select 3D asset or video in VR scene.
+            // Walks the raycast hit's parent chain to recover the original
+            // LoadedAsset via AssetManager's id->asset Map (mirrors the
+            // grip-handler's `objToAsset` lookup pattern). The previous
+            // iteration called `am.getAssetByObject3D(top)` which does not
+            // exist on AssetManager - every VR trigger pulled on an asset
+            // would throw a TypeError mid-handler, abort the rest of PRIORITY
+            // 4, and leave React's selection state undefined.
+            // `amPrio4` so this `const` doesn't shadow the outer `am` and re-trigger TS2448/TS2454 at the Priority 2 two-handed-scale read ~1474 (sibling branches in the same `if (button === 'trigger')`).
+            const amPrio4 = assetManagerRef.current;
+            const assetCtrl = side === 'right' ? se.vrInput.getController('right') : se.vrInput.getController('left');
+            if (amPrio4 && assetCtrl) {
+              const origin = new THREE.Vector3();
+              const direction = new THREE.Vector3(0, 0, -1);
+              assetCtrl.getWorldPosition(origin);
+              direction.transformDirection(assetCtrl.matrixWorld).normalize();
+              se.raycaster.set(origin, direction);
+              const assetMeshes: THREE.Object3D[] = [];
+              const objToAsset = new Map<THREE.Object3D, LoadedAsset>();
+              amPrio4.assets.forEach((a) => {
+                assetMeshes.push(a.object3d);
+                objToAsset.set(a.object3d, a);
+              });
+              const hits = se.raycaster.intersectObjects(assetMeshes, true);
+              if (hits.length > 0) {
+                // If pointing at a spatial UI panel (HTMLMesh), let InteractiveGroup handle the button click.
+                // Do not toggle the video UI menu or clear selection.
+                let isHittingUI = false;
+                let curr: THREE.Object3D | null = hits[0].object;
+                while (curr) {
+                  if (
+                    curr.constructor?.name === 'HTMLMesh' ||
+                    curr.type === 'HTMLMesh' ||
+                    (curr as any).isHTMLMesh ||
+                    curr.constructor?.name === 'InteractiveGroup'
+                  ) {
+                    isHittingUI = true;
+                    break;
+                  }
+                  curr = curr.parent;
+                }
+                if (isHittingUI) {
+                  return;
+                }
+
+                let top: THREE.Object3D | null = hits[0].object;
+                while (top && !objToAsset.has(top)) top = top.parent;
+                const hitAsset = top ? objToAsset.get(top) ?? null : null;
+                if (hitAsset) {
+                  if (hitAsset.type === 'video') {
+                    setActiveVideoAssetId((prev) => prev === hitAsset.id ? null : hitAsset.id);
+                  }
+                  return;
+                }
+                // Hitting non-asset environment geometry (floor, walls) clears selection & closes video overlay
+                manipulationManagerRef.current?.selectAsset(null);
+                setActiveVideoAssetId(null);
+                return;
+              }
+              // Pulling trigger in empty space clears any lingering selection & closes video overlay
+              manipulationManagerRef.current?.selectAsset(null);
+              setActiveVideoAssetId(null);
             }
           }
         },
         onReleased: (button, side) => {
           const mm = manipulationManagerRef.current;
+          const se = sceneEngineRef.current;
           if (!mm) return;
+          if (mm.isTwoHandedGrabbing) {
+            mm.endTwoHandedGrab();
+            return;
+          }
           // Distinguish sides so a brief left-grip tap doesn't drop a
           // right-grip-held object. vrReleaseControllerGrab itself
           // no-ops when not mid-grab (`_isVRGrabbing === false`), so
@@ -1461,17 +1839,33 @@ const vrHud = new VRHUDManager(
           // side-aware also avoids spurious log lines in unknown grab
           // states.
           if (button === 'grip' && (side === 'left' || side === 'right')) {
-            // Release the held asset on EITHER grip release — both
-            // grips can now grab per VRControls.txt. vrReleaseControllerGrab
-            // is side-agnostic (checks _isVRGrabbing), so calling it
-            // on either side release is safe even if the other side
-            // never grabbed. HUD detach below also covers both sides
-            // because it checks currentGrip / panelCurrentGrip
-            // regardless of which controller was carrying.
-            mm.vrReleaseControllerGrab();
+            mm.vrReleaseControllerGrab(side);
             const hud = vrHudRef.current;
             if (hud && hud.currentGrip) hud.detach();
             if (hud && hud.panelCurrentGrip) hud.detachPanel();
+            // Release spatial panel grab: restore the panel group to the scene
+            // at its current world position so it stays where the user left it.
+            const spGrip = spatialPanelGripRef.current;
+            if (spGrip && spGrip.side === side) {
+              const grip = se?.vrInput?.getGrip(side);
+              if (grip && spGrip.group.parent === grip) {
+                // Capture world pose before un-parenting so the panel stays
+                // exactly where the user released it.
+                const wp = new THREE.Vector3();
+                const wq = new THREE.Quaternion();
+                spGrip.group.getWorldPosition(wp);
+                spGrip.group.getWorldQuaternion(wq);
+                grip.remove(spGrip.group);
+                if (spGrip.originalParent) {
+                  spGrip.originalParent.add(spGrip.group);
+                } else {
+                  se?.scene?.add(spGrip.group);
+                }
+                spGrip.group.position.copy(wp);
+                spGrip.group.quaternion.copy(wq);
+              }
+              spatialPanelGripRef.current = null;
+            }
           }
           // Trigger release: end a two-handed scale grab in
           // flight, regardless of which side let go first.
@@ -1510,28 +1904,108 @@ const vrHud = new VRHUDManager(
     // receives subsequent `applyRemoteTransform` updates so the FIRST
     // visually stays put during host drag.
     const disposers: Array<() => void> = [];
+    // Resume the WebAudio context on the first user gesture; browsers
+    // suspend it until a user interaction, which would silence peer voice.
+    const resumeAudioContext = () => {
+      avatarManager.audioListener.context.resume().catch(() => {});
+    };
+    window.addEventListener('pointerdown', resumeAudioContext, { once: true });
+    disposers.push(() => window.removeEventListener('pointerdown', resumeAudioContext));
+
+    // Keep React `isVRPresenting` in sync with the WebXR session so the
+    // DashMenu rendering can switch between desktop overlay and 3D spatial
+    // panel without needing a state-toggle to re-read the ref.
+    const onXRSessionStart = () => setIsVRPresenting(true);
+    const onXRSessionEnd = () => setIsVRPresenting(false);
+    sceneEngine.renderer.xr.addEventListener('sessionstart', onXRSessionStart);
+    sceneEngine.renderer.xr.addEventListener('sessionend', onXRSessionEnd);
+    // Catch the case where the page is reloaded while already in an active
+    // XR session — sessionstart won't fire again, so seed state from the
+    // renderer's live flag.
+    if (sceneEngine.renderer.xr.isPresenting) setIsVRPresenting(true);
+    disposers.push(() => {
+      sceneEngine.renderer.xr.removeEventListener('sessionstart', onXRSessionStart);
+      sceneEngine.renderer.xr.removeEventListener('sessionend', onXRSessionEnd);
+    });
 
     // Connect selection events
     disposers.push(manipulationManager.registerOnSelectionChange((asset) => {
       setSelectedAsset(asset);
+      if (asset?.type === 'video') {
+        setActiveVideoAssetId(asset.id);
+        resetVideoInactivityTimer();
+      }
     }));
 
     // Preserve the misc-file auto-inspect convenience that USED TO ride
-    // on `selectAsset` from inside `beginGrab` — but routed here through
+    // on `selectAsset` from inside `beginGrab` - but routed here through
     // a dedicated grab-only listener so RMB-grab no longer mirrors the
     // dev tool's secondary action (R) in the gizmo-flash + selection-
     // chip UI. RMB still opens the misc preview; LMB/R-toggle selection
     // continues to do the same, but without the brief selection state-
     // flip in between.
-    disposers.push(manipulationManager.registerOnGrabBegin((asset) => {
-      // isHeld is true the moment any grab begins (RMB-grab, VR grip, or
-      // two-handed scale). Drives the radial menu's 'held' tab.
-      setIsHeld(true);
+    disposers.push(manipulationManager.registerOnGrabBegin((asset, side) => {
+      if (side === 'left' || side === 'right') {
+        heldAssetsBySideRef.current[side] = asset ?? null;
+      } else {
+        heldAssetsBySideRef.current.left = asset ?? null;
+        heldAssetsBySideRef.current.right = asset ?? null;
+      }
+      isHeldRef.current = heldAssetsBySideRef.current.left !== null || heldAssetsBySideRef.current.right !== null;
+      heldAssetTypeRef.current = asset?.type ?? null;
+      heldSideRef.current = side ?? null;
+      setIsHeld(isHeldRef.current);
       setHeldAssetType(asset?.type ?? null);
+      setHeldAssetCustomItems(asset?.contextMenuItems);
+      const updateHoldingMenu = (mesh: VRRadialMenuMesh | null, heldAsset: LoadedAsset | null) => {
+        if (!mesh || !heldAsset) return;
+        mesh.setState({
+          isHeld: true,
+          heldAssetType: heldAsset.type ? String(heldAsset.type) : null,
+          heldAssetCustomItems: heldAsset.contextMenuItems,
+        });
+        mesh.setActiveTab('held');
+      };
+      if (side === 'left') {
+        updateHoldingMenu(vrRadialMenuLeftRef.current, asset ?? null);
+      } else if (side === 'right') {
+        updateHoldingMenu(vrRadialMenuRightRef.current, asset ?? null);
+      } else {
+        updateHoldingMenu(vrRadialMenuLeftRef.current, asset ?? null);
+        updateHoldingMenu(vrRadialMenuRightRef.current, asset ?? null);
+      }
     }));
-    disposers.push(manipulationManager.registerOnGrabEnd(() => {
-      setIsHeld(false);
-      setHeldAssetType(null);
+    disposers.push(manipulationManager.registerOnGrabEnd((side) => {
+      if (side === 'left' || side === 'right') {
+        heldAssetsBySideRef.current[side] = null;
+      } else {
+        heldAssetsBySideRef.current.left = null;
+        heldAssetsBySideRef.current.right = null;
+      }
+      const anyHeld = heldAssetsBySideRef.current.left !== null || heldAssetsBySideRef.current.right !== null;
+      isHeldRef.current = anyHeld;
+      if (!anyHeld) {
+        heldAssetTypeRef.current = null;
+        heldSideRef.current = null;
+        setIsHeld(false);
+        setHeldAssetType(null);
+        setHeldAssetCustomItems(undefined);
+      }
+      const updateReleasedMenu = (mesh: VRRadialMenuMesh | null) => {
+        if (!mesh) return;
+        mesh.setState({ isHeld: false, heldAssetType: null, heldAssetCustomItems: undefined });
+        if (mesh.activeTab === 'held') {
+          mesh.setActiveTab('general');
+        }
+      };
+      if (side === 'left') {
+        updateReleasedMenu(vrRadialMenuLeftRef.current);
+      } else if (side === 'right') {
+        updateReleasedMenu(vrRadialMenuRightRef.current);
+      } else {
+        updateReleasedMenu(vrRadialMenuLeftRef.current);
+        updateReleasedMenu(vrRadialMenuRightRef.current);
+      }
     }));
 
     // Connect transform change -> network broadcast.
@@ -1621,7 +2095,7 @@ const vrHud = new VRHUDManager(
       // asset's id was registered (either by the LOCAL host on Import
       // click OR by a remote peer on receipt of the corresponding
       // 'pending' broadcast), remove it and dispose now that the real
-      // asset has landed. Idempotent — any non-placeholder registration
+      // asset has landed. Idempotent - any non-placeholder registration
       // is a no-op.
       const placeholder = pendingAssetsRef.current.get(asset.id);
       if (placeholder) {
@@ -1629,44 +2103,15 @@ const vrHud = new VRHUDManager(
         placeholder.dispose();
         pendingAssetsRef.current.delete(asset.id);
       }
-      
-      // PERSISTENT_VIDEO_CONTROLS_HOOK: dock an in-world video-controls panel
-      // under the freshly-added video asset. The panel's anchor is computed
-      // from the video's screen-plane height so it sits just below the frame
-      // regardless of aspect ratio (16:9 / 9:16 / 1:1 / 'auto' post-loadedmetadata).
-      // We add a new entry to React state so the JSX portal renders
-      // <VideoObjectControls> into the detached container on the next render.
-      if (asset.type === 'video' && asset.object3d && asset.videoElement && spatialPanelManagerRef.current) {
-        const domContainer = document.createElement('div');
-        domContainer.style.pointerEvents = 'auto';
-        const screenPlane = asset.object3d.children.find(c => c.geometry instanceof THREE.PlaneGeometry) as THREE.Object3D | undefined;
-        const screenH = (screenPlane?.geometry as THREE.PlaneGeometry | undefined)?.parameters?.height ?? 1.6875;
-        const panelId = `video-controls-${asset.id}`;
-        const se = sceneEngineRef.current;
-        if (!se) return;
-        const anchorOffset = new THREE.Vector3(0, -screenH / 2 - 0.05, 0.06);
-        spatialPanelManagerRef.current.createPanel(
-          panelId,
-          domContainer,
-          se.scene,
-          se.camera,
-          600, // cssWidth — wide enough to match HD-ish video widths
-          100, // cssHeight — bumped from 90 to give the bottom-right cluster ~6px breathing room (mode-toggle stack vs volume slider)
-          asset.object3d,
-          anchorOffset
-        );
-        setVideoControlPanels(prev => [...prev, { assetId: asset.id, panelId, container: domContainer }]);
-      }
-
       if (net.mode !== 'offline') {
         // The `primitiveType` tag is sourced from `asset.object3d.userData`
-        // — `AssetManager.spawnPrimitive` sets it there in the same edit
+        // - `AssetManager.spawnPrimitive` sets it there in the same edit
         // cycle so this distributed-spawn path has it. Without this, the
         // receiver's `if (data.type === 'primitive' && data.primitiveType)`
         // branch never fires and the asset is silently dropped on every
         // joining guest (the host's default cube + torus pre-broadcast
         // bug). File/url-spawned assets don't carry primitiveType so the
-        // field is `undefined` for those — still safe, since the receiver
+        // field is `undefined` for those - still safe, since the receiver
         // only consults primitiveType on the 'primitive'-type branch.
         const primitiveType = (asset.object3d.userData as Record<string, unknown>)?.primitiveType as
           | 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane'
@@ -1684,12 +2129,16 @@ const vrHud = new VRHUDManager(
           isCollidable: asset.isCollidable,
           // Mirror the host's userData.isPersistent on the spawn envelope
           // so a guest receiving this asset restores the right
-          // persisting state from the first frame — without it, the
+          // persisting state from the first frame - without it, the
           // inspector checkbox defaults to true regardless of send.
-          isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined
+          isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+          materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+          videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined
         };
         net.broadcastSpawn(spawnData);
       }
+
+      // Auto-open the inspector when a freshly-imported video lands.
     }));
 
     // Network listeners
@@ -1706,9 +2155,193 @@ const vrHud = new VRHUDManager(
       manipulationManager.applyRemoteTransform(update, assetManager.assets);
     });
 
+    net.onMaterialUpdate((update) => {
+      const asset = assetManager.assets.get(update.assetId);
+      if (asset) {
+        AssetManager.applyMaterialUpdate(asset, update);
+        const sel = selectedAssetRef.current;
+        if (sel && sel.id === update.assetId) {
+          setSelectedAsset({ ...asset });
+        }
+      }
+    });
+
+    // Apply generic inspector updates from peers (active, persistent, name,
+    // light config, component attach/detach, mesh enabled, hierarchy).
+    disposers.push(net.onInspectorUpdate((update) => {
+      if (update.senderPeerId === net.localPeerId) return;
+      const asset = assetManager.assets.get(update.assetId);
+      if (!asset) return;
+      const targetNode = update.nodeUuid
+        ? findObjectByUUID(asset.object3d, update.nodeUuid)
+        : asset.object3d;
+      if (!targetNode) return;
+
+      if (update.name !== undefined) {
+        asset.name = update.name;
+        targetNode.name = update.name;
+      }
+      if (update.active !== undefined) {
+        targetNode.visible = update.active;
+      }
+      if (update.persistent !== undefined) {
+        targetNode.userData.isPersistent = update.persistent;
+      }
+      if (update.meshEnabled !== undefined) {
+        targetNode.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            child.visible = update.meshEnabled!;
+          }
+        });
+      }
+      if (update.resoniteLight !== undefined) {
+        if (update.resoniteLight === null) {
+          removeLightComponent(targetNode);
+        } else {
+          syncThreeLightFromConfig(targetNode, { ...DEFAULT_LIGHT_CONFIG, ...update.resoniteLight });
+        }
+      }
+      if (update.rotatorSpeed !== undefined) {
+        targetNode.userData.rotatorSpeed = update.rotatorSpeed;
+      }
+      if (update.bobbingSpeed !== undefined) {
+        targetNode.userData.bobbingSpeed = update.bobbingSpeed;
+      }
+      if (update.hierarchyAction) {
+        const ha = update.hierarchyAction;
+        if (ha.type === 'insertParent') {
+          const newParent = new THREE.Group();
+          newParent.name = `Parent_of_${targetNode.name || 'Slot'}`;
+          if (ha.newNodeUuid) newParent.uuid = ha.newNodeUuid;
+          newParent.attach(targetNode);
+        } else if (ha.type === 'addChild') {
+          const newChild = new THREE.Group();
+          newChild.name = `Child_of_${targetNode.name || 'Slot'}`;
+          if (ha.newNodeUuid) newChild.uuid = ha.newNodeUuid;
+          newChild.position.set(0, 0.5, 0);
+          targetNode.add(newChild);
+        } else if (ha.type === 'parentToWorld') {
+          if (!sceneEngine?.worldRoot) return;
+          sceneEngine.worldRoot.attach(targetNode);
+        }
+      }
+
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === update.assetId) {
+        setSelectedAsset({ ...asset });
+      }
+    }));
+
     net.onAvatar((update) => {
       avatarManager.updatePeerAvatar(update);
     });
+
+    // Apply remote video-state envelopes. AssetManager.applyVideoState
+    // is a no-op when every applicable field already matches local
+    // state, so we apply unconditionally rather than threading peerId
+    // plumbing through. After apply, bump selectedAsset if it matches
+    // and force-redraw the VR HUD panel so visible values sync without
+    // waiting for the next setDataContext round-trip.
+    net.onVideoState((data) => {
+      const am = assetManagerRef.current;
+      if (!am) return;
+      am.applyVideoState(data.assetId, {
+        playing: data.playing,
+        currentTime: data.currentTime,
+        globalVolume: data.globalVolume
+      });
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === data.assetId) {
+        setSelectedAsset({ ...sel });
+      }
+      vrHudRef.current?.redrawPanel();
+    });
+
+    // Phase 3B: pull an oversized asset from the sender peer via the
+    // raw-binary asset channel. Replaces the old "Too Large" red
+    // placeholder with a live progress indicator and imports the file
+    // once all chunks arrive.
+    const startP2PAssetTransfer = (data: AssetSpawnData, pos: THREE.Vector3) => {
+      const hint = data.p2pTransferHint;
+      const senderPeerId = data.senderPeerId;
+      if (!hint || !senderPeerId) return false;
+
+      // Dispose any existing placeholder for this id.
+      const prior = pendingAssetsRef.current.get(data.id);
+      if (prior) {
+        sceneEngine.worldRoot.remove(prior.group);
+        prior.dispose();
+        pendingAssetsRef.current.delete(data.id);
+      }
+
+
+      const { group, dispose, setProgress } = createLoadingPlaceholder(
+        data.name || 'Asset',
+        'Network',
+        pos,
+        false // in-flight download, not a permanent failure
+      );
+      sceneEngine.worldRoot.add(group);
+      pendingAssetsRef.current.set(data.id, { group, dispose, setProgress, oversized: false });
+
+      const assetId = hint.id;
+      const size = hint.size;
+      const CHUNK_SIZE = 256 * 1024;
+      const chunks: ArrayBuffer[] = [];
+      // Pre-size the array so we can place out-of-order chunks by index.
+      chunks.length = Math.ceil(size / CHUNK_SIZE);
+      let receivedBytes = 0;
+      let completed = false;
+
+      const finishIfDone = () => {
+        if (completed) return;
+        // Verify every slot is filled.
+        for (let i = 0; i < chunks.length; i++) {
+          if (!chunks[i]) return;
+        }
+        completed = true;
+        netUnsub();
+        // Concatenate chunks in order.
+        const fullBlob = new Blob(chunks as ArrayBuffer[]);
+        const file = new File([fullBlob], data.name || 'Asset');
+        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
+          if (asset) {
+            asset.object3d.rotation.set(...data.rotation);
+            asset.object3d.scale.set(...data.scale);
+            if (data.isPersistent !== undefined) {
+              asset.object3d.userData.isPersistent = data.isPersistent;
+            }
+            if (data.materialState) {
+              // @ts-ignore
+              AssetManager.applyMaterialUpdate(asset, data.materialState);
+            }
+          }
+        });
+      };
+
+      const onData = (chunkData: { id: string; start: number; end: number; data: ArrayBuffer }) => {
+        if (chunkData.id !== assetId) return;
+        const index = Math.floor(chunkData.start / CHUNK_SIZE);
+        if (chunks[index]) return; // duplicate
+        chunks[index] = chunkData.data;
+        receivedBytes += chunkData.data.byteLength;
+        setProgress(Math.min(100, (receivedBytes / size) * 100));
+
+        // Request the next chunk if there are still bytes to fetch.
+        if (chunkData.end < size) {
+          const nextEnd = Math.min(chunkData.end + CHUNK_SIZE, size);
+          net.requestAssetChunk(assetId, senderPeerId, chunkData.end, nextEnd);
+        }
+        finishIfDone();
+      };
+      const netUnsub = net.onP2PChunkData(onData);
+
+      // Kick off the first chunk.
+      const firstEnd = Math.min(CHUNK_SIZE, size);
+      net.requestAssetChunk(assetId, senderPeerId, 0, firstEnd);
+      return true;
+    };
+
 
     net.onSpawn((data) => {
       // If asset is already loaded, skip
@@ -1718,20 +2351,74 @@ const vrHud = new VRHUDManager(
       // Oversized file broadcast: buildEnvelope's MAX_INLINED_FILE_BYTES
       // cap stripped the binary payload so the Quest doesn't OOM on a
       // 100MB+ base64 round-trip. Render a red "Too Large" placeholder
-      // instead of trying to import — no fileData will ever land, so
+      // instead of trying to import - no fileData will ever land, so
       // this entry stays in pendingAssetsRef indefinitely. The
       // animation loop's `oversized` skip below keeps it static (no
       // pulse) so it reads as a permanent failure indicator rather
       // than a still-loading asset.
+      if (data.type === 'video' && (data.streamingHint || (!data.fileData && !data.url))) {
+        const hint = data.streamingHint || { id: data.id, fileSize: 0, mimeHint: 'video/mp4' };
+        let v: HTMLVideoElement | null = null;
+        try {
+          v = videoStreamingServiceRef.current.attachReceiver(
+            hint,
+            data.id,
+            data.senderPeerId
+          );
+        } catch (err) {
+          console.warn(
+            '[VideoStreaming] attachReceiver failed, falling through',
+            err
+          );
+          v = null;
+        }
+        if (v) {
+          const posV = new THREE.Vector3(...data.position);
+          assetManager.loadVideoFromStreamedSource(
+            data.id,
+            data.name,
+            v,
+            posV,
+            { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+          )
+            .then((loadedAsset) => {
+              if (loadedAsset) {
+                loadedAsset.object3d.rotation.set(...data.rotation);
+                loadedAsset.object3d.scale.set(...data.scale);
+                if (data.isPersistent !== undefined) {
+                  loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+                }
+              }
+            })
+            .catch((err) => {
+              console.warn(
+                '[VideoStreaming] loadVideoFromStreamedSource failed',
+                err
+              );
+            });
+          return;
+        }
+        // v null: fall through to fileDataOversized branch below so
+        // peers still see the red placeholder.
+      }
       if (data.fileDataOversized) {
         // A prior 'pending' broadcast may have already drawn a
         // "Loading" placeholder for this id (the host fires 'pending'
         // BEFORE awaiting the import, so peers can render a loading
         // indicator during the (potentially multi-second) file load).
         // Dispose it before swapping in the permanent red "Too Large"
-        // indicator — otherwise the cyan mesh orphans in worldRoot
+        // indicator - otherwise the cyan mesh orphans in worldRoot
         // with no registerOnAssetAdded cleanup ever firing for it
         // (no real asset will ever be created for an oversized spawn).
+        //
+        // Phase 3B: if the sender included a p2pTransferHint, try to pull
+        // the bytes over the raw-binary asset channel instead of giving up.
+        if (startP2PAssetTransfer(data, pos)) {
+          return;
+        }
         const prior = pendingAssetsRef.current.get(data.id);
         if (prior) {
           sceneEngine.worldRoot.remove(prior.group);
@@ -1742,7 +2429,7 @@ const vrHud = new VRHUDManager(
           data.name || 'Asset',
           'Network',
           pos,
-          true  // isOversized — red palette, "Too Large" label
+          true  // isOversized - red palette, "Too Large" label
         );
         sceneEngine.worldRoot.add(group);
         pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
@@ -1759,6 +2446,9 @@ const vrHud = new VRHUDManager(
         if (data.isPersistent !== undefined) {
           prim.object3d.userData.isPersistent = data.isPersistent;
         }
+        if (data.materialState) {
+          AssetManager.applyMaterialUpdate(prim, data.materialState);
+        }
       } else if (data.fileData && data.name) {
         const blob = new Blob([data.fileData]);
         // Pass `data.id` as the AssetManager's customId so the local
@@ -1766,10 +2456,10 @@ const vrHud = new VRHUDManager(
         // broadcast via onPendingSpawn above) and the actual asset
         // share the SAME id. registerOnAssetAdded's id-match cleanup
         // (top of this engine-init effect) then removes the
-        // placeholder the moment this asset resolves — clean
+        // placeholder the moment this asset resolves - clean
         // handoff, no separate tempId → assetId mapping required.
         const file = new File([blob], data.name);
-        assetManager.importFile(file, pos, undefined, data.id).then((asset) => {
+        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
           if (asset) {
             asset.object3d.rotation.set(...data.rotation);
             asset.object3d.scale.set(...data.scale);
@@ -1781,25 +2471,27 @@ const vrHud = new VRHUDManager(
             if (data.isPersistent !== undefined) {
               asset.object3d.userData.isPersistent = data.isPersistent;
             }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(asset, data.materialState);
+            }
+          }
+        });
+      } else if (data.url) {
+        assetManager.importFromUrl(data.url, pos, undefined, data.id).then((asset) => {
+          if (asset) {
+            asset.object3d.rotation.set(...data.rotation);
+            asset.object3d.scale.set(...data.scale);
+            if (data.isPersistent !== undefined) {
+              asset.object3d.userData.isPersistent = data.isPersistent;
+            }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(asset, data.materialState);
+            }
           }
         });
       }
     });
 
-
-    // PERSISTENT_VIDEO_CONTROLS_REMOVE: Asset-removed callback — clean up the
-    // docked video-controls panel (if any) so a peer who deletes a video
-    // triggers a clean local teardown. The panel's destroyPanel tears down
-    // the CSS3D / HTMLMesh / THREE.Group; the React state update drops the
-    // JSX portal entry on the next render.
-    disposers.push(assetManager.registerOnAssetRemoved((id) => {
-      const panelId = `video-controls-${id}`;
-      const spm = spatialPanelManagerRef.current;
-      if (spm && spm.getGroup(panelId)) {
-        spm.destroyPanel(panelId);
-      }
-      setVideoControlPanels(prev => prev.filter(p => p.assetId !== id));
-    }));
     disposers.push(net.onRemove((id) => {
       assetManager.removeAsset(id);
       if (manipulationManager.selectedAsset?.id === id) {
@@ -1868,39 +2560,10 @@ const vrHud = new VRHUDManager(
       avatarManager.attachPeerAudio(peerId, stream);
     }));
 
-        PANEL_BROADCAST_RECEIVE — receive a peer's 'panelstate' envelope and mirror the
-    // panel-open state locally. Echo guard first: every browser
-    // receives its OWN broadcasts back through the DataConnection
-    // round-trip; if originPeerId === localPeerId we drop the
-    // envelope so the local openInspectorFromLocal/initializer is
-    // the single source of truth.
-    disposers.push(net.onPanelState((payload) => {
-      if (payload.originatorPeerId === networkServiceRef.current?.localPeerId) return;
-      if (payload.panelId === 'inspector') {
-        if (payload.action === 'open') {
-          if (payload.targetAssetId) {
-            const am = assetManagerRef.current;
-            const asset = am?.assets.get(payload.targetAssetId);
-            if (asset) {
-              setSelectedAsset(asset);
-            }
-          }
-          setInspectorPanelOriginator({ peerId: payload.originatorPeerId, userName: payload.originatorUserName, role: payload.originatorRole });
-          openInspectorFromLocal();
-        } else {
-          closeInspectorFromLocal();
-          setInspectorPanelOriginator(null);
-        }
-      } else if (payload.panelId === 'import') {
-        if (payload.action === 'open') {
-          setImportPanelOriginator({ peerId: payload.originatorPeerId, userName: payload.originatorUserName, role: payload.originatorRole });
-          openImportFromLocal();
-        } else {
-          closeImportFromLocal();
-          setImportPanelOriginator(null);
-        }
-      }
+    disposers.push(net.onVideoLiveStream((assetId, stream) => {
+      assetManager.attachLiveStreamToVideo(assetId, stream);
     }));
+
     disposers.push(net.onRoleUpdate((data) => {
       if (data.targetPeerId === net.localPeerId) {
         setLocalRole(data.newRole);
@@ -1936,16 +2599,13 @@ const vrHud = new VRHUDManager(
     inventoryServiceRef.current.getItems().then((items) => setInventoryItems(items));
 
     disposers.push(net.onSyncReq((fromPeerId) => {
-      if (net.isHost) {
+      if (assetManager.assets.size > 0 || net.isHost) {
         const assetsList: AssetSpawnData[] = [];
         assetManager.assets.forEach((a) => {
-          // Mirror registerOnAssetAdded's broadcast above — the snapshot
-          // for late-joining guests needs primitiveType so the receiving
-          // onSyncResp handler can re-import the cube/torus/etc. without
-          // dropping them silently.
           const primitiveType = (a.object3d.userData as Record<string, unknown>)?.primitiveType as
             | 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane'
             | undefined;
+          const hint = (a.object3d.userData as Record<string, unknown>)?.streamingHint as import('./services/VideoStreamingService.ts').VideoStreamingHint | undefined;
           assetsList.push({
             id: a.id,
             name: a.name,
@@ -1957,8 +2617,21 @@ const vrHud = new VRHUDManager(
             primitiveType,
             fileData: a.fileData,
             isCollidable: a.isCollidable,
-            isPersistent: (a.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined
+            isPersistent: (a.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+            materialState: (a.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+            videoAspectRatio: (a.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+            streamingHint: hint
           });
+          if (hint && net.isHost) {
+            const syncMode = (a.object3d.userData as { videoState?: { syncMode?: string } }).videoState?.syncMode;
+            if (syncMode === 'watch-party' && a.videoElement) {
+              videoStreamingServiceRef.current.startLiveStreamToPeer(a.id, a.videoElement, fromPeerId);
+            } else {
+              videoStreamingServiceRef.current.beginStreamingToPeer(hint, fromPeerId).catch((err) => {
+                console.warn('[VideoStreaming] late-join pump failed for', fromPeerId, err);
+              });
+            }
+          }
         });
         net.sendSceneSnapshot(fromPeerId, assetsList);
       }
@@ -1966,6 +2639,65 @@ const vrHud = new VRHUDManager(
 
     disposers.push(net.onSyncResp((snapshot) => {
       snapshot.assets.forEach((data) => {
+        // Phase 3A late-join branch - MUST come BEFORE the isImporting
+        // guard because the manual broadcast path sometimes lands
+        // AFTER the local user has already placed a placeholder.
+        // We want to UPGRADE that placeholder (replace the
+        // blob/file import path) rather than short-circuit on the
+        // existence guard.
+        //
+        // Fix A: async work via IIFE - same rationale as onSpawn
+        // above; forEach's callback is plain sync so we can't use
+        // `await` directly.
+        if (data.streamingHint && data.type === 'video') {
+          // v4 fix: see onSpawn's mirror comment. Sync attachReceiver
+          // in try/catch; if it throws, fall through (in this branch
+          // the fileDataOversized fallback is below the snapshotForEach).
+          let v: HTMLVideoElement | null = null;
+          try {
+            v = videoStreamingServiceRef.current.attachReceiver(
+              data.streamingHint,
+              data.id,
+              data.senderPeerId
+            );
+          } catch (err) {
+            console.warn(
+              '[VideoStreaming] late-join attachReceiver failed, falling through',
+              err
+            );
+            v = null;
+          }
+          if (v) {
+            const posV = new THREE.Vector3(...data.position);
+            assetManager.loadVideoFromStreamedSource(
+              data.id,
+              data.name,
+              v,
+              posV,
+              { videoAspectRatio: data.videoAspectRatio || 'auto', videoLoop: true }
+            )
+              .then((loadedAsset) => {
+                if (loadedAsset) {
+                  loadedAsset.object3d.rotation.set(...data.rotation);
+                  loadedAsset.object3d.scale.set(...data.scale);
+                  if (data.isPersistent !== undefined) {
+                    loadedAsset.object3d.userData.isPersistent = data.isPersistent;
+                  }
+                  if (data.materialState) {
+                    AssetManager.applyMaterialUpdate(loadedAsset, data.materialState);
+                  }
+                }
+              })
+              .catch((err) => {
+                console.warn(
+                  '[VideoStreaming] late-join loadVideoFromStreamedSource failed',
+                  err
+                );
+              });
+            return;
+          }
+          // v null: fall through to forEach's normal branches below.
+        }
         // Belt + braces: skip late-join snapshot items whose import
         // is already in-flight from a separate listener (mirrors the
         // onSpawn guard above). Without this, two near-simultaneous
@@ -1990,6 +2722,12 @@ const vrHud = new VRHUDManager(
             // "Too Large" indicator. Without this the cyan mesh
             // orphans in worldRoot with no registerOnAssetAdded
             // cleanup ever firing.
+            //
+            // Phase 3B: if the sender included a p2pTransferHint, try to pull
+            // the bytes over the raw-binary asset channel instead of giving up.
+            if (startP2PAssetTransfer(data, pos)) {
+              return;
+            }
             const prior = pendingAssetsRef.current.get(data.id);
             if (prior) {
               sceneEngine.worldRoot.remove(prior.group);
@@ -2000,14 +2738,14 @@ const vrHud = new VRHUDManager(
               data.name || 'Asset',
               'Network',
               pos,
-              true  // isOversized — red palette, "Too Large" label
+              true  // isOversized - red palette, "Too Large" label
             );
             sceneEngine.worldRoot.add(group);
             pendingAssetsRef.current.set(data.id, { group, dispose, oversized: true });
             return;
           }
           if (data.type === 'primitive' && data.primitiveType) {
-            const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+            const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
             prim.object3d.rotation.set(...data.rotation);
             prim.object3d.scale.set(...data.scale);
             // Mirror the late-join snapshot's userData.isPersistent so
@@ -2016,20 +2754,34 @@ const vrHud = new VRHUDManager(
             if (data.isPersistent !== undefined) {
               prim.object3d.userData.isPersistent = data.isPersistent;
             }
+            if (data.materialState) {
+              AssetManager.applyMaterialUpdate(prim, data.materialState);
+            }
           } else if (data.fileData && data.name) {
             const blob = new Blob([data.fileData]);
             const file = new File([blob], data.name);
-            assetManager.importFile(file, pos).then((asset) => {
+            assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
               if (asset) {
                 asset.object3d.rotation.set(...data.rotation);
                 asset.object3d.scale.set(...data.scale);
-                // Snapshot receive-side parity with the live 'spawn'
-                // path above: write the persistent flag onto the
-                // importer's userData immediately so the receiver's
-                // inspector tree + checkbox reflect what the host
-                // had configured.
                 if (data.isPersistent !== undefined) {
                   asset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(asset, data.materialState);
+                }
+              }
+            });
+          } else if (data.url) {
+            assetManager.importFromUrl(data.url, pos, undefined, data.id).then((asset) => {
+              if (asset) {
+                asset.object3d.rotation.set(...data.rotation);
+                asset.object3d.scale.set(...data.scale);
+                if (data.isPersistent !== undefined) {
+                  asset.object3d.userData.isPersistent = data.isPersistent;
+                }
+                if (data.materialState) {
+                  AssetManager.applyMaterialUpdate(asset, data.materialState);
                 }
               }
             });
@@ -2041,8 +2793,18 @@ const vrHud = new VRHUDManager(
     // Animation Loop sync
     let lastBroadcast = 0;
     let lastCenterRay = 0;
+    // Post-render: sync the Web Audio listener with the final camera/HMD
+    // pose AFTER renderer.render() has applied the WebXR camera matrix.
+    // This is the authoritative spatial-audio sync; the per-frame update
+    // callback above is a fallback for non-VR/desktop mode.
+    const unbindPostRender = sceneEngine.registerPostRenderCallback(() => {
+      avatarManager.updateAudioListener();
+    });
+
     const unbindLoop = sceneEngine.registerUpdateCallback((_delta, elapsed) => {
       manipulationManager.update(_delta);
+      assetManager.update(_delta, elapsed);
+      avatarManager.update(_delta);
 
       // Pulse in-flight import placeholders so they read as "loading"
       // at a glance. Cheap: a few sin / multiplies per pending place,
@@ -2051,7 +2813,7 @@ const vrHud = new VRHUDManager(
       if (pendingMap.size > 0) {
         for (const [, entry] of pendingMap) {
           // Oversized ("Too Large") placeholders are static failure
-          // indicators — pulsing them would suggest they're still
+          // indicators - pulsing them would suggest they're still
           // loading. Skipping the pulse makes the read unambiguous
           // and also avoids unnecessary transform work for entries
           // that will never resolve into a real asset.
@@ -2068,8 +2830,8 @@ const vrHud = new VRHUDManager(
         setStats({ ...sceneEngine.stats });
       }
 
-      // Broadcast avatar every ~60ms (approx 16 FPS network sync)
-      if (elapsed - lastBroadcast > 0.06 && net.mode !== 'offline') {
+      // Broadcast avatar every ~33ms (approx 30 FPS network sync)
+      if (elapsed - lastBroadcast > 0.033 && net.mode !== 'offline') {
         lastBroadcast = elapsed;
         const transform = avatarManager.getLocalTransform(
           sceneEngine.camera,
@@ -2170,16 +2932,22 @@ const vrHud = new VRHUDManager(
       // While locked, if the crosshair is over a panel route the click there
       // instead of doing world raycasting.
       const spm = sceneEngine.spatialPanelManager;
-      if (document.pointerLockElement && spm?.isOverPanel) {
-        spm.handleLockedClick();
-        return;
+      if (document.pointerLockElement && spm) {
+        spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+        if (spm.isOverPanel) {
+          spm.handleLockedClick();
+          return;
+        }
       }
 
       const rect = sceneEngine.renderer.domElement.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      const isLocked = document.pointerLockElement === sceneEngine.renderer.domElement || cameraModeRef.current === 'first-person';
+      const ndc = isLocked ? new THREE.Vector2(0, 0) : new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      sceneEngine.raycaster.setFromCamera(ndc, sceneEngine.camera);
 
-      sceneEngine.raycaster.setFromCamera(new THREE.Vector2(x, y), sceneEngine.camera);
       const targets: THREE.Object3D[] = [];
       const objToAsset = new Map<THREE.Object3D, LoadedAsset>();
       assetManager.assets.forEach((asset) => {
@@ -2192,20 +2960,20 @@ const vrHud = new VRHUDManager(
         let cur: THREE.Object3D | null = hits[0].object;
         while (cur && !objToAsset.has(cur)) cur = cur.parent;
         if (cur && objToAsset.has(cur)) {
-          // Misc files no longer auto-open an inspection modal on
-          // canvas click; their context-menu entry points (Download /
-          // Save to Inventory) are reachable from the radial menu when
-          // the asset is held. Visual file info is baked into the
-          // misc-file canvas texture in AssetManager.createMiscFileObject.
+          const found = objToAsset.get(cur);
+          if (found && found.type === 'video') {
+            setActiveVideoAssetId((prev) => (prev === found.id ? null : found.id));
+            resetVideoInactivityTimer();
+          }
         }
       }
     };
     // Per Controls-Keybinds.txt: Right Mouse Button = Grab (NOT context
     // menu). The ManipulationManager pointerdown handler captures RMB
     // and either initiates a grab or no-ops. The contextmenu event still
-    // fires here on right-mouse-down — we preventDefault to suppress the
+    // fires here on right-mouse-down - we preventDefault to suppress the
     // browser's native menu but no longer auto-open the radial menu on
-    // RMB (that override was the bug the user reported — it shadowed the
+    // RMB (that override was the bug the user reported - it shadowed the
     // grab feature).
     const onCanvasContextMenu = (e: MouseEvent) => {
       e.preventDefault();
@@ -2244,12 +3012,16 @@ const vrHud = new VRHUDManager(
       const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       lastMouseNdcRef.current.set(x, y);
     };
-    // Scroll wheel: when locked + over a panel, forward to the panel element.
+    // Scroll wheel: when locked/crosshair + pointing at a panel, scroll the panel directly.
     const onCanvasWheel = (e: WheelEvent) => {
       const spm = sceneEngine.spatialPanelManager;
-      if (document.pointerLockElement && spm?.isOverPanel) {
-        e.preventDefault();
-        spm.handleLockedScroll(e.deltaY);
+      const isLocked = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
+      if (isLocked && spm) {
+        spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+        if (spm.isOverPanel && spm.handleLockedScroll(e.deltaY)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
       }
     };
     const domElem = sceneEngine.renderer.domElement;
@@ -2284,6 +3056,7 @@ const vrHud = new VRHUDManager(
     }
 
     return () => {
+      unbindPostRender();
       unbindLoop();
       domElem.removeEventListener('click', onCanvasClick);
       domElem.removeEventListener('contextmenu', onCanvasContextMenu);
@@ -2315,7 +3088,7 @@ const vrHud = new VRHUDManager(
   }, []);
   // Push fresh PanelContext to VRHUDManager whenever any state underlying
   // the active panel changes. setDataContext triggers a redraw ONLY if
-  // activePanel !== null — no cost when no panel is showing. Runs after
+  // activePanel !== null - no cost when no panel is showing. Runs after
   // the engine-init effect has mounted vrHudRef.current.
   useEffect(() => {
     const vrHud = vrHudRef.current;
@@ -2332,7 +3105,7 @@ const vrHud = new VRHUDManager(
     const users: import('./engine/VRHUDManager').PanelUser[] = [
       {
         id: selfId,
-        name: net?.localUserName ?? 'You',
+        name: userName || net?.localUserName || 'You',
         role: net?.isHost ? 'admin' : 'guest',
         isSelf: true,
         isHost: !!net?.isHost,
@@ -2410,26 +3183,74 @@ const vrHud = new VRHUDManager(
   // the desktop dash or inventory modal. Without this the panel
   // shows "No items yet" in pure-VR sessions. The follow-up
   // useEffect below keeps the data fresh on desktop-modal opens.
-  useEffect(() => {
+  const refreshInventoryData = useCallback(() => {
     const inv = inventoryServiceRef.current;
     if (!inv) return;
     inv.getItems().then((items) => {
       inventoryItemsRef.current = items.slice();
       setInventoryItems(items);
-    }).catch(() => { /* swallow — IDB may not be ready */ });
+    }).catch(() => {});
+    inv.getFolders().then((folders) => {
+      setInventoryFolders(folders);
+    }).catch(() => {});
   }, []);
 
-  // Refresh inventory items when the user opens either the desktop
-  // dash or the desktop inventory modal — keeps the VR panel view
-  // fed fresh data WITHOUT relying on a state update path.
   useEffect(() => {
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  useEffect(() => {
+    refreshInventoryData();
+  }, [showDashMenu, showInventoryModal, refreshInventoryData]);
+
+  const handleDeleteInventoryItem = useCallback(async (id: string) => {
     const inv = inventoryServiceRef.current;
     if (!inv) return;
-    inv.getItems().then((items) => {
-      inventoryItemsRef.current = items.slice();
-      setInventoryItems(items);
-    }).catch(() => { /* swallow — IDB may not be ready */ });
-  }, [showDashMenu, showInventoryModal]);
+    await inv.removeItem(id);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleRenameInventoryItem = useCallback(async (id: string, newName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !newName.trim()) return;
+    await inv.renameItem(id, newName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleCreateInventoryFolder = useCallback(async (folderName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !folderName.trim()) return;
+    await inv.createFolder(folderName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleMoveInventoryItem = useCallback(async (id: string, folder?: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.moveItemToFolder(id, folder);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleRenameInventoryFolder = useCallback(async (oldName: string, newName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv || !newName.trim()) return;
+    await inv.renameFolder(oldName, newName.trim());
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleDeleteInventoryFolder = useCallback(async (folderName: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.deleteFolder(folderName);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
+
+  const handleMoveInventoryFolder = useCallback(async (folderName: string, targetParent?: string) => {
+    const inv = inventoryServiceRef.current;
+    if (!inv) return;
+    await inv.moveFolder(folderName, targetParent);
+    refreshInventoryData();
+  }, [refreshInventoryData]);
 
 
   // Dev tool's secondary action (R key): center-of-screen raycast
@@ -2470,13 +3291,17 @@ const vrHud = new VRHUDManager(
     // already-selected asset deselects it. The registered
     // onSelectionChange callback in the engine-init effect already
     // fans out to setSelectedAsset + setInspectedMiscAsset on every
-    // selection change — we deliberately do not mirror it here to
+    // selection change - we deliberately do not mirror it here to
     // avoid a double setState that would still settle to the same
     // value but cost an extra render.
     if (mm.selectedAsset?.id === found.id) {
       mm.selectAsset(null);
     } else {
       mm.selectAsset(found);
+    }
+    if (found.type === 'video') {
+      setActiveVideoAssetId(found.id);
+      resetVideoInactivityTimer();
     }
   }, []);
 
@@ -2487,7 +3312,7 @@ const vrHud = new VRHUDManager(
   // TypeScript is happy (avoids TS2454 “used before being assigned” / TDZ on
   // these useCallback blocks). The keydown useEffect already depends on
   // selectedAsset, so re-binding whenever that changes costs nothing extra.
-  // Ctrl+S — Save selected asset to inventory (per Controls-Keybinds.txt).
+  // Ctrl+S - Save selected asset to inventory (per Controls-Keybinds.txt).
   // Mirrors the inventory-item shape built in handleImportFile so a future
   // spawn from inventory picks up the original MIME type / metadata.
   const handleSaveSelectedToInventory = useCallback(() => {
@@ -2500,6 +3325,8 @@ const vrHud = new VRHUDManager(
       createdAt: Date.now(),
       fileData: asset.fileData,
       url: asset.url,
+      primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as any,
+      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
       metadata:
         asset.metadata ||
         (asset.fileData ? { fileSize: asset.fileData.byteLength } : undefined),
@@ -2509,11 +3336,11 @@ const vrHud = new VRHUDManager(
     });
   }, [selectedAsset]);
 
-  // Ctrl+D — Duplicate selected asset (per Controls-Keybinds.txt). Mirrors
+  // Ctrl+D - Duplicate selected asset (per Controls-Keybinds.txt). Mirrors
   // the respawn path used by handleSpawnFromInventory so the duplicate is a
   // real, addressable world object (and the new id flows through to peer
   // clients via broadcastSpawn). Async because primitives are sync but
-  // file/url re-imports take a tick — broadcast only fires AFTER the asset
+  // file/url re-imports take a tick - broadcast only fires AFTER the asset
   // is fully realized so we have its final id.
   const handleDuplicateSelected = useCallback(async () => {
     if (!selectedAsset) return;
@@ -2548,30 +3375,34 @@ const vrHud = new VRHUDManager(
         asset.object3d.scale.y,
         asset.object3d.scale.z
       );
-      // Duplicate-while-holding: leave the DUPLICATE in place and
-      // select it (so the inspector + gizmo follow the new instance),
-      // while KEEPING the original under the user's grab. The user
-      // can then drag the original away from the duplicate that's
-      // now floating in front of them, which is the natural Resonite
-      // "duplicate-then-tug" workflow. The previous behaviour called
-      // swapGrabbedAsset(), which atomically transferred the grab to
-      // the duplicate and dropped the original — making the
-      // duplicate held and the original free-floating instead of the
-      // reverse. Guard matches the original: the held-tab Duplicate
-      // verb (handleDuplicateHeld) and handleDuplicateSelected when
-      // the selected asset happens to also be currently grabbed both
-      // reach this branch. For all other entry points (RMB-grab not
-      // selected, neither grabbed nor selected) the existing select
-      // fallback fires.
+      // Duplicate-while-holding: keep holding the DUPLICATE, not
+      // the original. swapGrabbedAsset atomically ends the current
+      // grab on `asset` and starts an equivalent grab on
+      // `newAsset` (same VR-side when applicable, cursor-anchored
+      // RMB-grab on desktop). No-op during a two-handed grab --
+      // that path would need the live grip world positions to
+      // re-establish the scale, which is intentionally out of
+      // scope here. Guard is always-true for the held-tab
+      // Duplicate verb (handleDuplicateHeld sets asset =
+      // grabbedAsset by construction) and only fires for
+      // handleDuplicateSelected when the selected asset happens
+      // to also be currently grabbed.
       if (manipulationManagerRef.current?.grabbedAsset?.id === asset.id) {
-        // Original stays held — DO NOT touch the grab. Just retarget
-        // the inspector + gizmo to the duplicate. The ManipulationManager
-        // continues to apply its carry math (update()/updateGrabbedAssetPosition
-        // for RMB-grab; vrGrabWithController-attached parent for
-        // VR-grip; two-handed scale-factor multiplier) to the original.
-        manipulationManagerRef.current?.selectAsset(newAsset);
+        manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
+      }
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as any;
+      if (matState) {
+        AssetManager.applyMaterialUpdate(newAsset, matState);
+        const mats = Array.isArray(matState)
+          ? matState
+          : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+          ? Object.values(matState)
+          : [matState];
+        mats.forEach((m: any) => {
+          networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: newAsset.id });
+        });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -2606,7 +3437,7 @@ const vrHud = new VRHUDManager(
     }
 
     if (asset.fileData && asset.name) {
-      // Rebuild File from saved ArrayBuffer — pass MIME type so GLTF/FBX/etc.
+      // Rebuild File from saved ArrayBuffer - pass MIME type so GLTF/FBX/etc.
       // loaders pick the right parser.
       const blob = new Blob([asset.fileData], {
         type: asset.metadata?.mimeType || 'application/octet-stream',
@@ -2654,9 +3485,74 @@ const vrHud = new VRHUDManager(
         return;
       }
 
-      // Dev tool's secondary action (R) — center-of-screen raycast
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        setShowChatPanel((prev) => !prev);
+        setUnreadChatCount(0);
+        return;
+      }
+
+      // Resonite Desktop Tool Bindings (Keys 1..8)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (e.key === '1') {
+          // 1 - Dequip
+          e.preventDefault();
+          setActiveTool(null);
+          return;
+        } else if (e.key === '2') {
+          // 2 - Developer Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'dev' ? null : 'dev'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '3') {
+          // 3 - ProtoFlux Tool (mapped to Brush tool in Nexus)
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'brush' ? null : 'brush'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '4') {
+          // 4 - Material Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'material' ? null : 'material'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '5') {
+          // 5 - Shape Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'shape' ? null : 'shape'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '6') {
+          // 6 - Light Tool
+          e.preventDefault();
+          setActiveTool((prev) => (prev === 'light' ? null : 'light'));
+          setShowToolsPanel(true);
+          return;
+        } else if (e.key === '7') {
+          // 7 - Grabbable Setter Tool
+          e.preventDefault();
+          if (selectedAsset) {
+            const currentGrabbable = selectedAsset.object3d.userData.grabbable !== false;
+            selectedAsset.object3d.userData.grabbable = !currentGrabbable;
+            console.log(`[Grabbable Setter Tool] "${selectedAsset.name}" grabbable set to ${!currentGrabbable}`);
+          }
+          return;
+        } else if (e.key === '8') {
+          // 8 - Character Collider Setter Tool
+          e.preventDefault();
+          if (selectedAsset) {
+            const currentCollider = !!selectedAsset.object3d.userData.characterCollider;
+            selectedAsset.object3d.userData.characterCollider = !currentCollider;
+            console.log(`[Character Collider Setter Tool] "${selectedAsset.name}" characterCollider set to ${!currentCollider}`);
+          }
+          return;
+        }
+      }
+
+      // Dev tool's secondary action (R) - center-of-screen raycast
       // select. Gated on: dev tool active, first-person mode, NOT in
-      // VR. Plain R only — Shift+E is rotate-around-Y-axis (managed
+      // VR. Plain R only - Shift+E is rotate-around-Y-axis (managed
       // by ManipulationManager), so plain R is what gets the new
       // selection semantics; modifier combos fall through to the
       // handlers below. Placed BEFORE the orbit translate/rotate/scale
@@ -2684,7 +3580,7 @@ const vrHud = new VRHUDManager(
         }
       }
 
-      // T key — toggle the Resonite-style radial / pie context menu.
+      // T key - toggle the Resonite-style radial / pie context menu.
       // (Also reachable via the canvas right-click and the toolbar button.)
       if (e.key === 't' || e.key === 'T') {
         e.preventDefault();
@@ -2692,25 +3588,22 @@ const vrHud = new VRHUDManager(
         setShowRadialMenu((prev) => !prev);
         return;
       } else if (e.key === 'o' || e.key === 'O') {
-        // Toggle the Scene Inspector. Plain O only — modifier combos
+        // Toggle the Scene Inspector. Plain O only - modifier combos
         // (Ctrl+O for "Open File" in browsers, etc.) fall through to
-        // the browser's default. Only opens when an asset is selected
-        // so pressing O with nothing selected is a no-op rather than
-        // throwing the inspector up empty.
-        if (!e.ctrlKey && !e.metaKey && !e.altKey && selectedAsset) {
+        // the browser's default. Opens either inspecting the selected asset
+        // or showing the full Scene Hierarchy explorer when none selected.
+        if (!e.ctrlKey && !e.metaKey && !e.altKey) {
           e.preventDefault();
-          showSceneInspector ? closeInspectorFromLocal() : openInspectorFromLocal();
+          setShowSceneInspector((prev) => !prev);
           return;
         }
-      } else if (e.key === 'v' || e.key === 'V') {
-        handleToggleCameraMode();
       } else if (e.key === 'f' || e.key === 'F') {
         handleFocusSelected();
       } else if (e.key === 'i' || e.key === 'I') {
         setShowInventoryModal((prev) => !prev);
       } else if (e.key === 'u' || e.key === 'U') {
         setImportInitialFile(null);
-        showImportDialog ? closeImportFromLocal() : openImportFromLocal();
+        setShowImportDialog((prev) => !prev);
       } else      if (e.key === 'Delete' || e.key === 'Backspace') {
         handleDeleteSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
@@ -2726,7 +3619,7 @@ const vrHud = new VRHUDManager(
         e.preventDefault();
         handleDuplicateSelected();
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V') && e.shiftKey) {
-        // Ctrl+Shift+V — "paste as plain text". Do NOT preventDefault:
+        // Ctrl+Shift+V - "paste as plain text". Do NOT preventDefault:
         // the focused <input> (if any) still needs to receive the text from
         // the browser's default paste handler. The flag is read-and-cleared
         // in handlePaste which short-circuits our URL/data-URI import
@@ -2761,7 +3654,7 @@ const vrHud = new VRHUDManager(
       e.preventDefault();
       if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
         setImportInitialFile(e.dataTransfer.files[0]);
-        openImportFromLocal();
+        setShowImportDialog(true);
       }
     };
     const handlePaste = (e: ClipboardEvent) => {
@@ -2772,10 +3665,10 @@ const vrHud = new VRHUDManager(
         return;
       }
 
-      // Ctrl+Shift+V (no input focus): user explicitly wants plain text —
+      // Ctrl+Shift+V (no input focus): user explicitly wants plain text -
       // suppress the asset-import path. Browser default paste into <body>
       // is effectively a no-op anyway, so this is "do nothing unsafe with
-      // the clipboard contents" — exactly the spec intent.
+      // the clipboard contents" - exactly the spec intent.
       if (plainPasteModeRef.current) {
         plainPasteModeRef.current = false;
         e.preventDefault();
@@ -2784,12 +3677,12 @@ const vrHud = new VRHUDManager(
 
       if (e.clipboardData?.files && e.clipboardData.files[0]) {
         setImportInitialFile(e.clipboardData.files[0]);
-        openImportFromLocal();
+        setShowImportDialog(true);
       } else if (e.clipboardData) {
         const text = e.clipboardData.getData('text');
         if (text && (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:'))) {
           setImportInitialFile(null);
-          openImportFromLocal();
+          setShowImportDialog(true);
         }
       }
     };
@@ -2827,7 +3720,7 @@ const vrHud = new VRHUDManager(
   }, []);
 
   const handleDisconnect = useCallback(() => {
-    // Dispose any pending placeholders — the network is going away
+    // Dispose any pending placeholders - the network is going away
     // and we won't be receiving 'spawn' or 'pendingcancel' for them
     // anymore, so leaving placeholders installed would be incorrect.
     const pendingCleanup = pendingAssetsRef.current;
@@ -2870,9 +3763,15 @@ const vrHud = new VRHUDManager(
   // SELECTED-target handlers do nothing for a held-but-not-selected asset.
   // These are the missing "act on the held object" entry points.
   // =========================================================================
-  const handleSaveHeldToInventory = useCallback(() => {
+  const getHeldAssetForSide = useCallback((side?: 'left' | 'right'): LoadedAsset | null => {
     const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    if (side === 'left' && heldAssetsBySideRef.current.left) return heldAssetsBySideRef.current.left;
+    if (side === 'right' && heldAssetsBySideRef.current.right) return heldAssetsBySideRef.current.right;
+    return mm?.grabbedAsset ?? heldAssetsBySideRef.current.right ?? heldAssetsBySideRef.current.left ?? (mm as any)?._twoHandedAsset ?? null;
+  }, []);
+
+  const handleSaveHeldToInventory = useCallback((side?: 'left' | 'right') => {
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     const asset = held;
     const item: InventoryItem = {
@@ -2882,6 +3781,8 @@ const vrHud = new VRHUDManager(
       createdAt: Date.now(),
       fileData: asset.fileData,
       url: asset.url,
+      primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as any,
+      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
       metadata:
         asset.metadata ||
         (asset.fileData ? { fileSize: asset.fileData.byteLength } : undefined),
@@ -2889,31 +3790,18 @@ const vrHud = new VRHUDManager(
     inventoryServiceRef.current.saveItem(item).then(() => {
       console.log('[Inventory] Saved held "' + asset.name + '" to inventory');
     });
-  }, []);
+  }, [getHeldAssetForSide]);
 
-  // Download the held asset to the user's device. Currently only
-  // meaningful for misc files (which carry raw fileData) — the radial
-  // menu shows this action only when the held asset's type is
-  // 'misc', so for other types this callback is never wired to a
-  // slice. AssetManager.downloadAsset already no-ops on assets that
-  // lack fileData / url, so this is safe to call defensively.
-  const handleDownloadHeld = useCallback(() => {
-    const mm = manipulationManagerRef.current;
+  const handleDownloadHeld = useCallback((side?: 'left' | 'right') => {
     const am = assetManagerRef.current;
     if (!am) return;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     am.downloadAsset(held);
-  }, []);
+  }, [getHeldAssetForSide]);
 
-  const handleDuplicateHeld = useCallback(async () => {
-    // Fall back to the two-handed asset if no single-grip grab is in
-    // flight. Two-handed mode doesn't set grabbedAsset but DOES fire
-    // onGrabBegin (which we use to set isHeld), so without this
-    // fallback the user would see the held tab in two-handed mode but
-    // nothing would happen when they click Duplicate / Save / Destroy.
-    const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+  const handleDuplicateHeld = useCallback(async (side?: 'left' | 'right') => {
+    const held = getHeldAssetForSide(side);
     if (!held) return;
     const asset = held;
     const am = assetManagerRef.current;
@@ -2935,7 +3823,7 @@ const vrHud = new VRHUDManager(
     // at the user's hand. For RMB-grab (direct child of scene) local
     // == world, so the change is a no-op for that case. getWorldPosition
     // requires matrixWorld to be up to date, which the renderer
-    // maintains each frame for visible meshes — held assets ARE
+    // maintains each frame for visible meshes - held assets ARE
     // rendered, so the call is safe.
     const worldPos = new THREE.Vector3();
     asset.object3d.getWorldPosition(worldPos);
@@ -2956,30 +3844,34 @@ const vrHud = new VRHUDManager(
         asset.object3d.scale.y,
         asset.object3d.scale.z
       );
-      // Duplicate-while-holding: leave the DUPLICATE in place and
-      // select it (so the inspector + gizmo follow the new instance),
-      // while KEEPING the original under the user's grab. The user
-      // can then drag the original away from the duplicate that's
-      // now floating in front of them, which is the natural Resonite
-      // "duplicate-then-tug" workflow. The previous behaviour called
-      // swapGrabbedAsset(), which atomically transferred the grab to
-      // the duplicate and dropped the original — making the
-      // duplicate held and the original free-floating instead of the
-      // reverse. Guard matches the original: the held-tab Duplicate
-      // verb (handleDuplicateHeld) and handleDuplicateSelected when
-      // the selected asset happens to also be currently grabbed both
-      // reach this branch. For all other entry points (RMB-grab not
-      // selected, neither grabbed nor selected) the existing select
-      // fallback fires.
+      // Duplicate-while-holding: keep holding the DUPLICATE, not
+      // the original. swapGrabbedAsset atomically ends the current
+      // grab on `asset` and starts an equivalent grab on
+      // `newAsset` (same VR-side when applicable, cursor-anchored
+      // RMB-grab on desktop). No-op during a two-handed grab --
+      // that path would need the live grip world positions to
+      // re-establish the scale, which is intentionally out of
+      // scope here. Guard is always-true for the held-tab
+      // Duplicate verb (handleDuplicateHeld sets asset =
+      // grabbedAsset by construction) and only fires for
+      // handleDuplicateSelected when the selected asset happens
+      // to also be currently grabbed.
       if (manipulationManagerRef.current?.grabbedAsset?.id === asset.id) {
-        // Original stays held — DO NOT touch the grab. Just retarget
-        // the inspector + gizmo to the duplicate. The ManipulationManager
-        // continues to apply its carry math (update()/updateGrabbedAssetPosition
-        // for RMB-grab; vrGrabWithController-attached parent for
-        // VR-grip; two-handed scale-factor multiplier) to the original.
-        manipulationManagerRef.current?.selectAsset(newAsset);
+        manipulationManagerRef.current?.swapGrabbedAsset(newAsset);
       } else {
         manipulationManagerRef.current?.selectAsset(newAsset);
+      }
+      const matState = (asset.object3d.userData as Record<string, unknown>)?.materialState as any;
+      if (matState) {
+        AssetManager.applyMaterialUpdate(newAsset, matState);
+        const mats = Array.isArray(matState)
+          ? matState
+          : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+          ? Object.values(matState)
+          : [matState];
+        mats.forEach((m: any) => {
+          networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: newAsset.id });
+        });
       }
       recordSpawnUndo(newAsset);
       networkServiceRef.current.broadcastSpawn({
@@ -3033,24 +3925,17 @@ const vrHud = new VRHUDManager(
     }
   }, []);
 
-  const handleDestroyHeld = useCallback(() => {
-    // Fall back to the two-handed asset (see handleDuplicateHeld for
-    // the same pattern + reason). Two-handed mode doesn't set
-    // grabbedAsset, so without this fallback the user would see the
-    // held tab in two-handed mode but Destroy would be a no-op.
+  const handleDestroyHeld = useCallback((side?: 'left' | 'right') => {
     const mm = manipulationManagerRef.current;
-    const held = mm?.grabbedAsset ?? (mm as any)?._twoHandedAsset ?? null;
+    const held = getHeldAssetForSide(side) ?? selectedAssetRef.current;
     if (!held) return;
     const asset = held;
     const obj = asset.object3d;
-    // CRITICAL: end the grab BEFORE removing the asset. Otherwise the
-    // manipulation manager would briefly hold a dangling grabbedAsset
-    // reference to a removed Object3D, and the per-frame update() path
-    // would either crash or broadcast stale transforms for a non-existent
-    // asset. endGrab handles single-grip (RMB + VR grip); endTwoHandedGrab
-    // handles the two-handed case. We always call both — each is a
-    // no-op when the corresponding state is inactive, so it's safe.
-    mm?.endGrab();
+    if (side === 'left' || side === 'right') {
+      mm?.vrReleaseControllerGrab(side);
+    } else {
+      mm?.endGrab();
+    }
     mm?.endTwoHandedGrab();
     // Use WORLD position for the undo snapshot. A VR-grip-held asset's
     // obj.position is the local grip offset, NOT the world position;
@@ -3103,7 +3988,145 @@ const vrHud = new VRHUDManager(
     }
   }, []);
 
-  const handleDeleteSelected = () => {
+  /**
+   * Single funnel for video control intents; wraps the local apply
+   * call and the network broadcast so the React UI doesn't need to
+   * know which fields are shared vs local-only.
+   *   - play / pause / seek / step  -> broadcast (everyone syncs)
+   *   - volume                      -> broadcast ONLY in 'global' mode
+   *   - volumeMode / mute           -> local-only UI preference
+   */
+  // Throttle map: assetId -> last seek broadcast timestamp (ms).
+  // Scrubbing fires ~60Hz pointermove broadcasts otherwise. A 50 ms
+  // ceiling allows 20 seeks/sec which is perceptually continuous, and
+  // is well under any reasonable WebRTC bandwidth budget for a single
+  // `<number>` envelope. Other peers receive continuous throttled seeks
+  // and an unconditional final seek on `pointerup` (forced-flushed via
+  // flushVideoSeekThrottle below at the call sites that need it).
+  const videoSeekThrottleRef = useRef<Map<string, number>>(new Map());
+  const SEEK_THROTTLE_MS = 50;
+
+  const broadcastVideoSeek = (assetId: string, playing: boolean, currentTime: number, globalVolume: number): void => {
+    const net = networkServiceRef.current;
+    if (!net) return;
+    const now = Date.now();
+    const last = videoSeekThrottleRef.current.get(assetId) ?? 0;
+    if (now - last < SEEK_THROTTLE_MS) return;
+    videoSeekThrottleRef.current.set(assetId, now);
+    net.broadcastVideoState({ assetId, playing, currentTime, globalVolume });
+  };
+
+  // Plain arrows (not useCallback) so the dep array never needs to
+  // reference any sibling identifier declared later in the function
+  // body. The closure body only executes on call, so even though
+  // handleDeleteSelected is declared textually AFTER these arrows
+  // below, every user-driven invoke happens AFTER the React render
+  // has finished so handleDeleteSelected is well-defined.
+  // VideoControls isn't React.memo'd, so handler-identity churn
+  // between renders doesn't cause regression.
+  const handleVideoAction = (assetId: string, kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute' | 'syncMode', payload?: number | 'global' | 'local' | 'persistent' | 'watch-party') => {
+    const am = assetManagerRef.current;
+    const net = networkServiceRef.current;
+    if (!am) return;
+    const state = am.getVideoState(assetId);
+    if (!state) return;
+    // Clamp helper: bound `s` into [0, max(0, duration - 0.05)]. Mirrors
+    // applyVideoState's internal clamp so the broadcast value matches
+    // what the local engine will land on after apply. Without this,
+    // step/skip spam clicks would emit wildly-OOB values onto the wire
+    // for receivers that haven't yet finished importing the file.
+    const clampSeek = (s: number): number => {
+      const dur = state.duration || 0;
+      return Math.max(0, Math.min(Math.max(0, dur - 0.05), s));
+    };
+    switch (kind) {
+      case 'syncMode':
+        if (payload === 'persistent' || payload === 'watch-party') {
+          am.applyVideoState(assetId, { syncMode: payload });
+          const asset = am.getAsset(assetId);
+          if (asset && asset.metadata) asset.metadata.videoSyncMode = payload;
+          if (payload === 'watch-party' && asset && asset.videoElement && net) {
+            for (const peerId of net.peers) {
+              videoStreamingServiceRef.current.startLiveStreamToPeer(assetId, asset.videoElement, peerId);
+            }
+          }
+          net?.notifySystemChat(`Video "${asset?.name || assetId}" switched to ${payload === 'watch-party' ? 'Watch Party Stream (Live WebRTC)' : 'Persistent Chunk Stream'} mode.`);
+        }
+        break;
+      case 'play':
+        am.applyVideoState(assetId, { playing: true });
+        net?.broadcastVideoState({ assetId, playing: true, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'pause':
+        am.applyVideoState(assetId, { playing: false });
+        net?.broadcastVideoState({ assetId, playing: false, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'seek':
+        if (typeof payload === 'number') {
+          const clamped = clampSeek(payload);
+          am.applyVideoState(assetId, { currentTime: clamped });
+          broadcastVideoSeek(assetId, state.playing, clamped, state.globalVolume);
+        }
+        break;
+      case 'step':
+        if (typeof payload === 'number') {
+          const next = clampSeek(state.currentTime + payload);
+          am.applyVideoState(assetId, { currentTime: next });
+          // Step buttons are discrete (1 click = 1 broadcast) so we
+          // bypass the throttle and send unconditionally. The cltampSeek
+          // call above means the wire value is always within bounds.
+          net?.broadcastVideoState({ assetId, playing: state.playing, currentTime: next, globalVolume: state.globalVolume });
+        }
+        break;
+      case 'volume':
+        if (typeof payload === 'number') {
+          if (state.volumeMode === 'global') {
+            am.applyVideoState(assetId, { globalVolume: payload, muted: false });
+            net?.broadcastVideoState({ assetId, playing: state.playing, currentTime: state.currentTime, globalVolume: payload });
+          } else {
+            am.applyVideoState(assetId, { localVolume: payload, muted: false });
+          }
+        }
+        break;
+      case 'volumeMode':
+        if (payload === 'global' || payload === 'local') {
+          am.applyVideoState(assetId, { volumeMode: payload });
+        }
+        break;
+      case 'mute':
+        am.applyVideoState(assetId, { muted: !state.muted });
+        break;
+    }
+    // Reset the throttle on play/pause so the NEXT scrub starts fresh,
+    // but DO NOT re-broadcast here -- the play/pause arm already
+    // emitted a broadcast with the full payload. Sending a second
+    // identical envelope just doubles wire traffic for no benefit.
+    // (Original implementation also flushed, which was a duplicate.)
+    if (kind === 'pause' || kind === 'play') {
+      videoSeekThrottleRef.current.set(assetId, Date.now());
+    }
+    const sel = selectedAssetRef.current;
+    if (sel && sel.id === assetId) setSelectedAsset({ ...sel });
+    vrHudRef.current?.redrawPanel();
+  };
+
+  /**
+   * Close = remove from world. Reuses the deletion pipeline so
+   * broadcast + undo/redo + selection-clear fire consistently across
+   * VR and desktop close paths.
+   */
+  const handleVideoClose = (assetId: string): void => {
+    if (selectedAssetRef.current?.id === assetId) {
+      handleDeleteSelected();
+      return;
+    }
+    const am = assetManagerRef.current;
+    if (!am) return;
+    am.removeAsset(assetId);
+    networkServiceRef.current?.broadcastRemove(assetId);
+  };
+
+    const handleDeleteSelected = () => {
     if (!selectedAsset) return;
     const asset = selectedAsset;
     const obj = asset.object3d;
@@ -3172,15 +4195,101 @@ const vrHud = new VRHUDManager(
   // 5 seconds after the menu opened still sees fresh state. The mesh stores
   // this object once at construction; the closures stay valid for the lifetime
   // of the mesh. Functional setters are stable in React so re-creating this
-  // on every render would be wasteful — build once at mount via useCallback.
-  const closeVrRadial = useCallback(() => {
-    vrRadialMenuRef.current?.setVisible(false);
-    vrRadialActiveSideRef.current = null;
-    setVrRadialOpen(false);
+  // on every render would be wasteful - build once at mount via useCallback.
+  const [lightNoShadows, setLightNoShadows] = useState<boolean>(false);
+  const lightNoShadowsRef = useRef<boolean>(false);
+  useEffect(() => { lightNoShadowsRef.current = lightNoShadows; }, [lightNoShadows]);
+
+  const handleToggleSelectionMode = useCallback(() => {
+    setSelectionMode((prev) => (prev === 'single' ? 'multi' : 'single'));
   }, []);
-  const buildVrRadialCallbacks = useCallback((): VRRadialMenuCallbacks => ({
-    onUndo: () => { undoRedoManagerRef.current?.undo(); closeVrRadial(); },
-    onRedo: () => { undoRedoManagerRef.current?.redo(); closeVrRadial(); },
+
+  const handleDeselectAll = useCallback(() => {
+    setSelectedAsset(null);
+    manipulationManagerRef.current?.selectAsset(null);
+  }, []);
+
+  const handleSpawnPrimitiveRef = useRef<((type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void) | null>(null);
+
+  const spawnLightGizmo = useCallback((type: 'point' | 'spot' | 'sun', color = '#f59e0b', intensity = 2, distance = 25) => {
+    const pos = new THREE.Vector3(0, 2.3, -1.8);
+    const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
+    if (!lightAsset) return;
+
+    lightAsset.name = `${type.toUpperCase()} Light`;
+    lightAsset.object3d.scale.set(0.25, 0.25, 0.25);
+    const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
+    if (mesh && mesh.material) {
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      mat.color.set('#1a1a1a');
+      mat.emissive.set(color);
+      mat.emissiveIntensity = 3.5;
+      mat.roughness = 0.1;
+    }
+    const ringGeo = new THREE.RingGeometry(0.7, 0.78, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      side: THREE.DoubleSide,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    lightAsset.object3d.add(ringMesh);
+
+    const noShadows = lightNoShadowsRef.current;
+    const effectiveIntensity = intensity * 35;
+    let light: THREE.Light;
+    if (type === 'point') {
+      const pLight = new THREE.PointLight(color, effectiveIntensity, distance, 1.5);
+      pLight.castShadow = !noShadows;
+      if (!noShadows) {
+        pLight.shadow.bias = -0.001;
+        pLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = pLight;
+    } else if (type === 'spot') {
+      const sLight = new THREE.SpotLight(color, effectiveIntensity, distance, Math.PI / 3, 0.4, 1.5);
+      sLight.castShadow = !noShadows;
+      if (!noShadows) {
+        sLight.shadow.bias = -0.001;
+        sLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = sLight;
+    } else {
+      const dLight = new THREE.DirectionalLight(color, intensity * 2.0);
+      dLight.castShadow = !noShadows;
+      if (!noShadows) {
+        dLight.shadow.bias = -0.0005;
+        dLight.shadow.mapSize.set(2048, 2048);
+      }
+      light = dLight;
+    }
+    light.position.set(0, 0, 0);
+    lightAsset.object3d.add(light);
+    lightAsset.object3d.userData.resoniteLight = {
+      ...DEFAULT_LIGHT_CONFIG,
+      LightType: type === 'point' ? 'Point' : type === 'spot' ? 'Spot' : 'Directional',
+      Intensity: intensity,
+      Color: color,
+      Range: distance,
+    };
+    manipulationManagerRef.current?.selectAsset(lightAsset);
+  }, []);
+
+  const closeVrRadial = useCallback((menuSide?: 'left' | 'right') => {
+    if (!menuSide || menuSide === 'left') {
+      vrRadialMenuLeftRef.current?.setVisible(false);
+      setVrRadialLeftOpen(false);
+    }
+    if (!menuSide || menuSide === 'right') {
+      vrRadialMenuRightRef.current?.setVisible(false);
+      setVrRadialRightOpen(false);
+    }
+  }, []);
+  const buildVrRadialCallbacks = useCallback((menuSide: 'left' | 'right'): VRRadialMenuCallbacks => ({
+    onUndo: () => { undoRedoManagerRef.current?.undo(); closeVrRadial(menuSide); },
+    onRedo: () => { undoRedoManagerRef.current?.redo(); closeVrRadial(menuSide); },
     onToggleScaling: () => setScalingEnabled((v) => !v),
     onToggleLaser: () => setLaserEnabled((v) => !v),
     onNextLocomotion: () => {
@@ -3192,31 +4301,60 @@ const vrHud = new VRHUDManager(
       const cur = grabModeRef.current;
       setGrabMode(cur === 'auto' ? 'precision' : cur === 'precision' ? 'palm' : cur === 'palm' ? 'laser' : 'auto');
     },
-    onDestroy: handleDestroyHeld,
-    onDuplicate: handleDuplicateHeld,
-    onSaveHeld: handleSaveHeldToInventory,
-    onDownloadHeld: () => { handleDownloadHeld?.(); },
-    onClose: closeVrRadial,
+    onDestroy: () => handleDestroyHeld(menuSide),
+    onDuplicate: () => handleDuplicateHeld(menuSide),
+    onSaveHeld: () => handleSaveHeldToInventory(menuSide),
+    onDownloadHeld: () => { handleDownloadHeld?.(menuSide); },
+    onToggleMute: () => handleToggleMute(),
+    onClose: () => closeVrRadial(menuSide),
     onNextTab: () => {
-      const mesh = vrRadialMenuRef.current;
+      const mesh = menuSide === 'left' ? vrRadialMenuLeftRef.current : vrRadialMenuRightRef.current;
       if (!mesh) return;
       const cur = mesh.activeTab;
-      const isHeld = isHeldRef.current;
-      const next: 'general' | 'grab' | 'held' = isHeld
+      const sideIsHolding = heldAssetsBySideRef.current[menuSide] !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
+      const next: 'general' | 'grab' | 'held' | 'light' = sideIsHolding
         ? (cur === 'general' ? 'grab' : cur === 'grab' ? 'held' : 'general')
         : (cur === 'general' ? 'grab' : 'general');
       mesh.setActiveTab(next);
     },
-  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld]);
-  const buildVrRadialInitialState = useCallback((): VRRadialMenuState => ({
-    locomotionMode: locomotionModeRef.current,
-    scalingEnabled: scalingEnabledRef.current,
-    laserEnabled: laserEnabledRef.current,
-    grabMode: grabModeRef.current,
-    isHeld: isHeldRef.current,
-    heldAssetType: heldAssetTypeRef.current,
-    activeTab: 'general',
-  }), []);
+    onSpawnPointLight: () => { spawnLightGizmo('point', '#f59e0b', 2, 25); closeVrRadial(menuSide); },
+    onSpawnSpotLight: () => { spawnLightGizmo('spot', '#00f0ff', 2, 25); closeVrRadial(menuSide); },
+    onSpawnSunLight: () => { spawnLightGizmo('sun', '#ffffff', 2, 25); closeVrRadial(menuSide); },
+    onToggleNoShadows: () => setLightNoShadows((prev) => !prev),
+    onChangeLightColor: () => {},
+    onUnequipTool: () => {
+      setActiveTool(null);
+      closeVrRadial(menuSide);
+    },
+    onOpenInspector: () => { setShowSceneInspector(true); closeVrRadial(menuSide); },
+    onToggleSelectionMode: () => { handleToggleSelectionMode(); },
+    onDeselectAll: () => { handleDeselectAll(); closeVrRadial(menuSide); },
+    onSetGizmoMode: (mode: 'translate' | 'rotate' | 'scale') => { manipulationManagerRef.current?.setMode(mode); closeVrRadial(menuSide); },
+    onToggleGizmoSpace: () => {
+      const cur = manipulationManagerRef.current?.getSpace() || 'local';
+      manipulationManagerRef.current?.setSpace(cur === 'local' ? 'world' : 'local');
+    },
+    onSpawnPrimitive: (type) => { handleSpawnPrimitiveRef.current?.(type); closeVrRadial(menuSide); },
+  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute, spawnLightGizmo, handleToggleSelectionMode, handleDeselectAll]);
+  const buildVrRadialInitialState = useCallback((menuSide: 'left' | 'right'): VRRadialMenuState => {
+    const sideHeldAsset = heldAssetsBySideRef.current[menuSide];
+    const sideIsHolding = sideHeldAsset !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
+    return {
+      locomotionMode: locomotionModeRef.current,
+      scalingEnabled: scalingEnabledRef.current,
+      laserEnabled: laserEnabledRef.current,
+      grabMode: grabModeRef.current,
+      isHeld: sideIsHolding,
+      isMuted: networkServiceRef.current.isMuted,
+      heldAssetType: sideHeldAsset?.type ? String(sideHeldAsset.type) : sideIsHolding ? heldAssetTypeRef.current : null,
+      activeTab: activeToolRef.current === 'light' ? 'light' : activeToolRef.current === 'dev' ? 'dev' : sideIsHolding ? 'held' : 'general',
+      activeTool: activeToolRef.current,
+      noShadows: lightNoShadowsRef.current,
+      selectionMode: selectionModeRef.current,
+      gizmoMode: manipulationManagerRef.current?.getMode() || 'translate',
+      gizmoSpace: manipulationManagerRef.current?.getSpace() || 'local',
+    };
+  }, []);
 
   const handleFocusSelected = () => {
     if (selectedAsset && sceneEngineRef.current) {
@@ -3234,11 +4372,15 @@ const vrHud = new VRHUDManager(
   const handleModerateUser = (action: 'kick' | 'ban' | 'silence' | 'unsilence' | 'respawn' | 'jump', targetPeerId: string) => {
     const net = networkServiceRef.current;
     if (action === 'jump') {
-      const targetAvatar = avatarManagerRef.current?.peers.get(targetPeerId);
-      if (targetAvatar && sceneEngineRef.current) {
-        const pos = targetAvatar.group.position;
-        sceneEngineRef.current.camera.position.set(pos.x, pos.y + 1.6, pos.z + 2);
-        sceneEngineRef.current.controls.target.copy(pos);
+      if (sceneEngineRef.current) {
+        const targetAvatar = avatarManagerRef.current?.peers.get(targetPeerId);
+        const worldPos = new THREE.Vector3(0, 1.6, 0);
+        if (targetAvatar) {
+          const headObj = targetAvatar.headMesh || targetAvatar.vrm?.scene || targetAvatar.group;
+          headObj.getWorldPosition(worldPos);
+        }
+        sceneEngineRef.current.camera.position.set(worldPos.x, worldPos.y, worldPos.z + 1.8);
+        sceneEngineRef.current.controls.target.set(worldPos.x, worldPos.y, worldPos.z);
         sceneEngineRef.current.controls.update();
       }
       return;
@@ -3353,8 +4495,21 @@ const vrHud = new VRHUDManager(
         isPersistent: snap.isPersistent,
       });
     } else {
-      console.warn(`[UndoRedo] Could not respawn asset "${snap.name}" — no primitiveType, fileData, or url.`);
+      console.warn(`[UndoRedo] Could not respawn asset "${snap.name}" - no primitiveType, fileData, or url.`);
     }
+  };
+
+  const getSpawnPositionInFrontOfUser = (distance = 2.0): THREE.Vector3 => {
+    const se = sceneEngineRef.current;
+    if (!se?.camera) return new THREE.Vector3(0, 1.5, -distance);
+    const cam = se.camera;
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+    forward.y = 0;
+    if (forward.lengthSq() < 0.001) forward.set(0, 0, -1);
+    forward.normalize().multiplyScalar(distance);
+    const pos = cam.position.clone().add(forward);
+    pos.y = Math.max(0.6, cam.position.y - 0.15);
+    return pos;
   };
 
   const handleSpawnPrimitive = (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => {
@@ -3362,25 +4517,25 @@ const vrHud = new VRHUDManager(
       alert('Your current role does not have permission to spawn items.');
       return;
     }
-    const pos = new THREE.Vector3(
-      (Math.random() - 0.5) * 3,
-      1.5,
-      -2 + (Math.random() - 0.5) * 2
-    );
+    const pos = getSpawnPositionInFrontOfUser(2.0);
     const prim = assetManagerRef.current?.spawnPrimitive(type, pos);
     if (prim) {
       manipulationManagerRef.current?.selectAsset(prim);
       recordSpawnUndo(prim);
     }
   };
+  useEffect(() => { handleSpawnPrimitiveRef.current = handleSpawnPrimitive; });
 
-  const handleImportFile = async (file: File, saveToInventory: boolean, equipVrm: boolean) => {
+  const handleImportFile = async (
+    file: File,
+    saveToInventory: boolean,
+    equipVrm: boolean,
+    videoSyncMode: 'persistent' | 'watch-party' = 'persistent'
+  ) => {
     const assetManager = assetManagerRef.current;
     if (!assetManager) return;
 
     if (file.name.toLowerCase().endsWith('.vrm') && equipVrm) {
-      // VRM-equip path doesn't spawn a world asset — no placeholder
-      // needed; the avatar manager owns its own loading state.
       const vrm = await avatarManagerRef.current?.loadLocalVRM(file);
       if (vrm) {
         if (saveToInventory) {
@@ -3399,18 +4554,7 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3(
-      (Math.random() - 0.5) * 2,
-      1.5,
-      -2.5 + (Math.random() - 0.5) * 1.5
-    );
-
-    // Mint a stable id BEFORE awaiting so peers + the local user see
-    // a 'Loading' placeholder from the moment the click lands, and the
-    // placeholder id matches the eventual asset id (consumed by
-    // registerOnAssetAdded's id-match cleanup). Mirrors the same
-    // pattern in handleImportAssetFromConfig — keeping both paths
-    // aligned prevents drift if one is updated without the other.
+    const pos = getSpawnPositionInFrontOfUser(2.0);
     const placeholderId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const net = networkServiceRef.current;
     const displayName = file.name.length > 26 ? file.name.slice(0, 25) + '…' : file.name;
@@ -3425,15 +4569,56 @@ const vrHud = new VRHUDManager(
         fileSize: file.size,
       });
     }
+
     const localEntry = createLoadingPlaceholder(displayName, net.localUserName, pos);
     sceneEngineRef.current?.worldRoot.add(localEntry.group);
     pendingAssetsRef.current.set(placeholderId, localEntry);
 
+    streamingSuppressedAssetIdsRef.current.add(placeholderId);
     try {
-      const asset = await assetManager.importFile(file, pos, undefined, placeholderId);
+      const asset = await assetManager.importFile(file, pos, { videoSyncMode }, placeholderId);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
+        if (asset.type === 'video') {
+          const vss = videoStreamingServiceRef.current;
+          const hint = file.size > VIDEO_STREAMING_THRESHOLD ? vss.registerHostFile(file, asset.id, file.type) : undefined;
+          if (hint) {
+            (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
+          }
+          if (net.mode !== 'offline') {
+            net.broadcastSpawn({
+              id: asset.id,
+              name: asset.name,
+              type: asset.type as AssetSpawnData['type'],
+              position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+              rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+              scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+              url: asset.url,
+              primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
+              fileData: (videoSyncMode !== 'watch-party' && file.size <= VIDEO_STREAMING_THRESHOLD) ? asset.fileData : undefined,
+              isCollidable: asset.isCollidable,
+              isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+              materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+              videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+              streamingHint: hint
+            });
+            for (const peerId of net.peers) {
+              if (videoSyncMode === 'watch-party' && asset.videoElement) {
+                vss.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
+              } else if (hint) {
+                vss.beginStreamingToPeer(hint, peerId).catch((err) => {
+                  console.warn('[VideoStreaming] pump failed for', peerId, err);
+                });
+              }
+            }
+          }
+        }
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder automatically when this asset lands.
         if (saveToInventory) {
@@ -3459,6 +4644,12 @@ const vrHud = new VRHUDManager(
         net.broadcastPendingCancel(placeholderId);
       }
       console.warn('[Import] Failed:', err);
+    } finally {
+      // Phase 3A: clean up suppress-Set entry on every exit path.
+      // The gate above already delete-on-consume in the success
+      // case, but defensively delete here so an importFile that
+      // throws before _addAsset never leaves an orphan id.
+      streamingSuppressedAssetIdsRef.current.delete(placeholderId);
     }
   };
 
@@ -3466,7 +4657,7 @@ const vrHud = new VRHUDManager(
     const assetManager = assetManagerRef.current;
     if (!assetManager) return;
 
-    // VRM equip path — no world asset, so no placeholder; the avatar
+    // VRM equip path - no world asset, so no placeholder; the avatar
     // manager has its own loading state and we don't broadcast.
     if (config.file && config.file.name.toLowerCase().endsWith('.vrm') && config.vrmAction === 'equip-avatar') {
       await avatarManagerRef.current?.loadLocalVRM(config.file);
@@ -3484,11 +4675,7 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3(0, 1.5, -2.5);
-    if (sceneEngineRef.current) {
-      const forward = new THREE.Vector3(0, 0, -2.5).applyQuaternion(sceneEngineRef.current.camera.quaternion);
-      pos.copy(sceneEngineRef.current.camera.position).add(forward);
-    }
+    const pos = getSpawnPositionInFrontOfUser(2.2);
 
     // Mint a stable id BEFORE the await (see comment in handleImportFile).
     const placeholderId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -3515,6 +4702,8 @@ const vrHud = new VRHUDManager(
     pendingAssetsRef.current.set(placeholderId, localEntry);
 
     let asset: LoadedAsset | null = null;
+    // Phase 3A (Fix B): see handleImportFile's mirror comment above.
+    streamingSuppressedAssetIdsRef.current.add(placeholderId);
     try {
       if (config.file) {
         asset = await assetManager.importFile(config.file, pos, config, placeholderId);
@@ -3523,8 +4712,53 @@ const vrHud = new VRHUDManager(
       }
 
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
+        // Phase 3A: large-video streaming registration. Only the
+        // File branch - URL branch leaves the fetch to the peer's
+        // existing onSpawn url path, so we don't recursively
+        // re-stream bytes the peer's browser already pulled.
+        if (
+          config.file &&
+          asset.type === 'video' &&
+          config.file.size > VIDEO_STREAMING_THRESHOLD
+        ) {
+          const vss = videoStreamingServiceRef.current;
+          const hint = vss.registerHostFile(config.file, asset.id, config.file.type);
+          (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
+          if (net.mode !== 'offline') {
+            net.broadcastSpawn({
+              id: asset.id,
+              name: asset.name,
+              type: asset.type as AssetSpawnData['type'],
+              position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+              rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+              scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+              url: asset.url,
+              primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
+              fileData: asset.fileData,
+              isCollidable: asset.isCollidable,
+              isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+              materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+              videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
+              streamingHint: hint
+            });
+            for (const peerId of net.peers) {
+              if (config.videoSyncMode === 'watch-party' && asset.videoElement) {
+                vss.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
+              } else {
+                vss.beginStreamingToPeer(hint, peerId).catch((err) => {
+                  console.warn('[VideoStreaming] pump failed for', peerId, err);
+                });
+              }
+            }
+          }
+        }
         // NOTE: registerOnAssetAdded's id-match cleanup removes the
         // local placeholder when this asset lands. No explicit local
         // remove needed.
@@ -3568,10 +4802,26 @@ const vrHud = new VRHUDManager(
       return;
     }
 
-    const pos = new THREE.Vector3((Math.random() - 0.5) * 2, 1.5, -2);
+    const pos = getSpawnPositionInFrontOfUser(2.0);
     
+    const broadcastInventoryMaterialState = (targetId: string, matState: any) => {
+      if (!matState) return;
+      const mats = Array.isArray(matState)
+        ? matState
+        : typeof matState === 'object' && !('materialIndex' in matState) && !('color' in matState) && !('map' in matState) && !('roughness' in matState) && !('metalness' in matState) && !('emissive' in matState)
+        ? Object.values(matState)
+        : [matState];
+      mats.forEach((m: any) => {
+        networkServiceRef.current.broadcastMaterialUpdate({ ...m, assetId: targetId });
+      });
+    };
+
     if (item.type === 'primitive' && item.primitiveType) {
       const prim = assetManager.spawnPrimitive(item.primitiveType, pos);
+      if (prim && item.materialState) {
+        AssetManager.applyMaterialUpdate(prim, item.materialState);
+        broadcastInventoryMaterialState(prim.id, item.materialState);
+      }
       manipulationManagerRef.current?.selectAsset(prim);
       if (prim) recordSpawnUndo(prim);
     } else if (item.fileData) {
@@ -3579,7 +4829,16 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (item.materialState) {
+          AssetManager.applyMaterialUpdate(asset, item.materialState);
+          broadcastInventoryMaterialState(asset.id, item.materialState);
+        }
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
       }
     } else if (item.url) {
@@ -3589,7 +4848,16 @@ const vrHud = new VRHUDManager(
       const file = new File([blob], item.name);
       const asset = await assetManager.importFile(file, pos);
       if (asset) {
-        manipulationManagerRef.current?.selectAsset(asset);
+        if (item.materialState) {
+          AssetManager.applyMaterialUpdate(asset, item.materialState);
+          broadcastInventoryMaterialState(asset.id, item.materialState);
+        }
+        if (asset.type !== 'video') {
+          manipulationManagerRef.current?.selectAsset(asset);
+        } else {
+          setActiveVideoAssetId(asset.id);
+          resetVideoInactivityTimer();
+        }
         recordSpawnUndo(asset);
       }
     }
@@ -3602,6 +4870,11 @@ const vrHud = new VRHUDManager(
     const file = new File([blob], item.name);
     await avatarManagerRef.current?.loadLocalVRM(file);
     setShowInventoryModal(false);
+  };
+
+  const handleUpdateUserName = (name: string) => {
+    networkServiceRef.current.setLocalUserName(name);
+    setUserName(networkServiceRef.current.localUserName);
   };
 
   const handleUpdateGraphicsSettings = (newSettings: Partial<GraphicsSettings>) => {
@@ -3648,11 +4921,11 @@ const vrHud = new VRHUDManager(
   };
 
   return (
-    <div className="w-screen h-screen relative bg-[#07090e] select-none">
+    <div className="w-screen h-screen relative bg-[#07090e] select-none overflow-hidden">
       {/* 3D WebGL Canvas Container */}
       <div ref={containerRef} className="absolute inset-0 z-0 w-full h-full" />
 
-      {/* Center Crosshair — cyan when idle, amber when dev tool hovers
+      {/* Center Crosshair - cyan when idle, amber when dev tool hovers
           a selectable asset, green when hovering an interactive panel. */}
       <div className="absolute inset-0 z-[5] pointer-events-none flex items-center justify-center">
         {(() => {
@@ -3664,10 +4937,10 @@ const vrHud = new VRHUDManager(
             cameraMode === 'first-person';
 
           const stroke = overPanel
-            ? 'rgba(52,211,153,0.95)'   // green — panel hover
+            ? 'rgba(52,211,153,0.95)'   // green - panel hover
             : overAsset
-            ? 'rgba(245,158,11,0.95)'   // amber — asset hover
-            : 'rgba(0,240,255,0.7)';    // cyan  — idle
+            ? 'rgba(245,158,11,0.95)'   // amber - asset hover
+            : 'rgba(0,240,255,0.7)';    // cyan  - idle
 
           const strokeOuter = overPanel
             ? 'rgba(52,211,153,0.55)'
@@ -3699,22 +4972,22 @@ const vrHud = new VRHUDManager(
             // the offset Z input (further right) still works. Setting
             // the attribute directly on the SVG element forces every
             // painting descendant into the same pass-through state.
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" className="pointer-events-none">
-              {/* Outer ring — larger and coloured when over panel */}
-              <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" />
-              {/* Crosshair lines — gap widens on panel hover to look like a hand cursor */}
-              <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" />
-              {/* Centre dot — square on panel hover to echo a pointer/cursor icon */}
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
+              {/* Outer ring - larger and coloured when over panel */}
+              <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
+              {/* Crosshair lines - gap widens on panel hover to look like a hand cursor */}
+              <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+              {/* Centre dot - square on panel hover to echo a pointer/cursor icon */}
               {overPanel
-                ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" />
-                : <circle cx="14" cy="14" r="1" fill={fillDot} />
+                ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
+                : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
               }
               {/* Subtle pulse ring on panel hover */}
               {overPanel && (
-                <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" />
+                <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
               )}
             </svg>
           );
@@ -3749,7 +5022,7 @@ const vrHud = new VRHUDManager(
         unreadChatCount={unreadChatCount}
       />
 
-      {/* First-Person HUD stack — a single flex column anchors the
+      {/* First-Person HUD stack - a single flex column anchors the
           locomotion banner AND the equipped-tool chip so they stack
           with a guaranteed `gap-2` clearance regardless of banner
           height (the banner's content can wrap on narrow viewports). */}
@@ -3784,7 +5057,7 @@ const vrHud = new VRHUDManager(
             </button>
           </div>
 
-          {/* Tool Equipped chip — visible while the dev tool is the
+          {/* Tool Equipped chip - visible while the dev tool is the
               active tool in first-person; hints at the look-and-press-R
               workflow (per Controls-Keybinds.txt dev-tool section).
               `whitespace-nowrap` keeps the chip a single row on narrow
@@ -3800,7 +5073,7 @@ const vrHud = new VRHUDManager(
             </div>
           )}
 
-          {/* Selection chip — when an asset is selected while in
+          {/* Selection chip - when an asset is selected while in
               first-person, hint at the O-to-inspect workflow. */}
           {selectedAsset && (
             <div className="glass-card px-4 py-1.5 flex items-center gap-2 border border-amber-500/40 bg-amber-950/60 shadow-[0_0_18px_rgba(245,158,11,0.30)] pointer-events-auto whitespace-nowrap">
@@ -3815,7 +5088,7 @@ const vrHud = new VRHUDManager(
         </div>
       ) : selectedAsset && (
         /* Orbit-mode sibling for the selection chip so the user sees
-           the O hint even when they're not in first-person — the
+           the O hint even when they're not in first-person - the
            inspector O-keybind works in either camera mode. */
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
           <div className="glass-card px-4 py-1.5 flex items-center gap-2 border border-amber-500/40 bg-amber-950/60 shadow-[0_0_18px_rgba(245,158,11,0.30)] pointer-events-auto whitespace-nowrap">
@@ -3839,9 +5112,9 @@ const vrHud = new VRHUDManager(
         onFocusSelected={handleFocusSelected}
         onSpawnPrimitive={handleSpawnPrimitive}
         onOpenInventory={() => setShowInventoryModal(true)}
-        onOpenImport={() => { setImportInitialFile(null); openImportFromLocal(); }}
+        onOpenImport={() => { setImportInitialFile(null); setShowImportDialog(true); }}
         onOpenTools={() => setShowToolsPanel(!showToolsPanel)}
-        onOpenInspector={() => openInspectorFromLocal()}
+        onOpenInspector={() => setShowSceneInspector(true)}
         onOpenRadialMenu={() => {
           setRadialMenuPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
           setShowRadialMenu(true);
@@ -3850,50 +5123,6 @@ const vrHud = new VRHUDManager(
         transformSpace={transformSpace}
         onToggleSpace={handleToggleSpace}
       />
-
-      {/* Persistent Video Controls HUD — visible whenever a video is selected,
-          regardless of inspector / modal state, so playback controls are
-          always one click away. Sits at top-center (top-20) to mirror
-          typical media-player chrome. VideoControls compact={true} doesn't
-          render its own header so we provide an inline close X. Pressing
-          X (and the equivalent non-compact X if user ever flips it) calls
-          handleDeleteSelected which removes the asset — selectedAsset
-          becomes null and the HUD disappears automatically. */}
-      {selectedAsset?.type === 'video' && selectedAsset.videoElement && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-20 w-[520px] max-w-[92vw] pointer-events-auto animate-in fade-in slide-in-from-top-4 duration-200">
-          <div className="flex items-start gap-2">
-            <button
-              onClick={() => handleDeleteSelected()}
-              title="Remove video from world (X)"
-              className="mt-2 p-1.5 rounded-lg bg-slate-800/80 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 transition border border-slate-700 hover:border-rose-500/40 shadow-md"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-            <div className="flex-1 min-w-0">
-              <VideoControls
-                compact={true}
-                state={((selectedAsset.object3d.userData as { videoState?: VideoPlaybackState })?.videoState) ?? {
-                  playing: false,
-                  currentTime: 0,
-                  duration: 0,
-                  globalVolume: 0.8,
-                  localVolume: 0.8,
-                  volumeMode: 'global',
-                  muted: true,
-                }}
-                onPlay={() => handleVideoAction(selectedAsset.id, 'play')}
-                onPause={() => handleVideoAction(selectedAsset.id, 'pause')}
-                onSeek={(t) => handleVideoAction(selectedAsset.id, 'seek', t)}
-                onStep={(d) => handleVideoAction(selectedAsset.id, 'step', d)}
-                onVolumeChange={(v) => handleVideoAction(selectedAsset.id, 'volume', v)}
-                onVolumeModeToggle={(m) => handleVideoAction(selectedAsset.id, 'volumeMode', m)}
-                onMuteToggle={() => handleVideoAction(selectedAsset.id, 'mute')}
-                onClose={() => handleDeleteSelected()}
-              />
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Resonite / World Tools Panel */}
       {showToolsPanel && (
@@ -3941,22 +5170,7 @@ const vrHud = new VRHUDManager(
             }
           }}
           onSpawnLight={(type, color, intensity, distance) => {
-            const pos = new THREE.Vector3(0, 2.5, -1.5);
-            const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
-            if (lightAsset) {
-              lightAsset.name = `${type.toUpperCase()} Light`;
-              const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
-              if (mesh && mesh.material) {
-                (mesh.material as THREE.MeshStandardMaterial).color.set(color);
-                (mesh.material as THREE.MeshStandardMaterial).emissive.set(color);
-                (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 1.0;
-              }
-              const light = type === 'point'
-                ? new THREE.PointLight(color, intensity, distance || 10)
-                : new THREE.SpotLight(color, intensity, distance || 15);
-              lightAsset.object3d.add(light);
-              manipulationManagerRef.current?.selectAsset(lightAsset);
-            }
+            spawnLightGizmo(type as 'point' | 'spot' | 'sun', color, intensity, distance);
           }}
           onToggleDrawing={() => {
             if (brushManagerRef.current) {
@@ -4000,17 +5214,24 @@ const vrHud = new VRHUDManager(
 
       {/* Resonite Spatial Scene Inspector Window */}
       <SceneInspectorWindow
-        key={selectedAsset?.id ?? "inspector-empty"}
-        targetObject={selectedAsset?.object3d ?? undefined}
-        interactivePermissionGranted={inspectorInteractiveEnabled}
-        originatorHeader={inspectorPanelOriginatorHeader}
         isOpen={showSceneInspector}
-        onClose={() => closeInspectorFromLocal()}
+        onClose={() => setShowSceneInspector(false)}
         selectedAsset={selectedAsset}
+        onSelectAsset={(asset) => setSelectedAsset(asset)}
         onUpdateAsset={(updated) => {
           setSelectedAsset({ ...updated });
           networkServiceRef.current.broadcastAssetUpdate(updated);
         }}
+        onBroadcastMaterial={(update) => {
+          networkServiceRef.current.broadcastMaterialUpdate(update);
+        }}
+        onBroadcastInspectorUpdate={(update: InspectorUpdateData) => {
+          networkServiceRef.current.broadcastInspectorUpdate(update);
+        }}
+        onBroadcastAssetUpdate={(asset) => {
+          networkServiceRef.current.broadcastAssetUpdate(asset);
+        }}
+        worldRoot={sceneEngineRef.current?.worldRoot ?? null}
         onDeleteAsset={handleDeleteSelected}
         onJumpToAsset={(asset) => {
           if (sceneEngineRef.current) {
@@ -4043,7 +5264,99 @@ const vrHud = new VRHUDManager(
         camera={sceneEngineRef.current?.camera}
         assetManager={assetManagerRef.current || undefined}
         spatialPanelManager={sceneEngineRef.current?.spatialPanelManager}
+        videoActions={(selectedAsset && selectedAsset.type === 'video') ? {
+          onPlay: () => handleVideoAction(selectedAsset.id, 'play'),
+          onPause: () => handleVideoAction(selectedAsset.id, 'pause'),
+          onSeek: (t) => handleVideoAction(selectedAsset.id, 'seek', t),
+          onStep: (d) => handleVideoAction(selectedAsset.id, 'step', d),
+          onVolumeChange: (v) => handleVideoAction(selectedAsset.id, 'volume', v),
+          onVolumeModeToggle: (m) => handleVideoAction(selectedAsset.id, 'volumeMode', m),
+          onMuteToggle: () => handleVideoAction(selectedAsset.id, 'mute'),
+          onClose: () => handleVideoClose(selectedAsset.id)
+        } : null}
       />
+
+      {/* In-World / In-Object Video Playback Controls */}
+      {(() => {
+        const activeVideoAsset = activeVideoAssetId ? assetManagerRef.current?.assets.get(activeVideoAssetId) : null;
+        const activeVideoState = activeVideoAsset?.type === 'video' ? assetManagerRef.current?.getVideoState(activeVideoAsset.id) : null;
+        if (!activeVideoAsset || !activeVideoState) return null;
+
+        return (
+          <SpatialPopUpWrapper
+            key={`video-inworld-${activeVideoAsset.id}`}
+            isOpen={true}
+            onClose={() => setActiveVideoAssetId(null)}
+            title={activeVideoAsset.name || 'VideoPlayer'}
+            scene={sceneEngineRef.current?.scene}
+            camera={sceneEngineRef.current?.camera}
+            assetManager={assetManagerRef.current || undefined}
+            spatialPanelManager={sceneEngineRef.current?.spatialPanelManager}
+            defaultWidth={1000}
+            defaultHeight={900}
+            parentObject={activeVideoAsset.object3d}
+            anchorOffset={new THREE.Vector3(0, 0, 0.048)}
+            frameless={true}
+            dockToParent={true}
+            panelId={`video-controls-${activeVideoAsset.id}`}
+          >
+            <div
+              onPointerMove={resetVideoInactivityTimer}
+              onPointerDown={resetVideoInactivityTimer}
+              className="w-full h-full"
+            >
+              <VideoObjectControls
+                state={activeVideoState}
+                assetName={activeVideoAsset.name}
+                onPlay={() => {
+                  handleVideoAction(activeVideoAsset.id, 'play');
+                  resetVideoInactivityTimer();
+                }}
+                onPause={() => {
+                  handleVideoAction(activeVideoAsset.id, 'pause');
+                  resetVideoInactivityTimer();
+                }}
+                onSeek={(time) => {
+                  handleVideoAction(activeVideoAsset.id, 'seek', time);
+                  resetVideoInactivityTimer();
+                }}
+                onStep={(delta) => {
+                  handleVideoAction(activeVideoAsset.id, 'step', delta);
+                  resetVideoInactivityTimer();
+                }}
+                onVolumeChange={(vol) => {
+                  handleVideoAction(activeVideoAsset.id, 'volume', vol);
+                  resetVideoInactivityTimer();
+                }}
+                onVolumeModeToggle={(mode) => {
+                  handleVideoAction(activeVideoAsset.id, 'volumeMode', mode);
+                  resetVideoInactivityTimer();
+                }}
+                onMuteToggle={() => {
+                  handleVideoAction(activeVideoAsset.id, 'mute');
+                  resetVideoInactivityTimer();
+                }}
+                syncMode={activeVideoState.syncMode || activeVideoAsset.metadata?.videoSyncMode || 'persistent'}
+                canToggleSyncMode={!!(activeVideoAsset.fileData || networkServiceRef.current.isHost)}
+                onSyncModeToggle={(mode) => {
+                  handleVideoAction(activeVideoAsset.id, 'syncMode', mode);
+                  resetVideoInactivityTimer();
+                }}
+                onClose={() => setActiveVideoAssetId(null)}
+                onRemoveVideo={() => {
+                  assetManagerRef.current?.removeAsset(activeVideoAsset.id);
+                  networkServiceRef.current.broadcastRemove(activeVideoAsset.id);
+                  if (manipulationManagerRef.current?.selectedAsset?.id === activeVideoAsset.id) {
+                    manipulationManagerRef.current.selectAsset(null);
+                    setSelectedAsset(null);
+                  }
+                  setActiveVideoAssetId(null);
+                }}
+              />
+            </div>
+          </SpatialPopUpWrapper>
+        );
+      })()}
 
       {/* Text & Voice Chat Sidebar */}
       <ChatPanel
@@ -4079,7 +5392,7 @@ const vrHud = new VRHUDManager(
       {showImportModal && (
         <FileImportModal
           onImportFile={handleImportFile}
-          onClose={() => closeImportFromLocal()}
+          onClose={() => setShowImportModal(false)}
         />
       )}
 
@@ -4088,7 +5401,7 @@ const vrHud = new VRHUDManager(
       <AssetImportDialog
           initialFile={importInitialFile}
           onImport={handleImportAssetFromConfig}
-          onClose={() => closeImportFromLocal()}
+          onClose={() => setShowImportDialog(false)}
           scene={sceneEngineRef.current?.scene}
           camera={sceneEngineRef.current?.camera}
           assetManager={assetManagerRef.current || undefined}
@@ -4110,29 +5423,101 @@ const vrHud = new VRHUDManager(
         <SettingsModal
           settings={graphicsSettings}
           stats={stats}
+          userName={userName}
+          onUpdateUserName={handleUpdateUserName}
           onUpdateSettings={handleUpdateGraphicsSettings}
           onClose={() => setShowSettingsModal(false)}
         />
       )}
 
       {/* Misc File Inspection Modal */}
-      {/* Tabbed Dash Menu Modal */}
-      <DashMenu
-        isOpen={showDashMenu}
-        onClose={() => setShowDashMenu(false)}
-        networkService={networkServiceRef.current}
-        localRole={localRole}
-        onUpdateRole={handleUpdateRole}
-        onModerateUser={handleModerateUser}
-        defaultConfig={defaultPermissionsConfig}
-        onUpdateDefaultConfig={setDefaultPermissionsConfig}
-        inventoryItems={inventoryItems}
-        onSpawnItem={handleSpawnFromInventory}
-        onEquipVrm={handleEquipVrmFromInventory}
-        onOpenFullSettings={() => { setShowDashMenu(false); setShowSettingsModal(true); }}
-      />
+      {/* Tabbed Dash Menu Modal — rendered as a 3D spatial panel in VR, full-viewport overlay on desktop */}
+      {isVRPresenting && sceneEngineRef.current?.spatialPanelManager ? (
+        <SpatialPopUpWrapper
+          key="dash-menu-spatial"
+          isOpen={showDashMenu}
+          onClose={() => setShowDashMenu(false)}
+          title="NexusVR Dash"
+          scene={sceneEngineRef.current.scene}
+          camera={sceneEngineRef.current.camera}
+          spatialPanelManager={sceneEngineRef.current.spatialPanelManager}
+          assetManager={assetManagerRef.current ?? undefined}
+          panelId="dash-menu"
+          defaultWidth={1000}
+          defaultHeight={850}
+          frameless={true}
+          initialPinned={true}
+        >
+          <DashMenu
+            isOpen={showDashMenu}
+            onClose={() => setShowDashMenu(false)}
+            variant="spatial"
+            userName={userName}
+            onUpdateUserName={handleUpdateUserName}
+            networkService={networkServiceRef.current}
+            localRole={localRole}
+            onUpdateRole={handleUpdateRole}
+            onModerateUser={handleModerateUser}
+            defaultConfig={defaultPermissionsConfig}
+            onUpdateDefaultConfig={setDefaultPermissionsConfig}
+            inventoryItems={inventoryItems}
+            inventoryFolders={inventoryFolders}
+            onSpawnItem={handleSpawnFromInventory}
+            onEquipVrm={handleEquipVrmFromInventory}
+            onDeleteInventoryItem={handleDeleteInventoryItem}
+            onRenameInventoryItem={handleRenameInventoryItem}
+            onCreateInventoryFolder={handleCreateInventoryFolder}
+            onMoveInventoryItem={handleMoveInventoryItem}
+            onRenameInventoryFolder={handleRenameInventoryFolder}
+            onDeleteInventoryFolder={handleDeleteInventoryFolder}
+            onMoveInventoryFolder={handleMoveInventoryFolder}
+            onOpenFullSettings={() => { setShowDashMenu(false); setShowSettingsModal(true); }}
+            graphicsSettings={graphicsSettings}
+            performanceStats={stats}
+            onUpdateGraphicsSettings={handleUpdateGraphicsSettings}
+            audioDevices={audioDevices}
+            selectedAudioDeviceId={selectedAudioDeviceId}
+            onSelectAudioDevice={handleSelectAudioDevice}
+            isMuted={networkServiceRef.current.isMuted}
+            onToggleMute={handleToggleMute}
+          />
+        </SpatialPopUpWrapper>
+      ) : (
+        <DashMenu
+          isOpen={showDashMenu}
+          onClose={() => setShowDashMenu(false)}
+          userName={userName}
+          onUpdateUserName={handleUpdateUserName}
+          networkService={networkServiceRef.current}
+          localRole={localRole}
+          onUpdateRole={handleUpdateRole}
+          onModerateUser={handleModerateUser}
+          defaultConfig={defaultPermissionsConfig}
+          onUpdateDefaultConfig={setDefaultPermissionsConfig}
+          inventoryItems={inventoryItems}
+          inventoryFolders={inventoryFolders}
+          onSpawnItem={handleSpawnFromInventory}
+          onEquipVrm={handleEquipVrmFromInventory}
+          onDeleteInventoryItem={handleDeleteInventoryItem}
+          onRenameInventoryItem={handleRenameInventoryItem}
+          onCreateInventoryFolder={handleCreateInventoryFolder}
+          onMoveInventoryItem={handleMoveInventoryItem}
+          onRenameInventoryFolder={handleRenameInventoryFolder}
+          onDeleteInventoryFolder={handleDeleteInventoryFolder}
+          onMoveInventoryFolder={handleMoveInventoryFolder}
+          onOpenFullSettings={() => { setShowDashMenu(false); setShowSettingsModal(true); }}
+          graphicsSettings={graphicsSettings}
+          performanceStats={stats}
+          onUpdateGraphicsSettings={handleUpdateGraphicsSettings}
+          audioDevices={audioDevices}
+          selectedAudioDeviceId={selectedAudioDeviceId}
+          onSelectAudioDevice={handleSelectAudioDevice}
+          isMuted={networkServiceRef.current.isMuted}
+          onToggleMute={handleToggleMute}
+        />
+      )}
 
-      {/* Resonite Radial Context Menu (Pie Menu) — desktop 2D overlay */}
+      {/* Resonite Radial Context Menu (Pie Menu) - desktop 2D overlay */}
       <RadialContextMenu
         isOpen={showRadialMenu}
         position={radialMenuPos}
@@ -4149,10 +5534,32 @@ const vrHud = new VRHUDManager(
         onRedo={() => undoRedoManagerRef.current.redo()}
         isHeld={isHeld}
         heldAssetType={heldAssetType}
+        heldAssetCustomItems={heldAssetCustomItems}
         onDestroy={handleDestroyHeld}
         onDuplicate={handleDuplicateHeld}
         onSaveHeld={handleSaveHeldToInventory}
         onDownloadHeld={handleDownloadHeld}
+        isMuted={networkServiceRef.current.isMuted}
+        onToggleMute={handleToggleMute}
+        activeTool={activeTool}
+        onSpawnPointLight={() => spawnLightGizmo('point', '#ffffff', 2.0, 15)}
+        onSpawnSpotLight={() => spawnLightGizmo('spot', '#ffffff', 2.0, 15)}
+        onSpawnSunLight={() => spawnLightGizmo('sun', '#ffffff', 2.0, 15)}
+        noShadows={graphicsSettings.shadowQuality === 'off'}
+        onToggleNoShadows={() => handleUpdateGraphicsSettings({ ...graphicsSettings, shadowQuality: graphicsSettings.shadowQuality === 'off' ? 'high' : 'off' })}
+        onUnequipTool={() => setActiveTool(null)}
+        selectionMode={selectionMode}
+        onToggleSelectionMode={handleToggleSelectionMode}
+        onDeselectAll={handleDeselectAll}
+        onOpenInspector={() => setShowSceneInspector(true)}
+        gizmoMode={manipulationManagerRef.current?.getMode() || 'translate'}
+        onSetGizmoMode={(mode) => manipulationManagerRef.current?.setMode(mode)}
+        gizmoSpace={manipulationManagerRef.current?.getSpace() || 'local'}
+        onToggleGizmoSpace={() => {
+          const cur = manipulationManagerRef.current?.getSpace() || 'local';
+          manipulationManagerRef.current?.setSpace(cur === 'local' ? 'world' : 'local');
+        }}
+        onSpawnPrimitive={handleSpawnPrimitive}
       />
 
    </div>
