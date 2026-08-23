@@ -75,7 +75,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       <div className="glass-panel p-2 flex flex-wrap justify-center items-center gap-2 pointer-events-auto shadow-2xl max-h-[50vh] overflow-y-auto">
         {/* Transform Tools matching reference style */}
         <div className="flex items-center gap-1.5 bg-[#0a0d14] p-1.5 rounded-2xl border border-cyan-500/35 shadow-inner">
-          <Tooltip text="Move (Translate) [G / W]">
+          <Tooltip text="Translate/Move">
             <button
               onClick={() => onSetMode('translate')}
               className={currentMode === 'translate' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
@@ -84,7 +84,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           </Tooltip>
 
-          <Tooltip text="Rotate [R / E]">
+          <Tooltip text="Rotate">
             <button
               onClick={() => onSetMode('rotate')}
               className={currentMode === 'rotate' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
@@ -93,7 +93,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             </button>
           </Tooltip>
 
-          <Tooltip text="Scale [S / R]">
+          <Tooltip text="Scale">
             <button
               onClick={() => onSetMode('scale')}
               className={currentMode === 'scale' ? 'btn-dark-slate-active' : 'btn-dark-slate'}
@@ -117,7 +117,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         </Tooltip>
 
-        <Tooltip text="Inventory [I]">
+        <Tooltip text="Inventory">
           <button
             onClick={onOpenInventory}
             className="btn btn-glass text-xs py-2 px-3"
@@ -137,7 +137,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         </Tooltip>
 
-        <Tooltip text="Context Menu [M]">
+        <Tooltip text="Context Menu">
           <button
             onClick={onOpenRadialMenu}
             className="hidden lg:flex btn btn-glass text-xs py-2 px-3 bg-cyan-950/40 hover:bg-cyan-500/20 border-cyan-500/30 text-cyan-300 items-center gap-1.5"
@@ -147,7 +147,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         </Tooltip>
 
-        <Tooltip text="Import File [U]">
+        <Tooltip text="Import File">
           <button
             onClick={onOpenImport}
             className="btn btn-primary text-xs py-2 px-3.5 bg-gradient-to-r from-[#00f0ff] to-[#0088ff]"
@@ -192,7 +192,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 </button>
               </Tooltip>
 
-              <Tooltip text="Focus Camera [F]">
+              <Tooltip text="Focus Camera">
                 <button
                   onClick={onFocusSelected}
                   className="btn-icon w-8 h-8 rounded-lg bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/40 border border-cyan-500/30"
@@ -210,7 +210,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 </button>
               </Tooltip>
 
-              <Tooltip text="Delete [Del]">
+              <Tooltip text="Delete">
                 <button
                   onClick={onDeleteSelected}
                   className="btn-icon w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500/40 border border-rose-500/30"

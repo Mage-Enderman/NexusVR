@@ -8,7 +8,8 @@ import type { SpatialPanelManager } from '../engine/SpatialPanelManager.ts';
 import { VideoControls } from './VideoControls.tsx';
 import {
   Trash2, RotateCcw, ArrowUpRight, Magnet, Plus, Copy,
-  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye, Hand
+  Box, Layers, Sparkles, Activity, ChevronRight, ChevronDown, Minimize2, Maximize2, Image as ImageIcon, Eye, Hand,
+  Footprints, Plane, Wind
 } from 'lucide-react';
 import {
   type ResoniteLightConfig,
@@ -17,6 +18,24 @@ import {
   removeLightComponent
 } from '../engine/ResoniteLightSync.ts';
 import { type GrabbableComponent, DEFAULT_GRABBABLE, getGrabbable, setGrabbable } from '../components/grabbable/GrabbableComponent.ts';
+import { type ColliderComponent, type BoxColliderComponent, type MeshColliderComponent, DEFAULT_BOX_COLLIDER, DEFAULT_MESH_COLLIDER, getCollider, setCollider, serializeCollider, deserializeCollider } from '../components/collider/ColliderComponent.ts';
+import {
+  type SkyboxComponent,
+  type SkyboxMaterial,
+  DEFAULT_SKYBOX_GRADIENT_COMPONENT,
+  DEFAULT_SKYBOX_SOLID_COMPONENT,
+  DEFAULT_SKYBOX_PROCEDURAL_COMPONENT,
+  DEFAULT_SKYBOX_TEXTURE_COMPONENT,
+  getSkybox,
+  setSkybox,
+  applySkyboxToScene,
+} from '../components/skybox/SkyboxComponent.ts';
+import {
+  type CommonSpawnAreaComponent,
+  DEFAULT_COMMON_SPAWN_AREA,
+  getCommonSpawnArea,
+  setCommonSpawnArea,
+} from '../components/spawn/CommonSpawnAreaComponent.ts';
 
 export interface SceneInspectorWindowProps {
   isOpen: boolean;
@@ -99,6 +118,18 @@ export interface SceneInspectorWindowProps {
    * Hidden when undefined.
    */
   originatorHeader?: React.ReactNode;
+  /**
+   * Called when a collider component is added, changed, or removed.
+   * Wired by App.tsx to sceneEngine.rebuildCollisionRegistry() so
+   * the CollisionManager picks up new colliders immediately.
+   */
+  onRebuildCollisionRegistry?: () => void;
+  /** Locomotion permissions for the world root. */
+  locomotionPermissions?: {
+    allowedLocomotions: Array<'walk' | 'flight' | 'noclip'>;
+    scalingEnabled: boolean;
+  };
+  onUpdateLocomotionPermissions?: (perms: { allowedLocomotions: Array<'walk' | 'flight' | 'noclip'>; scalingEnabled: boolean }) => void;
 }
 
 /**
@@ -181,6 +212,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   worldRoot,
   interactivePermissionGranted,
   originatorHeader,
+  onRebuildCollisionRegistry,
+  locomotionPermissions,
+  onUpdateLocomotionPermissions,
 }) => {
   // Mirror of the prop with a default so we don't sprinkle `?? true`
   // checks across the JSX. The defaults preserve the pre-broadcast
@@ -203,6 +237,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   const [active, setActive] = useState(selectedAsset?.object3d.visible ?? true);
   const [persistent, setPersistent] = useState(true);
   const [grabbable, setGrabbableState] = useState<GrabbableComponent>({ ...DEFAULT_GRABBABLE });
+  const [collider, setColliderState] = useState<ColliderComponent | undefined>(undefined);
   // const [orderOffset, setOrderOffset] = useState(0);
 
   // Transform states
@@ -220,12 +255,13 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     hasUV0: true,
     isSkinned: false,
     boneCount: 0,
-    rootBoneName: 'None'
+    rootBoneName: 'None',
+    hasTexture: false
   });
 
   const [texProps, setTexProps] = useState({
     url: 'None',
-    filterMode: 'Bilinear / Trilinear',
+    filterMode: 'Linear',
     anisotropic: 4,
     wrapU: 'Repeat',
     wrapV: 'Repeat',
@@ -251,6 +287,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   // Custom components attached
   const [attachedComponents, setAttachedComponents] = useState<string[]>([]);
   const [lightConfig, setLightConfig] = useState<ResoniteLightConfig>(DEFAULT_LIGHT_CONFIG);
+  const [skyboxState, setSkyboxState] = useState<SkyboxComponent | null>(null);
+  const [spawnAreaState, setSpawnAreaState] = useState<CommonSpawnAreaComponent | null>(null);
 
   const handleUpdateLightConfig = (updates: Partial<ResoniteLightConfig>) => {
     if (!selectedAsset || !interactive) return;
@@ -410,6 +448,29 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     // had isPersistent broadcast yet still shows the host's intent.
     setPersistent(((selectedAsset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined) ?? true);
     setGrabbableState(getGrabbable(selectedAsset.object3d));
+    setColliderState(getCollider(selectedAsset.object3d));
+
+    // Detect skybox component
+    const existingSkybox = getSkybox(selectedAsset.object3d);
+    const isSkyboxObject = selectedAsset.name === 'Skybox' || selectedAsset.name === 'Stars' || existingSkybox !== undefined;
+    if (isSkyboxObject && existingSkybox) {
+      setSkyboxState(existingSkybox);
+      setAttachedComponents((prev) => (prev.includes('Skybox') ? prev : ['Skybox', ...prev]));
+    } else {
+      setSkyboxState(null);
+      setAttachedComponents((prev) => prev.filter((c) => c !== 'Skybox'));
+    }
+
+    // Detect CommonSpawnArea component
+    const existingSpawnArea = getCommonSpawnArea(selectedAsset.object3d);
+    const isSpawnObject = selectedAsset.name === 'Spawn' || existingSpawnArea !== undefined;
+    if (isSpawnObject && existingSpawnArea) {
+      setSpawnAreaState(existingSpawnArea);
+      setAttachedComponents((prev) => (prev.includes('CommonSpawnArea') ? prev : ['CommonSpawnArea', ...prev]));
+    } else {
+      setSpawnAreaState(null);
+      setAttachedComponents((prev) => prev.filter((c) => c !== 'CommonSpawnArea'));
+    }
 
     const existingLight = selectedAsset.object3d.children.find((c) => (c as THREE.Light).isLight) as THREE.Light | undefined;
     const existingLightConfig = (selectedAsset.object3d.userData as Record<string, any>)?.resoniteLight;
@@ -499,6 +560,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
     let isSkinned = false;
     let boneCount = 0;
     let rootBoneName = 'None';
+    let hasTexture = false;
     let colorHex = '#38bdf8';
     let rgh = 0.4;
     let met = 0.2;
@@ -530,6 +592,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
           }
           if (mesh.material) {
             const m = mesh.material as THREE.MeshStandardMaterial;
+            if (m.map) hasTexture = true;
             if (m.color && m.color.getHexString) colorHex = '#' + m.color.getHexString();
             if (m.roughness !== undefined) rgh = m.roughness;
             if (m.metalness !== undefined) met = m.metalness;
@@ -549,7 +612,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       hasUV0: uv,
       isSkinned,
       boneCount,
-      rootBoneName
+      rootBoneName,
+      hasTexture
     });
 
     setMatProps((prev) => ({
@@ -765,6 +829,15 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       selectedAsset.object3d.userData.resoniteLight = config;
       setLightConfig(config);
       syncThreeLightFromConfig(selectedAsset.object3d, config);
+    } else if (compType === 'Skybox') {
+      const component: SkyboxComponent = { ...DEFAULT_SKYBOX_GRADIENT_COMPONENT };
+      setSkyboxState(component);
+      setSkybox(selectedAsset.object3d, component);
+      if (scene) applySkyboxToScene(scene, component);
+    } else if (compType === 'CommonSpawnArea') {
+      const component: CommonSpawnAreaComponent = { ...DEFAULT_COMMON_SPAWN_AREA };
+      setSpawnAreaState(component);
+      setCommonSpawnArea(selectedAsset.object3d, component);
     } else if (compType === 'Rotator Script') {
       // Add custom userData to drive rotation in SceneEngine
       selectedAsset.object3d.userData.rotatorSpeed = { x: 0, y: 1.5, z: 0 };
@@ -1597,6 +1670,78 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>
           </div>
 
+          {/* COMPONENT: Locomotion Permissions — shown when selected asset is World Root */}
+          {selectedAsset?.object3d?.name === 'World Root' && locomotionPermissions && onUpdateLocomotionPermissions && (
+            <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
+              <div
+                onClick={() => toggleSection('comp-LocomotionPerms')}
+                className="px-3 py-2 bg-gradient-to-r from-amber-900/40 via-slate-900 to-amber-900/40 border-b border-amber-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-amber-900/30 transition"
+              >
+                <div className="flex items-center gap-2">
+                  <Footprints className="w-4 h-4 text-amber-400" />
+                  <span className="font-black text-amber-300 tracking-wider text-sm">Locomotion Permissions</span>
+                  <span className="text-[10px] text-slate-500 font-normal ml-1">Component</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {!collapsedSections['comp-LocomotionPerms'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
+                </div>
+              </div>
+              {!collapsedSections['comp-LocomotionPerms'] && (
+                <div className="p-3 bg-slate-950/90 text-xs space-y-3">
+                  <div className="space-y-1.5">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Allowed Locomotion Modes</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {([
+                        { id: 'walk' as const, label: 'Walk', icon: Footprints, color: 'emerald' },
+                        { id: 'flight' as const, label: 'Flight', icon: Plane, color: 'cyan' },
+                        { id: 'noclip' as const, label: 'Noclip', icon: Wind, color: 'purple' },
+                      ]).map(({ id, label, icon: Icon, color }) => {
+                        const isEnabled = locomotionPermissions.allowedLocomotions.includes(id);
+                        return (
+                          <button
+                            key={id}
+                            onClick={() => {
+                              if (!interactive) return;
+                              const next = isEnabled
+                                ? locomotionPermissions.allowedLocomotions.filter((m) => m !== id)
+                                : [...locomotionPermissions.allowedLocomotions, id];
+                              if (next.length === 0) return; // must keep at least one
+                              onUpdateLocomotionPermissions({ ...locomotionPermissions, allowedLocomotions: next });
+                            }}
+                            className={`flex items-center gap-1 px-2 py-1 rounded border text-[10px] font-semibold transition ${
+                              isEnabled
+                                ? `bg-${color}-500/20 text-${color}-300 border-${color}-500/40`
+                                : 'bg-slate-800/50 text-slate-500 border-slate-700/50'
+                            }`}
+                          >
+                            <Icon className="w-3 h-3" />
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Self-Scale</span>
+                    <button
+                      onClick={() => {
+                        if (!interactive) return;
+                        onUpdateLocomotionPermissions({ ...locomotionPermissions, scalingEnabled: !locomotionPermissions.scalingEnabled });
+                      }}
+                      className={`w-8 h-4 rounded-full transition-colors relative ${
+                        locomotionPermissions.scalingEnabled ? 'bg-emerald-500' : 'bg-slate-600'
+                      }`}
+                    >
+                      <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-transform ${
+                        locomotionPermissions.scalingEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                      }`} />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* COMPONENT: Grabbable Component — always shown, controls grab interaction */}
           <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
             <div
@@ -1612,6 +1757,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                 <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${grabbable.enabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/50 text-slate-500'}`}>
                   {grabbable.enabled ? 'ENABLED' : 'DISABLED'}
                 </span>
+                <button title="Copy" onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(JSON.stringify(grabbable, null, 2)); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-emerald-400 transition"><Copy className="w-3.5 h-3.5" /></button>
+                <button title="Delete" onClick={(e) => { e.stopPropagation(); setGrabbable(selectedAsset?.object3d, { ...DEFAULT_GRABBABLE }); setGrabbableState({ ...DEFAULT_GRABBABLE }); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400 transition"><Trash2 className="w-3.5 h-3.5" /></button>
                 {!collapsedSections['comp-Grabbable'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
               </div>
             </div>
@@ -1747,6 +1894,222 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                     }}
                   />
                 </div>
+              </div>
+            )}
+          </div>
+
+          {/* COMPONENT: Collider Component — BoxCollider / MeshCollider */}
+          <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
+            <div
+              onClick={() => toggleSection('comp-Collider')}
+              className="px-3 py-2 bg-gradient-to-r from-emerald-900/40 via-slate-900 to-emerald-900/40 border-b border-emerald-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-emerald-900/30 transition"
+            >
+              <div className="flex items-center gap-2">
+                <Box className="w-4 h-4 text-emerald-400" />
+                <span className="font-black text-emerald-300 tracking-wider text-sm">Collider</span>
+                <span className="text-[10px] text-slate-500 font-normal ml-1">Component</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${collider?.enabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/50 text-slate-500'}`}>
+                  {collider ? (collider.enabled ? 'ENABLED' : 'DISABLED') : 'NONE'}
+                </span>
+                <button title="Copy" onClick={(e) => { e.stopPropagation(); if (collider) navigator.clipboard?.writeText(JSON.stringify(collider, null, 2)); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-emerald-400 transition"><Copy className="w-3.5 h-3.5" /></button>
+                <button title="Remove Collider" onClick={(e) => { e.stopPropagation(); setCollider(selectedAsset?.object3d, undefined); setColliderState(undefined); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-red-400 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                {!collapsedSections['comp-Collider'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
+              </div>
+            </div>
+
+            {!collapsedSections['comp-Collider'] && (
+              <div className="p-2 bg-slate-950/90 text-xs">
+                {/* Add Collider buttons (when no collider present) */}
+                {!collider && (
+                  <div className="flex gap-2 px-2 py-2">
+                    <button
+                      onClick={() => {
+                        if (!interactive || !selectedAsset) return;
+                        const next: BoxColliderComponent = { ...DEFAULT_BOX_COLLIDER };
+                        setColliderState(next);
+                        setCollider(selectedAsset.object3d, next);
+                        onUpdateAsset({ ...selectedAsset });
+                        onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                        onRebuildCollisionRegistry?.();
+                      }}
+                      className="flex-1 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/40 rounded-lg transition text-xs font-bold"
+                    >
+                      + BoxCollider
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!interactive || !selectedAsset) return;
+                        const next: MeshColliderComponent = { ...DEFAULT_MESH_COLLIDER };
+                        setColliderState(next);
+                        setCollider(selectedAsset.object3d, next);
+                        onUpdateAsset({ ...selectedAsset });
+                        onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                        onRebuildCollisionRegistry?.();
+                      }}
+                      className="flex-1 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/40 rounded-lg transition text-xs font-bold"
+                    >
+                      + MeshCollider
+                    </button>
+                  </div>
+                )}
+
+                {/* Collider fields (when collider is present) */}
+                {collider && (
+                  <>
+                    {/* Enabled toggle */}
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">Enabled:</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={collider.enabled}
+                        onChange={(v) => {
+                          const next = { ...collider, enabled: v } as ColliderComponent;
+                          setColliderState(next);
+                          if (!interactive || !selectedAsset) return;
+                          setCollider(selectedAsset.object3d, next);
+                          onUpdateAsset({ ...selectedAsset });
+                          onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                        }}
+                      />
+                    </div>
+
+                    {/* CharacterCollider toggle */}
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">CharacterCollider:</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={collider.characterCollider}
+                        onChange={(v) => {
+                          const next = { ...collider, characterCollider: v } as ColliderComponent;
+                          setColliderState(next);
+                          if (!interactive || !selectedAsset) return;
+                          setCollider(selectedAsset.object3d, next);
+                          onUpdateAsset({ ...selectedAsset });
+                          onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                        }}
+                      />
+                    </div>
+
+                    {/* IgnoreRaycasts toggle */}
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">IgnoreRaycasts:</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={collider.ignoreRaycasts}
+                        onChange={(v) => {
+                          const next = { ...collider, ignoreRaycasts: v } as ColliderComponent;
+                          setColliderState(next);
+                          if (!interactive || !selectedAsset) return;
+                          setCollider(selectedAsset.object3d, next);
+                          onUpdateAsset({ ...selectedAsset });
+                          onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                        }}
+                      />
+                    </div>
+
+                    {/* Mass */}
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">Mass:</span>
+                      </div>
+                      <input
+                        type="number"
+                        value={collider.mass}
+                        onChange={(e) => {
+                          const v = parseFloat(e.target.value) || 1;
+                          const next = { ...collider, mass: v } as ColliderComponent;
+                          setColliderState(next);
+                          if (!interactive || !selectedAsset) return;
+                          setCollider(selectedAsset.object3d, next);
+                          onUpdateAsset({ ...selectedAsset });
+                        }}
+                        className="w-16 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-white text-right font-mono"
+                      />
+                    </div>
+
+                    {/* BoxCollider-specific: Size */}
+                    {collider.type === 'box' && (
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Size:</span>
+                        </div>
+                        <div className="flex gap-1">
+                          {(['x', 'y', 'z'] as const).map((axis) => (
+                            <input
+                              key={axis}
+                              type="number"
+                              value={(collider as BoxColliderComponent).size[axis]}
+                              onChange={(e) => {
+                                const v = parseFloat(e.target.value) || 1;
+                                const size = { ...(collider as BoxColliderComponent).size, [axis]: v };
+                                const next = { ...collider, size } as BoxColliderComponent;
+                                setColliderState(next);
+                                if (!interactive || !selectedAsset) return;
+                                setCollider(selectedAsset.object3d, next);
+                                onUpdateAsset({ ...selectedAsset });
+                              }}
+                              className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-white text-right font-mono text-[10px]"
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Offset */}
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">Offset:</span>
+                      </div>
+                      <div className="flex gap-1">
+                        {(['x', 'y', 'z'] as const).map((axis) => (
+                          <input
+                            key={axis}
+                            type="number"
+                            value={collider.offset[axis]}
+                            onChange={(e) => {
+                              const v = parseFloat(e.target.value) || 0;
+                              const offset = { ...collider.offset, [axis]: v };
+                              const next = { ...collider, offset } as ColliderComponent;
+                              setColliderState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setCollider(selectedAsset.object3d, next);
+                              onUpdateAsset({ ...selectedAsset });
+                            }}
+                            className="w-14 bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-white text-right font-mono text-[10px]"
+                          />
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Remove Collider button */}
+                    <div className="px-2 py-2">
+                      <button
+                        onClick={() => {
+                          if (!interactive || !selectedAsset) return;
+                          setColliderState(undefined);
+                          setCollider(selectedAsset.object3d, undefined);
+                          onUpdateAsset({ ...selectedAsset });
+                          onBroadcastInspectorUpdate?.({ assetId: selectedAsset.id, nodeUuid: undefined });
+                          onRebuildCollisionRegistry?.();
+                        }}
+                        className="w-full px-3 py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/40 rounded-lg transition text-xs font-bold"
+                      >
+                        Remove Collider
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -2135,6 +2498,616 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             </div>
           )}
 
+          {/* COMPONENT: Skybox Component */}
+          {attachedComponents.includes('Skybox') && skyboxState && (
+            <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
+              <div
+                onClick={() => toggleSection('comp-Skybox')}
+                className="px-3 py-2 bg-gradient-to-r from-indigo-900/40 via-slate-900 to-indigo-900/40 border-b border-indigo-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-indigo-900/30 transition"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🌍</span>
+                  <span className="font-black text-indigo-300 tracking-wider text-sm">Skybox</span>
+                  <span className="text-[10px] text-slate-500 font-normal ml-1">Component</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${skyboxState.isActive ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-700/50 text-slate-500'}`}>
+                    {skyboxState.isActive ? 'ACTIVE' : 'INACTIVE'}
+                  </span>
+                  {!collapsedSections['comp-Skybox'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
+                </div>
+              </div>
+
+              {!collapsedSections['comp-Skybox'] && (
+                <div className="p-2 bg-slate-950/90 text-xs">
+                  {/* Enabled toggle */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Enabled:</span>
+                    </div>
+                    <ToggleSwitch
+                      checked={skyboxState.enabled}
+                      onChange={(v) => {
+                        const next = { ...skyboxState, enabled: v };
+                        setSkyboxState(next);
+                        if (!interactive || !selectedAsset) return;
+                        setSkybox(selectedAsset.object3d, next);
+                        if (scene) applySkyboxToScene(scene, next);
+                        onUpdateAsset({ ...selectedAsset });
+                      }}
+                    />
+                  </div>
+
+                  {/* Active toggle */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Active:</span>
+                    </div>
+                    <ToggleSwitch
+                      checked={skyboxState.isActive}
+                      onChange={(v) => {
+                        const next = { ...skyboxState, isActive: v };
+                        setSkyboxState(next);
+                        if (!interactive || !selectedAsset) return;
+                        setSkybox(selectedAsset.object3d, next);
+                        if (scene) applySkyboxToScene(scene, next);
+                        onUpdateAsset({ ...selectedAsset });
+                      }}
+                    />
+                  </div>
+
+                  {/* Material Type selector */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-indigo-400 rounded-l-sm" />
+                      <span className="font-mono text-xs font-semibold text-slate-300">Material Type:</span>
+                    </div>
+                    <select
+                      value={skyboxState.material.type}
+                      onChange={(e) => {
+                        const materialType = e.target.value as SkyboxMaterial['type'];
+                        let newMaterial: SkyboxMaterial;
+                        switch (materialType) {
+                          case 'solid': newMaterial = { ...DEFAULT_SKYBOX_SOLID }; break;
+                          case 'gradient': newMaterial = { ...DEFAULT_SKYBOX_GRADIENT }; break;
+                          case 'procedural': newMaterial = { ...DEFAULT_SKYBOX_PROCEDURAL }; break;
+                          case 'texture': newMaterial = { ...DEFAULT_SKYBOX_TEXTURE }; break;
+                          default: newMaterial = { ...DEFAULT_SKYBOX_GRADIENT };
+                        }
+                        const next = { ...skyboxState, material: newMaterial };
+                        setSkyboxState(next);
+                        if (!interactive || !selectedAsset) return;
+                        setSkybox(selectedAsset.object3d, next);
+                        if (scene) applySkyboxToScene(scene, next);
+                        onUpdateAsset({ ...selectedAsset });
+                      }}
+                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white font-semibold cursor-pointer"
+                    >
+                      <option value="gradient">Gradient Sky</option>
+                      <option value="solid">Solid Color</option>
+                      <option value="procedural">Procedural Sky</option>
+                      <option value="texture">360° Texture</option>
+                    </select>
+                  </div>
+
+                  {/* Material-specific fields */}
+                  {skyboxState.material.type === 'gradient' && (
+                    <>
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-sky-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Top Color:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.topColor}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, topColor: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-amber-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Bottom Color:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.bottomColor}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, bottomColor: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-purple-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Offset:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={skyboxState.material.offset}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, offset: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-purple-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-purple-300 w-8 text-right">{skyboxState.material.offset.toFixed(2)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Exponent:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="10"
+                            step="0.1"
+                            value={skyboxState.material.exponent}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, exponent: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-cyan-300 w-8 text-right">{skyboxState.material.exponent.toFixed(1)}</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {skyboxState.material.type === 'solid' && (
+                    <div className="flex items-center justify-between py-1.5 px-2">
+                      <div className="flex items-center gap-1.5">
+                        <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-indigo-400 rounded-l-sm" />
+                        <span className="font-mono text-xs font-semibold text-slate-300">Color:</span>
+                      </div>
+                      <input
+                        type="color"
+                        value={skyboxState.material.color}
+                        onChange={(e) => {
+                          const next = { ...skyboxState, material: { ...skyboxState.material, color: e.target.value } };
+                          setSkyboxState(next);
+                          if (!interactive || !selectedAsset) return;
+                          setSkybox(selectedAsset.object3d, next);
+                          if (scene) applySkyboxToScene(scene, next);
+                        }}
+                        className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                      />
+                    </div>
+                  )}
+
+                  {skyboxState.material.type === 'procedural' && (
+                    <>
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-yellow-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Sun Color:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.sunColor}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, sunColor: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-sky-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Haze Color:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.hazeColor}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, hazeColor: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-green-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Ground Color:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.groundColor}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, groundColor: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-amber-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Sun Size:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={skyboxState.material.sunSize}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, sunSize: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-amber-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-amber-300 w-8 text-right">{skyboxState.material.sunSize.toFixed(2)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-purple-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Atmosphere:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0"
+                            max="2"
+                            step="0.1"
+                            value={skyboxState.material.hazeThickness}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, hazeThickness: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-purple-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-purple-300 w-8 text-right">{skyboxState.material.hazeThickness.toFixed(1)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Exposure:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="5"
+                            step="0.1"
+                            value={skyboxState.material.exposure}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, exposure: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-cyan-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-cyan-300 w-8 text-right">{skyboxState.material.exposure.toFixed(1)}</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {skyboxState.material.type === 'texture' && (
+                    <>
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-pink-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">URL:</span>
+                        </div>
+                        <input
+                          type="text"
+                          value={skyboxState.material.url || ''}
+                          placeholder="https://example.com/panorama.jpg"
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, url: e.target.value || null } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-40 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-white text-[10px] font-mono"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-amber-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Exposure:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0.1"
+                            max="5"
+                            step="0.1"
+                            value={skyboxState.material.exposure}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, exposure: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-amber-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-amber-300 w-8 text-right">{skyboxState.material.exposure.toFixed(1)}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-cyan-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Tint:</span>
+                        </div>
+                        <input
+                          type="color"
+                          value={skyboxState.material.tint}
+                          onChange={(e) => {
+                            const next = { ...skyboxState, material: { ...skyboxState.material, tint: e.target.value } };
+                            setSkyboxState(next);
+                            if (!interactive || !selectedAsset) return;
+                            setSkybox(selectedAsset.object3d, next);
+                            if (scene) applySkyboxToScene(scene, next);
+                          }}
+                          className="w-10 h-6 rounded bg-transparent border border-slate-600 cursor-pointer"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between py-1.5 px-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-purple-400 rounded-l-sm" />
+                          <span className="font-mono text-xs font-semibold text-slate-300">Rotation:</span>
+                        </div>
+                        <div className="flex items-center gap-2 max-w-[55%] w-full">
+                          <input
+                            type="range"
+                            min="0"
+                            max="360"
+                            step="1"
+                            value={skyboxState.material.rotation}
+                            onChange={(e) => {
+                              const next = { ...skyboxState, material: { ...skyboxState.material, rotation: parseFloat(e.target.value) } };
+                              setSkyboxState(next);
+                              if (!interactive || !selectedAsset) return;
+                              setSkybox(selectedAsset.object3d, next);
+                              if (scene) applySkyboxToScene(scene, next);
+                            }}
+                            className="w-full accent-purple-400 cursor-pointer"
+                          />
+                          <span className="font-mono text-[10px] text-purple-300 w-8 text-right">{skyboxState.material.rotation}°</span>
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {/* Remove Skybox button */}
+                  <div className="px-2 py-2">
+                    <button
+                      onClick={() => {
+                        if (!interactive || !selectedAsset) return;
+                        setSkyboxState(null);
+                        setSkybox(selectedAsset.object3d, undefined);
+                        setAttachedComponents(attachedComponents.filter((c) => c !== 'Skybox'));
+                        onUpdateAsset({ ...selectedAsset });
+                      }}
+                      className="w-full px-3 py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/40 rounded-lg transition text-xs font-bold"
+                    >
+                      Remove Skybox Component
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* COMPONENT: CommonSpawnArea Component */}
+          {attachedComponents.includes('CommonSpawnArea') && spawnAreaState && (
+            <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl mb-3">
+              <div
+                onClick={() => toggleSection('comp-CommonSpawnArea')}
+                className="px-3 py-2 bg-gradient-to-r from-emerald-900/40 via-slate-900 to-emerald-900/40 border-b border-emerald-500/30 flex items-center justify-between cursor-pointer select-none hover:bg-emerald-900/30 transition"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">📍</span>
+                  <span className="font-black text-emerald-300 tracking-wider text-sm">CommonSpawnArea</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${spawnAreaState.enabled ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/50 text-slate-500'}`}>
+                    {spawnAreaState.enabled ? 'ACTIVE' : 'INACTIVE'}
+                  </span>
+                  {!collapsedSections['comp-CommonSpawnArea'] ? <Minimize2 className="w-3 h-3 text-slate-400" /> : <Maximize2 className="w-3 h-3 text-slate-400" />}
+                </div>
+              </div>
+
+              {!collapsedSections['comp-CommonSpawnArea'] && (
+                <div className="p-2 bg-slate-950/90 divide-y divide-slate-800/60 text-xs">
+                  {/* persistent */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">persistent</span>
+                    </div>
+                    <input type="checkbox" checked={spawnAreaState.persistent} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, persistent: e.target.checked };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="accent-emerald-500" />
+                  </div>
+
+                  {/* enabled */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Enabled</span>
+                    </div>
+                    <input type="checkbox" checked={spawnAreaState.enabled} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, enabled: e.target.checked };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="accent-emerald-500" />
+                  </div>
+
+                  {/* SpawnOffset */}
+                  <div className="py-1.5 px-2">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Spawn Offset</span>
+                    </div>
+                    <div className="flex gap-2 ml-4">
+                      {(['x', 'y', 'z'] as const).map((axis) => (
+                        <label key={axis} className="flex items-center gap-1 text-[10px] text-slate-400">
+                          {axis.toUpperCase()}:
+                          <input type="number" step={0.1} value={spawnAreaState.spawnOffset[axis]} onChange={(e) => {
+                            if (!interactive) return;
+                            const updated = { ...spawnAreaState, spawnOffset: { ...spawnAreaState.spawnOffset, [axis]: parseFloat(e.target.value) || 0 } };
+                            setSpawnAreaState(updated);
+                            setCommonSpawnArea(selectedAsset!.object3d, updated);
+                            onUpdateAsset({ ...selectedAsset! });
+                          }} className="w-16 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white text-[11px]" />
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* OtherUserCheckRadius */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Other User Check Radius</span>
+                    </div>
+                    <input type="number" step={0.1} min={0} value={spawnAreaState.otherUserCheckRadius} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, otherUserCheckRadius: parseFloat(e.target.value) || 0 };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="w-16 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white text-[11px]" />
+                  </div>
+
+                  {/* OrientUser */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Orient User</span>
+                    </div>
+                    <input type="checkbox" checked={spawnAreaState.orientUser} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, orientUser: e.target.checked };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="accent-emerald-500" />
+                  </div>
+
+                  {/* Capacity */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Capacity</span>
+                    </div>
+                    <input type="number" step={1} min={-1} value={spawnAreaState.capacity} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, capacity: parseInt(e.target.value) || -1 };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="w-16 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white text-[11px]" />
+                  </div>
+
+                  {/* BaseWeight */}
+                  <div className="flex items-center justify-between py-1.5 px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="inline-block w-2 h-3.5 border-l-2 border-t border-b border-slate-300 rounded-l-sm" />
+                      <span className="text-slate-300 font-semibold">Base Weight</span>
+                    </div>
+                    <input type="number" step={0.1} min={0} value={spawnAreaState.baseWeight} onChange={(e) => {
+                      if (!interactive) return;
+                      const updated = { ...spawnAreaState, baseWeight: parseFloat(e.target.value) || 1 };
+                      setSpawnAreaState(updated);
+                      setCommonSpawnArea(selectedAsset!.object3d, updated);
+                      onUpdateAsset({ ...selectedAsset! });
+                    }} className="w-16 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-white text-[11px]" />
+                  </div>
+
+                  {/* Remove button */}
+                  <div className="pt-2 px-2">
+                    <button
+                      onClick={() => {
+                        if (!interactive || !selectedAsset) return;
+                        setSpawnAreaState(null);
+                        setCommonSpawnArea(selectedAsset.object3d, undefined as any);
+                        setAttachedComponents(attachedComponents.filter((c) => c !== 'CommonSpawnArea'));
+                        onUpdateAsset({ ...selectedAsset });
+                      }}
+                      className="w-full px-3 py-1.5 bg-red-600/20 hover:bg-red-600/40 text-red-400 border border-red-500/40 rounded-lg transition text-xs font-bold"
+                    >
+                      Remove CommonSpawnArea Component
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* COMPONENT 1: StaticMesh / SkinnedMeshRenderer */}
           {meshStats.submeshes > 0 && meshStats.triangles > 0 && (
             <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
@@ -2156,6 +3129,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                     />
                     <span className="text-slate-300 font-bold">Enabled</span>
                   </label>
+                  <button title="Copy" onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(JSON.stringify(meshStats, null, 2)); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-amber-400 transition"><Copy className="w-3.5 h-3.5" /></button>
                   <button
                     title="Delete Mesh Helper (Preserves Light)"
                     onClick={(e) => {
@@ -2249,6 +3223,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                   <ToggleSwitch checked={materialSectionEnabled} onChange={setMaterialSectionEnabled} accentClass="bg-emerald-500 border-emerald-400" />
                   <span className="text-slate-300 font-bold">Enabled</span>
                 </label>
+                <button title="Copy" onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(JSON.stringify(matProps, null, 2)); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-emerald-400 transition"><Copy className="w-3.5 h-3.5" /></button>
                 <button
                   onClick={(e) => { e.stopPropagation(); toggleSection('material'); }}
                   className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition"
@@ -2578,8 +3553,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
             />
           )}
 
-          {/* COMPONENT 3: StaticTexture2D */}
-          {meshStats.submeshes > 0 && meshStats.triangles > 0 && (
+          {/* COMPONENT 3: StaticTexture2D — only shown when material has a texture map */}
+          {meshStats.hasTexture && (
             <div className="bg-slate-900/80 rounded-xl border border-slate-700/80 overflow-hidden shadow-md">
               <div
               onClick={() => toggleSection('texture')}
@@ -2594,6 +3569,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                   <ToggleSwitch checked={textureSectionEnabled} onChange={setTextureSectionEnabled} />
                   <span className="text-slate-300 font-bold">Enabled</span>
                 </label>
+                <button title="Copy" onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(JSON.stringify(texProps, null, 2)); }} className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-cyan-400 transition"><Copy className="w-3.5 h-3.5" /></button>
                 <button
                   onClick={(e) => { e.stopPropagation(); toggleSection('texture'); }}
                   className="p-0.5 rounded hover:bg-slate-700 text-slate-400 transition"
@@ -2603,114 +3579,189 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
               </div>
             </div>
 
-            {!collapsedSections['texture'] && <div className="p-3 flex flex-col gap-3">
-              <div className="grid grid-cols-2 gap-2">
-                <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 font-semibold">FilterMode:</span>
-                  <select
-                    value={texProps.filterMode}
-                    onChange={(e) => {
-                      setTexProps({ ...texProps, filterMode: e.target.value });
-                      if (selectedAsset) {
-                        selectedAsset.object3d.traverse((c) => {
-                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
-                          if (m && m.map) {
-                            m.map.minFilter = e.target.value.includes('Point') ? THREE.NearestFilter : THREE.LinearMipmapLinearFilter;
-                            m.map.magFilter = e.target.value.includes('Point') ? THREE.NearestFilter : THREE.LinearFilter;
-                            m.map.needsUpdate = true;
-                          }
-                        });
-                      }
-                    }}
-                    className="bg-slate-900 border border-slate-700 rounded text-cyan-300 font-bold text-[10px] px-1 py-0.5"
-                  >
-                    <option value="Bilinear / Trilinear">Trilinear (Smooth)</option>
-                    <option value="Point / Nearest">Point / Nearest (Pixel)</option>
-                    <option value="Anisotropic 8x">Anisotropic 8x</option>
-                    <option value="Anisotropic 16x">Anisotropic 16x</option>
-                  </select>
-                </div>
-
-                <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 font-semibold">Anisotropic Level:</span>
-                  <input
-                    type="range" min="1" max="16" step="1"
-                    value={texProps.anisotropic}
-                    onChange={(e) => {
-                      const v = parseInt(e.target.value);
-                      setTexProps({ ...texProps, anisotropic: v });
-                      if (selectedAsset) {
-                        selectedAsset.object3d.traverse((c) => {
-                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
-                          if (m && m.map) { m.map.anisotropy = v; m.map.needsUpdate = true; }
-                        });
-                      }
-                    }}
-                    className="w-20 accent-cyan-400 cursor-pointer"
-                  />
-                  <span className="font-mono text-white text-[10px] w-4 text-right">{texProps.anisotropic}x</span>
-                </div>
-
-                <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 font-semibold">WrapMode U/V:</span>
-                  <div className="flex gap-1">
-                    {['Repeat', 'Clamp', 'Mirror'].map((mode) => (
+            {!collapsedSections['texture'] && <div className="p-3 flex flex-col gap-2">
+              {/* FilterMode + Anisotropic Level — FilterMode gets most space */}
+              <div className="flex items-center gap-2 bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-semibold text-[10px] whitespace-nowrap shrink-0">Filter:</span>
+                <div className="flex gap-1 flex-1 min-w-0">
+                  {([['Linear', 'Lin'], ['Point', 'Pt'], ['Aniso8', 'A8'], ['Aniso16', 'A16']] as const).map(([full, short]) => {
+                    const active = texProps.filterMode === full;
+                    return (
                       <button
-                        key={mode}
+                        key={full}
                         type="button"
                         onClick={() => {
-                          setTexProps({ ...texProps, wrapU: mode, wrapV: mode });
+                          setTexProps({ ...texProps, filterMode: full });
                           if (selectedAsset) {
                             selectedAsset.object3d.traverse((c) => {
                               const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
                               if (m && m.map) {
-                                const w = mode === 'Repeat' ? THREE.RepeatWrapping : mode === 'Clamp' ? THREE.ClampToEdgeWrapping : THREE.MirroredRepeatWrapping;
-                                m.map.wrapS = w; m.map.wrapT = w; m.map.needsUpdate = true;
+                                m.map.minFilter = full === 'Point' ? THREE.NearestFilter : THREE.LinearMipmapLinearFilter;
+                                m.map.magFilter = full === 'Point' ? THREE.NearestFilter : THREE.LinearFilter;
+                                if (full === 'Aniso8') m.map.anisotropy = 8;
+                                else if (full === 'Aniso16') m.map.anisotropy = 16;
+                                else m.map.anisotropy = 1;
+                                m.map.needsUpdate = true;
                               }
                             });
                           }
                         }}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${texProps.wrapU === mode ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-slate-800 text-slate-400'}`}
+                        title={full}
+                        className={`px-2 py-0.5 rounded text-[9px] font-bold transition whitespace-nowrap ${active ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-slate-800 text-slate-400 border border-slate-700'}`}
                       >
-                        {mode}
+                        {short}
                       </button>
-                    ))}
-                  </div>
+                    );
+                  })}
                 </div>
 
-                <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
-                  <span className="text-slate-400 font-semibold">MipMaps & Raw:</span>
-                  <div className="flex gap-2">
-                    <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, mipmaps: !texProps.mipmaps})}><ToggleSwitch checked={texProps.mipmaps} onChange={(v) => setTexProps({...texProps, mipmaps: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span>MipMaps</span></label>
-                    <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, uncompressed: !texProps.uncompressed})}><ToggleSwitch checked={texProps.uncompressed} onChange={(v) => setTexProps({...texProps, uncompressed: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span>Raw</span></label>
-                  </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <span className="text-slate-400 font-semibold text-[10px]">Aniso:</span>
+                  <button type="button" onClick={() => {
+                    const v = Math.max(1, texProps.anisotropic - 1);
+                    setTexProps({ ...texProps, anisotropic: v });
+                    if (selectedAsset) {
+                      selectedAsset.object3d.traverse((c) => {
+                        const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                        if (m && m.map) { m.map.anisotropy = v; m.map.needsUpdate = true; }
+                      });
+                    }
+                  }} className="px-1 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400 hover:bg-cyan-500/20 hover:text-cyan-300 border border-slate-700 hover:border-cyan-500/40 transition">-</button>
+                  <span className="font-mono text-white text-[10px] w-5 text-center shrink-0">{texProps.anisotropic}x</span>
+                  <button type="button" onClick={() => {
+                    const v = Math.min(16, texProps.anisotropic + 1);
+                    setTexProps({ ...texProps, anisotropic: v });
+                    if (selectedAsset) {
+                      selectedAsset.object3d.traverse((c) => {
+                        const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                        if (m && m.map) { m.map.anisotropy = v; m.map.needsUpdate = true; }
+                      });
+                    }
+                  }} className="px-1 py-0.5 rounded text-[9px] font-bold bg-slate-800 text-slate-400 hover:bg-cyan-500/20 hover:text-cyan-300 border border-slate-700 hover:border-cyan-500/40 transition">+</button>
+                </div>
+              </div>
+
+              {/* WrapMode — full width */}
+              <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-semibold text-[10px]">WrapMode:</span>
+                <div className="flex gap-1">
+                  {['Repeat', 'Clamp', 'Mirror'].map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => {
+                        setTexProps({ ...texProps, wrapU: mode, wrapV: mode });
+                        if (selectedAsset) {
+                          selectedAsset.object3d.traverse((c) => {
+                            const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                            if (m && m.map) {
+                              const w = mode === 'Repeat' ? THREE.RepeatWrapping : mode === 'Clamp' ? THREE.ClampToEdgeWrapping : THREE.MirroredRepeatWrapping;
+                              m.map.wrapS = w; m.map.wrapT = w; m.map.needsUpdate = true;
+                            }
+                          });
+                        }
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${texProps.wrapU === mode ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40' : 'bg-slate-800 text-slate-400'}`}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* MipMaps & Raw — full width */}
+              <div className="flex items-center justify-between bg-slate-950/80 px-2.5 py-1.5 rounded-lg border border-slate-800">
+                <span className="text-slate-400 font-semibold text-[10px]">Options:</span>
+                <div className="flex gap-3">
+                  <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, mipmaps: !texProps.mipmaps})}><ToggleSwitch checked={texProps.mipmaps} onChange={(v) => setTexProps({...texProps, mipmaps: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span className="text-[10px]">MipMaps</span></label>
+                  <label className="flex items-center gap-1 cursor-pointer select-none" onMouseDown={(e) => e.preventDefault()} onClick={() => setTexProps({...texProps, uncompressed: !texProps.uncompressed})}><ToggleSwitch checked={texProps.uncompressed} onChange={(v) => setTexProps({...texProps, uncompressed: v})} size="w-3 h-3" accentClass="bg-cyan-400 border-cyan-300" /><span className="text-[10px]">Raw</span></label>
                 </div>
               </div>
 
               {/* Texture Utility Action Buttons */}
               <div className="space-y-1 pt-1 border-t border-slate-800">
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Texture Operations & Methods</span>
-                <div className="grid grid-cols-4 gap-1.5 font-mono text-[10px]">
-                  {[
-                    { label: 'Flip Horiz()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.map) { m.map.repeat.x *= -1; m.map.needsUpdate = true; } }); } },
-                    { label: 'Flip Vert()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.map) { m.map.repeat.y *= -1; m.map.needsUpdate = true; } }); } },
-                    { label: 'Rotate90CW()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.map) { m.map.rotation += Math.PI/2; m.map.needsUpdate = true; } }); } },
-                    { label: 'Rotate180()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.map) { m.map.rotation += Math.PI; m.map.needsUpdate = true; } }); } },
-                    { label: 'MakeTileable()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.map) { m.map.wrapS = THREE.RepeatWrapping; m.map.wrapT = THREE.RepeatWrapping; m.map.repeat.set(2, 2); m.map.needsUpdate = true; } }); } },
-                    { label: 'InvertRGB()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.color) { m.color.set((0xffffff - m.color.getHex()) || 0xff00ff); m.needsUpdate = true; } }); } },
-                    { label: 'Grayscale()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m?.color) { const g = (m.color.r + m.color.g + m.color.b)/3; m.color.setRGB(g,g,g); m.needsUpdate = true; } }); } },
-                    { label: 'BleedAlpha()', act: () => { if (selectedAsset) selectedAsset.object3d.traverse(c => { const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial; if (m) { m.transparent = true; m.opacity = 0.85; m.needsUpdate = true; } }); } },
-                  ].map((btn) => (
-                    <button
-                      key={btn.label}
-                      type="button"
-                      onClick={btn.act}
-                      className="p-1 rounded bg-slate-950 hover:bg-cyan-500/20 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 font-semibold truncate transition text-center"
-                      title={btn.label}
-                    >
-                      {btn.label}
-                    </button>
-                  ))}
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Texture Operations</span>
+                <div className="grid grid-cols-4 gap-1 font-mono text-[9px]">
+                  {(() => {
+                    const ops: { label: string; act: () => void }[] = [
+                      { label: 'Flip Horiz()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.map) { m.map.repeat.x *= -1; m.map.needsUpdate = true; }
+                        });
+                      }},
+                      { label: 'Flip Vert()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.map) { m.map.repeat.y *= -1; m.map.needsUpdate = true; }
+                        });
+                      }},
+                      { label: 'Rotate90CW()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.map) { m.map.rotation += Math.PI / 2; m.map.needsUpdate = true; }
+                        });
+                      }},
+                      { label: 'Rotate180()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.map) { m.map.rotation += Math.PI; m.map.needsUpdate = true; }
+                        });
+                      }},
+                      { label: 'MakeTileable()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.map) {
+                            m.map.wrapS = THREE.RepeatWrapping;
+                            m.map.wrapT = THREE.RepeatWrapping;
+                            m.map.repeat.set(2, 2);
+                            m.map.needsUpdate = true;
+                          }
+                        });
+                      }},
+                      { label: 'InvertRGB()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.color) { m.color.set((0xffffff - m.color.getHex()) || 0xff00ff); m.needsUpdate = true; }
+                        });
+                      }},
+                      { label: 'Grayscale()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m?.color) {
+                            const g = (m.color.r + m.color.g + m.color.b) / 3;
+                            m.color.setRGB(g, g, g);
+                            m.needsUpdate = true;
+                          }
+                        });
+                      }},
+                      { label: 'BleedAlpha()', act: () => {
+                        if (!selectedAsset) return;
+                        selectedAsset.object3d.traverse((c) => {
+                          const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial;
+                          if (m) { m.transparent = true; m.opacity = 0.85; m.needsUpdate = true; }
+                        });
+                      }},
+                    ];
+                    return ops.map((btn) => (
+                      <button
+                        key={btn.label}
+                        type="button"
+                        onClick={btn.act}
+                        className="p-1 rounded bg-slate-950 hover:bg-cyan-500/20 border border-slate-800 hover:border-cyan-500/40 text-slate-300 hover:text-cyan-300 font-semibold leading-tight transition text-center whitespace-nowrap overflow-hidden text-ellipsis"
+                        title={btn.label}
+                      >
+                        {btn.label}
+                      </button>
+                    ));
+                  })()}
                 </div>
               </div>
             </div>}
@@ -2764,6 +3815,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
               <div className="absolute bottom-full left-0 right-0 mb-2 bg-slate-900 border border-cyan-500/60 rounded-xl shadow-[0_0_30px_rgba(0,0,0,0.8)] p-2 grid grid-cols-2 gap-1.5 z-50 animate-in fade-in slide-in-from-bottom-2">
                 {[
                   { name: 'Light Source', desc: 'Point/Spot illumination' },
+                  { name: 'Skybox', desc: 'World background material' },
+                  { name: 'CommonSpawnArea', desc: 'User spawn point' },
                   { name: 'Rotator Script', desc: 'Continuous spinning' },
                   { name: 'Bobbing / Float', desc: 'Hover animation' },
                   { name: 'Positional Audio', desc: '3D spatial sound' },

@@ -368,6 +368,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // pattern as activeToolRef / cameraModeRef above; kept in sync by
   // a small useEffect further down.
   const locomotionModeRef = useRef<'walk' | 'flight' | 'noclip'>('walk');
+  const allowedLocomotionsRef = useRef<Array<'walk' | 'flight' | 'noclip'>>(['walk', 'flight', 'noclip']);
   const lastMouseNdcRef = useRef<THREE.Vector2>(new THREE.Vector2(0, 0));
 
   // ID of the asset currently under the screen-center raycast. Updated
@@ -510,6 +511,10 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     gridColor: 'cyan',
     ambientIntensity: 0.4,
     dirLightIntensity: 1.5,
+    locomotion: {
+      allowedLocomotions: ['walk', 'flight', 'noclip'],
+      scalingEnabled: true,
+    },
   });
 
   const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
@@ -559,6 +564,16 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   useEffect(() => {
     locomotionModeRef.current = locomotionMode;
   }, [locomotionMode]);
+  useEffect(() => {
+    allowedLocomotionsRef.current = envSettings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+  }, [envSettings.locomotion?.allowedLocomotions]);
+  // Clamp current locomotion when allowed list changes
+  useEffect(() => {
+    const allowed = envSettings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+    if (!allowed.includes(locomotionMode)) {
+      handleSetLocomotionMode(allowed[0] ?? 'walk');
+    }
+  }, [envSettings.locomotion?.allowedLocomotions, locomotionMode]);
   // Sync the menu-open ref mirror so []-deps-closure handlers
   // (onCanvasAuxMouseDown in particular) see the LIVE value
   // when toggling via MMB.
@@ -823,6 +838,7 @@ const vrHud = new VRHUDManager(
             networkServiceRef,
             inventoryServiceRef,
             locomotionModeRef,
+            allowedLocomotionsRef,
             selectedAssetRef,
             setGrabMode,
             setScalingEnabled,
@@ -1626,12 +1642,16 @@ const vrHud = new VRHUDManager(
           isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
           materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
           videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
-          grabbable: (asset.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined
+          grabbable: (asset.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined,
+          collider: (asset.object3d.userData as Record<string, unknown>)?.collider as Record<string, unknown> | undefined
         };
         net.broadcastSpawn(spawnData);
       }
 
       // Auto-open the inspector when a freshly-imported video lands.
+
+      // Rebuild collision registry so new assets with colliders are detected
+      sceneEngine.rebuildCollisionRegistry();
     }));
 
     // Network listeners
@@ -1706,6 +1726,15 @@ const vrHud = new VRHUDManager(
         } else {
           targetNode.userData.grabbable = update.grabbable;
         }
+      }
+      if (update.collider !== undefined) {
+        if (update.collider === null) {
+          delete (targetNode.userData as Record<string, unknown>).collider;
+        } else {
+          targetNode.userData.collider = update.collider;
+        }
+        // Rebuild collision registry after collider changes
+        sceneEngine?.rebuildCollisionRegistry();
       }
       if (update.hierarchyAction) {
         const ha = update.hierarchyAction;
@@ -1966,6 +1995,10 @@ const vrHud = new VRHUDManager(
         if (data.grabbable) {
           prim.object3d.userData.grabbable = data.grabbable;
         }
+        if (data.collider) {
+          prim.object3d.userData.collider = data.collider;
+          sceneEngine.rebuildCollisionRegistry();
+        }
       } else if (data.fileData && data.name) {
         const blob = new Blob([data.fileData]);
         // Pass `data.id` as the AssetManager's customId so the local
@@ -1994,6 +2027,10 @@ const vrHud = new VRHUDManager(
             if (data.grabbable) {
               asset.object3d.userData.grabbable = data.grabbable;
             }
+            if (data.collider) {
+              asset.object3d.userData.collider = data.collider;
+              sceneEngine.rebuildCollisionRegistry();
+            }
           }
         });
       } else if (data.url) {
@@ -2009,6 +2046,10 @@ const vrHud = new VRHUDManager(
             }
             if (data.grabbable) {
               asset.object3d.userData.grabbable = data.grabbable;
+            }
+            if (data.collider) {
+              asset.object3d.userData.collider = data.collider;
+              sceneEngine.rebuildCollisionRegistry();
             }
           }
         });
@@ -2106,9 +2147,7 @@ const vrHud = new VRHUDManager(
           setMode('offline');
           setRoomId(null);
         } else if (data.action === 'respawn') {
-          sceneEngine.camera.position.set(0, 1.6, 3);
-          sceneEngine.controls.target.set(0, 1, 0);
-          sceneEngine.controls.update();
+          sceneEngine.respawn();
         }
       }
     }));
@@ -2144,7 +2183,8 @@ const vrHud = new VRHUDManager(
             materialState: (a.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
             videoAspectRatio: (a.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
             streamingHint: hint,
-            grabbable: (a.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined
+            grabbable: (a.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined,
+            collider: (a.object3d.userData as Record<string, unknown>)?.collider as Record<string, unknown> | undefined
           });
           if (hint && net.isHost) {
             const syncMode = (a.object3d.userData as { videoState?: { syncMode?: string } }).videoState?.syncMode;
@@ -2668,7 +2708,8 @@ const vrHud = new VRHUDManager(
       performanceStats: se?.stats ?? { fps: 60, drawCalls: 0, triangles: 0 },
       environmentSettings: em?.settings ?? {
         atmosphere: 'cyber-nebula', gridVisible: true, gridSize: 'standard-60',
-        gridColor: 'cyan', ambientIntensity: 1.2, dirLightIntensity: 1.5
+        gridColor: 'cyan', ambientIntensity: 1.2, dirLightIntensity: 1.5,
+        locomotion: { allowedLocomotions: ['walk', 'flight', 'noclip'], scalingEnabled: true },
       },
       roomInfo: { mode, roomId, peerCount },
       users,
@@ -3384,9 +3425,11 @@ const vrHud = new VRHUDManager(
   };
 
   const handleSetLocomotionMode = (mode: 'walk' | 'flight' | 'noclip') => {
-    setLocomotionMode(mode);
+    const allowed = envSettings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+    const finalMode = allowed.includes(mode) ? mode : (allowed[0] ?? 'walk');
+    setLocomotionMode(finalMode);
     if (sceneEngineRef.current) {
-      sceneEngineRef.current.locomotionMode = mode;
+      sceneEngineRef.current.locomotionMode = finalMode;
     }
   };
 
@@ -3494,7 +3537,9 @@ const vrHud = new VRHUDManager(
     onToggleLaser: () => setLaserEnabled((v) => !v),
     onNextLocomotion: () => {
       const cur = locomotionModeRef.current;
-      const next: typeof cur = cur === 'walk' ? 'flight' : cur === 'flight' ? 'noclip' : 'walk';
+      const allowed = envSettings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+      const idx = allowed.indexOf(cur);
+      const next = allowed[(idx + 1) % allowed.length] ?? 'walk';
       handleSetLocomotionMode(next);
     },
     onNextGrabMode: () => {
@@ -3587,9 +3632,7 @@ const vrHud = new VRHUDManager(
     }
     if (action === 'respawn') {
       if (targetPeerId === net.localPeerId) {
-        sceneEngineRef.current?.camera.position.set(0, 1.6, 3);
-        sceneEngineRef.current?.controls.target.set(0, 1, 0);
-        sceneEngineRef.current?.controls.update();
+        sceneEngineRef.current?.respawn();
       } else {
         net.broadcastModeration('respawn', targetPeerId);
       }
@@ -3598,6 +3641,11 @@ const vrHud = new VRHUDManager(
     net.broadcastModeration(action, targetPeerId);
     setPeerCount((prev) => prev);
   };
+
+  // Self-respawn: teleport the local player back to the spawn point.
+  const handleRespawnSelf = useCallback(() => {
+    sceneEngineRef.current?.respawn();
+  }, []);
 
   // Helper: record an undo action for a newly spawned/imported asset
   const recordSpawnUndo = (asset: LoadedAsset) => {
@@ -4535,6 +4583,11 @@ const vrHud = new VRHUDManager(
               onMuteToggle: () => handleVideoAction(asset.id, 'mute'),
               onClose: () => handleVideoClose(asset.id)
             } : null}
+            onRebuildCollisionRegistry={() => sceneEngineRef.current?.rebuildCollisionRegistry()}
+            locomotionPermissions={envSettings.locomotion}
+            onUpdateLocomotionPermissions={(perms) => {
+              setEnvSettings(prev => ({ ...prev, locomotion: perms }));
+            }}
           />
         );
       })}{/* In-World / In-Object Video Playback Controls */}
@@ -4729,8 +4782,8 @@ const vrHud = new VRHUDManager(
             onUpdateUserName={handleUpdateUserName}
             networkService={networkServiceRef.current}
             localRole={localRole}
-            onUpdateRole={handleUpdateRole}
-            onModerateUser={handleModerateUser}
+            onUpdateRole={handleUpdateRole}            onModerateUser={handleModerateUser}
+            onRespawnSelf={handleRespawnSelf}
             defaultConfig={defaultPermissionsConfig}
             onUpdateDefaultConfig={setDefaultPermissionsConfig}
             inventoryItems={inventoryItems}
@@ -4752,6 +4805,7 @@ const vrHud = new VRHUDManager(
             selectedAudioDeviceId={selectedAudioDeviceId}
             onSelectAudioDevice={handleSelectAudioDevice}
             isMuted={networkServiceRef.current.isMuted}
+
             onToggleMute={handleToggleMute}
           />
         </SpatialPopUpWrapper>
@@ -4765,6 +4819,7 @@ const vrHud = new VRHUDManager(
           localRole={localRole}
           onUpdateRole={handleUpdateRole}
           onModerateUser={handleModerateUser}
+          onRespawnSelf={handleRespawnSelf}
           defaultConfig={defaultPermissionsConfig}
           onUpdateDefaultConfig={setDefaultPermissionsConfig}
           inventoryItems={inventoryItems}
@@ -4796,6 +4851,7 @@ const vrHud = new VRHUDManager(
         position={radialMenuPos}
         onClose={() => setShowRadialMenu(false)}
         locomotionMode={locomotionMode}
+        allowedLocomotions={envSettings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip']}
         onSetLocomotionMode={handleSetLocomotionMode}
         scalingEnabled={scalingEnabled}
         onToggleScaling={() => setScalingEnabled((prev) => !prev)}
@@ -4833,6 +4889,12 @@ const vrHud = new VRHUDManager(
           manipulationManagerRef.current?.setSpace(cur === 'local' ? 'world' : 'local');
         }}
         onSpawnPrimitive={handleSpawnPrimitive}
+        collisionEnabled={sceneEngineRef.current?.collisionManager?.enabled ?? true}
+        onToggleCollision={() => {
+          const se = sceneEngineRef.current;
+          if (!se) return;
+          se.collisionManager.enabled = !se.collisionManager.enabled;
+        }}
       />
 
    </div>

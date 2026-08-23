@@ -23,6 +23,7 @@ export interface DashMenuProps {
   localRole: UserRole;
   onUpdateRole: (targetPeerId: string, newRole: UserRole) => void;
   onModerateUser: (action: 'kick' | 'ban' | 'silence' | 'unsilence' | 'respawn' | 'jump', targetPeerId: string) => void;
+  onRespawnSelf?: () => void;
   defaultConfig: DefaultPermissionsConfig;
   onUpdateDefaultConfig: (config: DefaultPermissionsConfig) => void;
   inventoryItems: InventoryItem[];
@@ -87,6 +88,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   isMuted,
   onToggleMute,
   onOpenSaveLoad,
+  onRespawnSelf,
 }) => {
   const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'splats' | 'controls'>('session');
   const [sessionSubTab, setSessionSubTab] = useState<'users' | 'permissions'>('users');
@@ -342,8 +344,19 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                           </div>
                         </div>
 
-                        {/* Moderation Action Buttons underneath */}
-                        {!user.isSelf && (
+                        {/* Action Buttons underneath */}
+                        {user.isSelf ? (
+                          <div className="pt-3 border-t border-slate-700/60 flex items-center flex-wrap gap-2">
+                            {onRespawnSelf && (
+                              <button
+                                onClick={() => { onRespawnSelf(); onClose(); }}
+                                className="px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-medium flex items-center gap-1.5 transition"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" /> Respawn
+                              </button>
+                            )}
+                          </div>
+                        ) : (
                           <div className="pt-3 border-t border-slate-700/60 flex items-center flex-wrap gap-2">
                             <button
                               onClick={() => { onModerateUser('jump', user.id); onClose(); }}

@@ -33,6 +33,7 @@ export interface PanelActionHandlerDeps {
   networkServiceRef: React.MutableRefObject<NetworkService>;
   inventoryServiceRef: React.MutableRefObject<InventoryService>;
   locomotionModeRef: React.MutableRefObject<'walk' | 'flight' | 'noclip'>;
+  allowedLocomotionsRef: React.MutableRefObject<Array<'walk' | 'flight' | 'noclip'>>;
   selectedAssetRef: React.MutableRefObject<LoadedAsset | null>;
 
   // --- React state setters ---
@@ -180,14 +181,13 @@ export function createPanelActionHandler(
     if (actionId === 'radial:right') {
       const tab = vrHudRef.current?.radialTab ?? 'general';
       if (tab === 'general') {
-        // Cycle walk -> flight -> noclip -> walk. Route through
-        // handleSetLocomotionMode (not just the React setter)
-        // so sceneEngine.locomotionMode is kept in sync, same
-        // as the desktop's onSetLocomotionMode handler chain.
-        // Read from the ref mirror to avoid the engine-init
-        // useEffect's stale closure of `locomotionMode` state.
+        // Cycle through allowed locomotion modes only.
+        // Route through handleSetLocomotionMode (not just the React
+        // setter) so sceneEngine.locomotionMode is kept in sync.
         const cur = locomotionModeRef.current;
-        const next = cur === 'walk' ? 'flight' : cur === 'flight' ? 'noclip' : 'walk';
+        const allowed = allowedLocomotionsRef.current;
+        const idx = allowed.indexOf(cur);
+        const next = allowed[(idx + 1) % allowed.length] ?? 'walk';
         handleSetLocomotionMode(next);
       } else {
         // Cycle auto -> precision -> palm -> laser -> auto.

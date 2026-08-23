@@ -6,6 +6,44 @@ All notable changes made during this session. Sorted by category.
 
 ## 🐛 Bug Fixes
 
+### Texture Anisotropic Slider Not Interactive in Pointer-Lock (High)
+- **`src/components/SceneInspectorWindow.tsx`** — Replaced `<input type="range">`
+  with `-`/`+` increment/decrement buttons and a value display. The CSS3D panel
+  uses pointer-lock with synthetic events via `SpatialPanelManager.handleLockedClick`,
+  which dispatches pointerdown/pointerup/click but never mousemove — so native
+  range inputs can never be dragged. Additionally, `stopPropagation` on pointerDown
+  to prevent view-freezing also blocked the browser's native drag handling.
+  Buttons use plain `onClick` which works perfectly with the synthetic click system.
+
+### Texture FilterMode Dropdown Not Working in Pointer-Lock (High)
+- **`src/components/SceneInspectorWindow.tsx`** — Replaced native `<select>` dropdown
+  with toggle buttons (Linear / Pt / A8 / A16) using the same pattern as WrapMode
+  buttons. Native `<select>` dropdowns cannot open in pointer-lock mode and
+  `stopPropagation` on pointerDown broke interaction. Updated `filterMode` state
+  values from `'Bilinear / Trilinear'` to `'Linear'`/`'Point'`/`'Aniso8'`/`'Aniso16'`
+  for consistency. Button labels shortened with `title` tooltips for full names.
+
+### Texture Operations Parse Error (High)
+- **`src/components/SceneInspectorWindow.tsx`** — OXC parser (Vite) choked on
+  deeply nested inline arrow functions `c => { const m = ... }` inside JSX
+  expression arrays. Refactored texture operation buttons to use an IIFE
+  `(() => { ... })()` that defines the array with multi-line arrow functions,
+  separating JS-heavy logic from JSX expression context.
+
+### StaticTexture2D Showing on Objects Without Textures (Medium)
+- **`src/components/SceneInspectorWindow.tsx`** — Added `hasTexture` field to
+  `meshStats` state, set to `true` when any material has a `.map` texture during
+  traversal. Changed the StaticTexture2D visibility condition from
+  `meshStats.submeshes > 0 && meshStats.triangles > 0` (true for ANY mesh)
+  to `meshStats.hasTexture` (true only when a texture is loaded). The primitive
+  cube no longer shows a StaticTexture2D section.
+
+### Parse Error on meshStats useState (High)
+- **`src/components/SceneInspectorWindow.tsx`** — Comment and `const` declaration
+  were accidentally merged onto the same line: `// Mesh stats    const [meshStats...`
+  The `//` comment swallowed the `const` keyword, making subsequent lines bare
+  statements. Split back to separate lines.
+
 ### Loading Placeholder Text Upside Down (High)
 - **`src/App.tsx`** — Removed redundant `spriteTexture.repeat.y = -1` and
   `spriteTexture.offset.y = 1` from `createLoadingPlaceholder`. These were
@@ -124,6 +162,52 @@ All notable changes made during this session. Sorted by category.
 
 ## ✨ Features
 
+### Collider Component System (High)
+- **`src/components/collider/ColliderComponent.ts`** (new) — Defines
+  `BoxColliderComponent` and `MeshColliderComponent` interfaces with
+  Resonite-faithful fields: `enabled`, `offset`, `colliderType` (Static/NoCollision),
+  `mass`, `characterCollider`, `ignoreRaycasts`, `size` (box), `mesh` (mesh).
+  Helper functions: `getCollider()`, `setCollider()`, `serializeCollider()`,
+  `deserializeCollider()`, `buildBoxColliderWorldBox()`.
+- **`src/engine/CollisionManager.ts`** (new) — Manages physics world: collects
+  all collider components, rebuilds world-space OBBs each frame, provides
+  `resolvePosition()` (desktop XZ push-out), `resolveWorldPosition()` (VR inverse-
+  treadmill XZ push-out), and `getGroundedFloorY()` (slope-aware grounding via
+  sphere-vs-shape contact normals with dynamic velocity-scaled tolerance).
+  Sphere-vs-OBB test handles rotation correctly via local-space transformation.
+  Sphere-vs-triangle test for MeshCollider components extracts triangles from
+  BufferGeometry at registry build time.
+- **`src/engine/SceneEngine.ts`** — Desktop walk/flight locomotion calls
+  `collisionManager.resolvePosition()` for horizontal collision. VR walk/flight
+  calls `collisionManager.resolveWorldPosition()`. Floor gets thin BoxCollider
+  (100×0.1×100, accounting for -90° X rotation). Gravity + floor check replaced
+  with `getGroundedFloorY()` for standing on top of colliders and slopes.
+  Collision registry auto-rebuilds periodically as safety net.
+- **`src/components/SceneInspectorWindow.tsx`** — Full Collider component section
+  with "Add BoxCollider" / "Add MeshCollider" buttons, ToggleSwitches for
+  enabled/characterCollider/ignoreRaycasts, number inputs for mass/size/offset,
+  and "Remove Collider" button. `onRebuildCollisionRegistry` callback prop wired
+  through App.tsx for immediate registry rebuild on component changes.
+- **`src/services/NetworkService.ts`** — Added `collider` field to `AssetSpawnData`,
+  `InspectorUpdateData`, and scene snapshot interfaces.
+- **`src/App.tsx`** — All spawn receive paths apply collider data. Inspector
+  updates broadcast collider changes. Scene snapshots include collider for
+  late-join sync. Wired `onRebuildCollisionRegistry` to `CollisionManager.rebuild()`.
+- **`src/components/RadialContextMenu.tsx`** — Collision toggle now properly
+  enables/disables the CollisionManager. Shows ON/OFF sublabel.
+
+### Delete/Copy Buttons on Component Headers (Medium)
+- **`src/components/SceneInspectorWindow.tsx`** — Added Copy and Delete (trash)
+  buttons to all component headers, matching Resonite's inspector UI pattern:
+  - Grabbable: Copy (JSON to clipboard) + Delete (reset to defaults)
+  - Collider: Copy + Delete (removes collider component)
+  - Material: Copy (copies matProps JSON)
+  - StaticMesh: Copy added alongside existing Delete button
+  - StaticTexture2D: Copy (copies texProps JSON)
+  - Light Source: Already had both (no change)
+  Each button has `stopPropagation` to prevent collapsing the section, and
+  hover colors matching the component's theme.
+
 ### Portal-Based Tooltip System for Toolbar & Navbar (Medium)
 - **`src/components/Tooltip.tsx`** (new) — Portal-based Tooltip component that
   renders tooltip text via `ReactDOM.createPortal` to `document.body`, escaping
@@ -190,6 +274,32 @@ All notable changes made during this session. Sorted by category.
 - **`src/engine/AssetManager.ts`** — New `registerOnVideoPlaybackChanged(cb)`
   subscription mechanism for video state changes that happen outside the normal
   `applyVideoState` path (currently: the `ended` event).
+
+### LocomotionPermissions Component (High)
+- **`src/engine/EnvironmentManager.ts`** — Added `LocomotionPermissions` interface
+  with `allowedLocomotions: LocomotionType[]` and `scalingEnabled: boolean`.
+  Added `locomotion` field to `EnvironmentSettings` with default all-modes-allowed.
+  Persisted automatically via `SavedScene.environment` in scene save/load.
+- **`src/App.tsx`** — Added `allowedLocomotionsRef` to mirror the env settings.
+  `handleSetLocomotionMode` now rejects disallowed modes. Locomotion cycling
+  in both keyboard handler and radial menu skips disallowed modes. A `useEffect`
+  clamps the current locomotion when the allowed list shrinks.
+  `locomotionPermissions` and `onUpdateLocomotionPermissions` props now passed
+  to each `<SceneInspectorWindow>`.
+- **`src/handlers/createPanelActionHandler.ts`** — Added `allowedLocomotionsRef`
+  to `PanelActionHandlerDeps`. Locomotion cycling (radial right-click) now
+  iterates only through allowed modes.
+- **`src/components/RadialContextMenu.tsx`** — Added `allowedLocomotions` prop.
+  `handleNextLocomotion` cycles through allowed modes only.
+- **`src/components/WorldEnvironmentModal.tsx`** — Added LocomotionPermissions
+  UI section with toggle buttons for Walk/Flight/Noclip and a Self-Scale
+  toggle, matching Resonite's LocomotionPermissions component layout.
+- **`src/components/SceneInspectorWindow.tsx`** — Added LocomotionPermissions
+  component section on the World Root slot with toggle buttons for each
+  locomotion mode and a Self-Scale toggle, styled as a Resonite-faithful
+  inspector component card.
+- **`src/engine/VRHUDManager.ts`** — Added default `locomotion` to fallback
+  environment settings.
 
 ---
 

@@ -7,6 +7,8 @@ import { SparkRenderer } from '@sparkjsdev/spark';
 import { VRInputManager } from './VRInputManager.ts';
 import { SpatialPanelManager } from './SpatialPanelManager.ts';
 import type { EnvironmentManager } from './EnvironmentManager.ts';
+import { CollisionManager } from './CollisionManager.ts';
+import { DEFAULT_COMMON_SPAWN_AREA, computeSpawnPosition, type CommonSpawnAreaComponent } from '../components/spawn/CommonSpawnAreaComponent.ts';
 
 export interface GraphicsSettings {
   resolutionScale: number; // 0.5 to 2.0
@@ -147,6 +149,9 @@ export class SceneEngine {
     triangles: 0
   };
   
+  /** Manages collider components for avatar collision detection. */
+  public collisionManager!: CollisionManager;
+
   public isVRHandGrabbing?: (side: 'left' | 'right') => boolean;
   private updateCallbacks: Set<SceneUpdateCallback> = new Set();
   // Callbacks fired after `renderer.render()` completes each frame.
@@ -166,14 +171,25 @@ export class SceneEngine {
   private lastTime = performance.now();
   private frameCount = 0;
   private fpsTimer = 0;
+  private _collisionFrameCount = 0;
   public isVRMode = false;
   private vrButtonElement: HTMLElement | null = null;
   public environmentManager: EnvironmentManager | null = null;
+  /** The spawn point object with CommonSpawnArea component. */
+  public spawnPointObj!: THREE.Object3D;
 
   public cameraMode: 'orbit' | 'first-person' = 'first-person';
   public locomotionMode: 'walk' | 'flight' | 'noclip' = 'walk';
   private verticalVelocity = 0;
   private isGrounded = true;
+
+  // ── Respawn safety net ──────────────────────────────────────────────
+  /** World-space position the player returns to on respawn. */
+  public respawnPoint = new THREE.Vector3(0, 1.6, 3);
+  /** If the player's eye drops below this Y, auto-respawn triggers. */
+  public respawnThreshold = -50;
+  /** Callback fired after auto or manual respawn (for VR HUD notification etc). */
+  public onRespawn?: () => void;
   // Toggled by the Z key (per Controls-Keybinds.txt). When true, walking
   // movement in any locomotion mode slows to ~30% of base speed. Persists
   // across orbit <-> first-person mode switches until pressed again.
@@ -311,6 +327,31 @@ export class SceneEngine {
     // 6. Floor & Grid
     this.createFloor();
 
+    // 6b. Skybox object with SkyboxComponent
+    const skyboxObj = new THREE.Object3D();
+    skyboxObj.name = 'Skybox';
+    skyboxObj.userData.skybox = {
+      enabled: true,
+      isActive: true,
+      material: {
+        type: 'solid',
+        color: '#0b1329',
+      },
+    };
+    // Disable grabbable for the Skybox — it's a background element, not an interactive object
+    skyboxObj.userData.grabbable = { enabled: false };
+    this.worldRoot.add(skyboxObj);
+
+    // 6c. Spawn point object with CommonSpawnArea component
+    this.spawnPointObj = new THREE.Object3D();
+    this.spawnPointObj.name = 'Spawn';
+    this.spawnPointObj.position.set(0, 0, 3);
+    this.spawnPointObj.userData.commonSpawnArea = {
+      ...DEFAULT_COMMON_SPAWN_AREA,
+    };
+    this.spawnPointObj.userData.grabbable = { enabled: false };
+    this.worldRoot.add(this.spawnPointObj);
+
     // 7. WebXR Setup
     this.setupXR();
 
@@ -322,7 +363,27 @@ export class SceneEngine {
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('mousemove', this.onMouseMoveForLook);
 
-    // 9. Start Loop
+    // 9. Collision manager (after worldRoot exists)
+    this.collisionManager = new CollisionManager(this.worldRoot);
+    // Register the default floor as a thin BoxCollider
+    const floorCollider: import('../components/collider/ColliderComponent.ts').BoxColliderComponent = {
+      type: 'box',
+      enabled: true,
+      offset: { x: 0, y: 0, z: 0 },
+      colliderType: 'Static',
+      mass: 1,
+      characterCollider: true,
+      ignoreRaycasts: false,
+      // Size is in the mesh's LOCAL space. The floor mesh is rotated
+      // -90° around X (PlaneGeometry lies in XY, rotation flips it to XZ).
+      // After rotation: local X→world X, local Y→world -Z, local Z→world Y.
+      // So the thin dimension must be local Z (maps to world Y = height).
+      size: { x: 100, y: 100, z: 0.1 },
+    };
+    (this.floorMesh.userData as Record<string, unknown>).collider = floorCollider;
+    this.collisionManager.rebuildRegistry();
+
+    // 10. Start Loop
     this.renderer.setAnimationLoop(this.animate);
   }
 
@@ -568,6 +629,15 @@ export class SceneEngine {
   }
 
   /**
+   * Rebuild the collision manager's registry of colliders.
+   * Call after adding/removing collider components on objects,
+   * or after loading a scene with collider data.
+   */
+  public rebuildCollisionRegistry(): void {
+    this.collisionManager.rebuildRegistry();
+  }
+
+  /**
    * Register a callback fired after every successful settings apply
    * (including the post-VR-entry default cap, see sessionstart).
    * Used by App.tsx to mirror engine settings into React state so
@@ -733,6 +803,16 @@ export class SceneEngine {
       this.fpsTimer = 0;
     }
 
+    // Update collision AABBs for all registered colliders (every frame).
+    // Also auto-rebuild the registry every 60 frames (~1 second) to
+    // catch colliders added outside the inspector (e.g. script, network).
+    this.collisionManager.updateWorldBoxes();
+    this._collisionFrameCount++;
+    if (this._collisionFrameCount >= 60) {
+      this._collisionFrameCount = 0;
+      this.collisionManager.rebuildRegistry();
+    }
+
     if (this.isVRMode) {
       // VR locomotion reads from `vrInput.left.stick` / `right.stick`
       // and writes to `cameraRig` (the HMD-tracked camera's own matrix
@@ -754,6 +834,9 @@ export class SceneEngine {
       // the floor at-or-below origin so the HMD-tracked eye height
       // (~1.6m) means the user is always at least eye-height above the
       // floor — matches desktop fpMovement's standing-height grounding.
+      // TODO: This currently hardcodes the floor at Y=0. To support standing
+      // on boxes/slopes in VR, we'd need to query collisionManager for the
+      // floor height at the HMD's horizontal position and clamp accordingly.
       // Note: rig.position.y is intentionally left alone here — three.js
       // bypasses rig parenting during an active XR session so writing
       // to it would have no effect on what the user sees.
@@ -772,6 +855,18 @@ export class SceneEngine {
       } else if (this.cameraMode === 'first-person') {
         this.updateFirstPersonMovement(delta);
       }
+    }
+
+    // ── Fall-off-world safety net ────────────────────────────────────
+    // If the player's eye position drops below the respawn threshold,
+    // automatically teleport them back. This prevents the user from
+    // falling forever if they walk off the floor edge or collision
+    // glitches. Applies to both desktop and VR.
+    const playerEyeY = this.isVRMode
+      ? -this.worldRoot.position.y + this.camera.position.y
+      : this.camera.position.y;
+    if (playerEyeY < this.respawnThreshold) {
+      this.respawn();
     }
 
     // Call registered animation listeners
@@ -881,7 +976,7 @@ export class SceneEngine {
 
     // Handle vertical movement depending on locomotion mode
     if (this.locomotionMode === 'walk') {
-      // Jumping
+      // Jumping — only when grounded (prevents mid-air infinite jumps)
       if (this.keysPressed['Space'] && this.isGrounded) {
         this.verticalVelocity = 6.5; // Jump impulse
         this.isGrounded = false;
@@ -889,13 +984,6 @@ export class SceneEngine {
       // Gravity
       this.verticalVelocity -= 18.0 * delta;
       this.camera.position.y += this.verticalVelocity * delta;
-
-      // Floor collision
-      if (this.camera.position.y <= 1.6) {
-        this.camera.position.y = 1.6;
-        this.verticalVelocity = 0;
-        this.isGrounded = true;
-      }
     } else {
       // Flight and Noclip: Space ascends, C / Ctrl descends
       if (this.keysPressed['Space']) moveDir.y += 1;
@@ -913,16 +1001,46 @@ export class SceneEngine {
         moveDir.applyQuaternion(this.camera.quaternion);
       }
       
-      const targetPos = this.camera.position.clone().addScaledVector(moveDir, speed);
-
-      // Simple collision prevention for walk and flight (noclip has NO collision!)
-      if (this.locomotionMode !== 'noclip') {
-        if (targetPos.y < 0.8) targetPos.y = 0.8;
-      }
-      this.camera.position.copy(targetPos);
+      this.camera.position.addScaledVector(moveDir, speed);
     }
 
-    // Floor height boundary for flight mode
+    // Full collision resolution for walk/flight modes.
+    // resolvePosition uses sphere-vs-OBB which naturally handles both
+    // horizontal (walking into walls) and vertical (landing on platforms)
+    // via the contact normal — no separate floor check needed.
+    if (this.locomotionMode === 'walk' || this.locomotionMode === 'flight') {
+      const resolved = this.collisionManager.resolvePosition(this.camera.position);
+      this.camera.position.copy(resolved);
+    }
+
+    // Grounding check for walk mode — used to allow/disallow jumping.
+    // getGroundedFloorY finds the highest collider surface near the player's
+    // feet and returns it if the feet are close enough (within GROUND_TOLERANCE).
+    if (this.locomotionMode === 'walk') {
+      const groundY = this.collisionManager.getGroundedFloorY(
+        this.camera.position.y,
+        this.camera.position.x,
+        this.camera.position.z,
+        this.verticalVelocity,
+        delta,
+      );
+      if (groundY > -Infinity) {
+        // Player is on a surface — clamp to standing height
+        const standingHeight = groundY + 1.6;
+        if (this.camera.position.y <= standingHeight) {
+          this.camera.position.y = standingHeight;
+        }
+        this.verticalVelocity = 0;
+        this.isGrounded = true;
+      } else {
+        // No collider surface found below the player — they are airborne.
+        // There is NO hardcoded infinite floor; collision comes only from
+        // objects with collider components (e.g. the floor mesh's BoxCollider).
+        this.isGrounded = false;
+      }
+    }
+
+    // Flight-mode floor height boundary
     if (this.locomotionMode === 'flight' && this.camera.position.y < 0.8) {
       this.camera.position.y = 0.8;
     }
@@ -986,7 +1104,15 @@ export class SceneEngine {
     // writes the HMD pose straight to camera.matrixWorld, ignoring any
     // scene-graph ancestors), so the user saw zero motion regardless of
     // the stick input.
-    this.worldRoot.position.addScaledVector(move, -speed);
+    // Apply movement, then resolve collisions for walk/flight (noclip = no collision)
+    const proposedWorldRootPos = this.worldRoot.position.clone().addScaledVector(move, -speed);
+    if (this.locomotionMode !== 'noclip') {
+      this.camera.getWorldPosition(this._vrUserPosTmp);
+      const resolved = this.collisionManager.resolveWorldPosition(this._vrUserPosTmp, proposedWorldRootPos);
+      this.worldRoot.position.copy(resolved);
+    } else {
+      this.worldRoot.position.copy(proposedWorldRootPos);
+    }
 
     // Flight-mode floor clamp (walk handled separately by gravity in
     // `animate()`; noclip has no clamp). World camera height is purely
@@ -1049,6 +1175,40 @@ export class SceneEngine {
     if (!this.isGrounded) return;
     this.verticalVelocity = 6.5;
     this.isGrounded = false;
+  }
+
+  // ── Respawn ───────────────────────────────────────────────────────
+  /**
+   * Teleport the player back to the respawn point.
+   * Works for both desktop and VR: desktop moves the camera directly;
+   * VR resets worldRoot so the treadmill world slides back to origin.
+   */
+  public respawn(): void {
+    this.verticalVelocity = 0;
+    this.isGrounded = true;
+    // Read spawn position from the CommonSpawnArea component if available.
+    // Falls back to the legacy respawnPoint property.
+    let spawnPos = this.respawnPoint;
+    if (this.spawnPointObj) {
+      const area = this.spawnPointObj.userData?.commonSpawnArea as CommonSpawnAreaComponent | undefined;
+      if (area?.enabled) {
+        spawnPos = computeSpawnPosition(this.spawnPointObj);
+        // Ensure the player spawns above the floor (eye height)
+        spawnPos.y = Math.max(spawnPos.y, 1.6);
+      }
+    }
+    if (this.isVRMode) {
+      // VR: worldRoot was offset during movement — snap it back to origin
+      // so the spawn point aligns with the HMD-tracked standing position.
+      this.worldRoot.position.set(0, 0, 0);
+    } else {
+      this.camera.position.copy(spawnPos);
+      if (this.cameraMode === 'orbit') {
+        this.controls.target.set(spawnPos.x, spawnPos.y - 0.6, spawnPos.z);
+        this.controls.update();
+      }
+    }
+    this.onRespawn?.();
   }
 
   /**

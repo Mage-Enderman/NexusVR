@@ -29,6 +29,7 @@ export interface ContextMenuContext {
   selectionMode?: 'single' | 'multi';
   gizmoMode?: 'translate' | 'rotate' | 'scale';
   gizmoSpace?: 'local' | 'world';
+  collisionEnabled?: boolean;
   // Actions
   onUndo?: () => void;
   onRedo?: () => void;
@@ -53,6 +54,7 @@ export interface ContextMenuContext {
   onSetGizmoMode?: (mode: 'translate' | 'rotate' | 'scale') => void;
   onToggleGizmoSpace?: () => void;
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
+  onToggleCollision?: () => void;
 }
 
 /**
@@ -471,10 +473,11 @@ export function buildActiveMenuItems(
       {
         id: 'collision',
         label: 'Collision',
-        subLabel: 'Toggle',
-        color: '#a855f7',
+        subLabel: context.collisionEnabled !== false ? 'ON' : 'OFF',
+        color: context.collisionEnabled !== false ? '#a855f7' : '#64748b',
         icon: 'shield',
         closeOnClick: false,
+        action: context.onToggleCollision,
       },
       {
         id: 'undo',

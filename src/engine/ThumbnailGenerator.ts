@@ -101,9 +101,9 @@ export async function generateSceneThumbnail(worldRoot: THREE.Object3D): Promise
 
     const rootClone = new THREE.Group();
 
-    // Clone visible meshes excluding skybox
+    // Clone visible meshes excluding skybox/stars
     worldRoot.children.forEach((child) => {
-      if (child.name === 'Skybox' || child.name === 'VRHUDGroup') return;
+      if (child.name === 'Stars' || child.name === 'Skybox' || child.name === 'Spawn' || child.name === 'VRHUDGroup') return;
       const c = child.clone(true);
       rootClone.add(c);
     });

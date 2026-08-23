@@ -4,6 +4,15 @@ export type AtmospherePreset = 'cyber-nebula' | 'sunset-horizon' | 'studio-neutr
 export type GridSizePreset = 'studio-20' | 'standard-60' | 'arena-200';
 export type GridColorPreset = 'cyan' | 'purple' | 'monochrome';
 
+export type LocomotionType = 'walk' | 'flight' | 'noclip';
+
+export interface LocomotionPermissions {
+  /** Allowed locomotion modes for users in this world. */
+  allowedLocomotions: LocomotionType[];
+  /** Whether users are allowed to self-scale. */
+  scalingEnabled: boolean;
+}
+
 export interface EnvironmentSettings {
   atmosphere: AtmospherePreset;
   gridVisible: boolean;
@@ -11,6 +20,7 @@ export interface EnvironmentSettings {
   gridColor: GridColorPreset;
   ambientIntensity: number;
   dirLightIntensity: number;
+  locomotion: LocomotionPermissions;
 }
 
 export class EnvironmentManager {
@@ -41,6 +51,10 @@ export class EnvironmentManager {
     gridColor: 'cyan',
     ambientIntensity: 0.4,
     dirLightIntensity: 1.5,
+    locomotion: {
+      allowedLocomotions: ['walk', 'flight', 'noclip'],
+      scalingEnabled: true,
+    },
   };
 
   private renderer: THREE.WebGLRenderer;
@@ -112,7 +126,7 @@ export class EnvironmentManager {
     });
 
     this.starfieldMesh = new THREE.Points(geometry, material);
-    this.starfieldMesh.name = 'Skybox';
+    this.starfieldMesh.name = 'Stars';
     this.starfieldMesh.visible = false;
     // Parented to worldRoot (not scene) so the starfield rotates with
     // the world when the VR player smooth-turns. Without this, the

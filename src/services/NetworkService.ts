@@ -44,6 +44,7 @@ export interface AssetSpawnData {
   materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
   grabbable?: Record<string, unknown>;
+  collider?: Record<string, unknown>;
   // Phase 3A: when the host imports a video too large for the sync
   // envelope, the spawn carries `fileData: undefined` +
   // `fileDataOversized: true` AND this streamingHint. Receivers use it
@@ -111,6 +112,7 @@ export interface InspectorUpdateData {
   rotatorSpeed?: { x: number; y: number; z: number } | null;
   bobbingSpeed?: number | null;
   grabbable?: Record<string, unknown> | null;
+  collider?: Record<string, unknown> | null;
 
   // Hierarchy actions
   hierarchyAction?: {

@@ -118,7 +118,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         <div className="hidden lg:block h-5 w-[1px] bg-slate-700/50 mx-0.5" />
 
-        <Tooltip text="Dash Menu (TAB)">
+        <Tooltip text="Dash Menu">
           <button
             onClick={onOpenDashMenu}
             className="btn btn-glass text-xs py-2 px-3 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/10 flex items-center gap-1.5"

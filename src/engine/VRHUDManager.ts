@@ -2770,7 +2770,11 @@ export class VRHUDManager {
     gridSize: 'standard-60',
     gridColor: 'cyan',
     ambientIntensity: 1.2,
-    dirLightIntensity: 1.5
+    dirLightIntensity: 1.5,
+    locomotion: {
+      allowedLocomotions: ['walk', 'flight', 'noclip'],
+      scalingEnabled: true,
+    },
   };
 
   public dispose(): void {

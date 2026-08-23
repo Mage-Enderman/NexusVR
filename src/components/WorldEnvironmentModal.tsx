@@ -1,6 +1,6 @@
 import React from 'react';
-import { X, Globe, Sun, Grid, Sparkles, Moon, Sunset, Camera, Eye } from 'lucide-react';
-import type { EnvironmentSettings, AtmospherePreset } from '../engine/EnvironmentManager.ts';
+import { X, Globe, Sun, Grid, Sparkles, Moon, Sunset, Camera, Eye, Footprints, Plane, Wind } from 'lucide-react';
+import type { EnvironmentSettings, AtmospherePreset, LocomotionType } from '../engine/EnvironmentManager.ts';
 
 interface WorldEnvironmentModalProps {
   settings: EnvironmentSettings;
@@ -157,6 +157,85 @@ export const WorldEnvironmentModal: React.FC<WorldEnvironmentModalProps> = ({
                 onChange={(e) => onUpdateSettings({ dirLightIntensity: parseFloat(e.target.value) })}
                 className="w-full accent-amber-400 cursor-pointer"
               />
+            </div>
+          </div>
+        </div>
+
+        {/* Locomotion Permissions */}
+        <div className="bg-slate-950 rounded-xl border border-slate-700/80 overflow-hidden shadow-xl">
+          <div className="px-3 py-2 bg-gradient-to-r from-amber-900/40 via-slate-900 to-amber-900/40 border-b border-amber-500/30">
+            <div className="flex items-center gap-2">
+              <Footprints className="w-4 h-4 text-amber-400" />
+              <span className="font-black text-amber-300 tracking-wider text-sm">Locomotion Permissions</span>
+              <span className="text-[10px] text-slate-500 font-normal ml-1">Component</span>
+            </div>
+            <p className="text-[10px] text-slate-400 mt-1">Control what locomotion modes users can access in this world.</p>
+          </div>
+          <div className="p-3 space-y-3">
+            {/* Allowed locomotion modes */}
+            <div className="space-y-2">
+              <span className="text-xs font-semibold text-slate-300">Allowed Locomotion Modes</span>
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { id: 'walk' as LocomotionType, label: 'Walk', icon: Footprints, color: 'emerald' },
+                  { id: 'flight' as LocomotionType, label: 'Flight', icon: Plane, color: 'cyan' },
+                  { id: 'noclip' as LocomotionType, label: 'Noclip', icon: Wind, color: 'purple' },
+                ]).map(({ id, label, icon: Icon, color }) => {
+                  const allowed = settings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+                  const isEnabled = allowed.includes(id);
+                  return (
+                    <button
+                      key={id}
+                      onClick={() => {
+                        const current = settings.locomotion?.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+                        const next = isEnabled ? current.filter((m) => m !== id) : [...current, id];
+                        // Ensure at least one mode is always allowed
+                        if (next.length === 0) return;
+                        onUpdateSettings({
+                          locomotion: {
+                            ...settings.locomotion,
+                            allowedLocomotions: next,
+                            scalingEnabled: settings.locomotion?.scalingEnabled ?? true,
+                          },
+                        });
+                      }}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition ${
+                        isEnabled
+                          ? `bg-${color}-500/20 text-${color}-300 border-${color}-500/40`
+                          : 'bg-slate-800/50 text-slate-500 border-slate-700/50 hover:bg-slate-700/50'
+                      }`}
+                    >
+                      <Icon className="w-3.5 h-3.5" />
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            {/* Scaling permission */}
+            <div className="flex items-center justify-between py-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-slate-300">Self-Scale</span>
+                <span className="text-[10px] text-slate-500">Allow users to resize themselves</span>
+              </div>
+              <button
+                onClick={() => {
+                  const current = settings.locomotion ?? { allowedLocomotions: ['walk', 'flight', 'noclip'] as LocomotionType[], scalingEnabled: true };
+                  onUpdateSettings({
+                    locomotion: {
+                      ...current,
+                      scalingEnabled: !current.scalingEnabled,
+                    },
+                  });
+                }}
+                className={`w-10 h-5 rounded-full transition-colors relative ${
+                  (settings.locomotion?.scalingEnabled ?? true) ? 'bg-emerald-500' : 'bg-slate-600'
+                }`}
+              >
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                  (settings.locomotion?.scalingEnabled ?? true) ? 'translate-x-5' : 'translate-x-0.5'
+                }`} />
+              </button>
             </div>
           </div>
         </div>

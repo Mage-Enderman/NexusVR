@@ -49,6 +49,7 @@ export interface RadialContextMenuProps {
   position: { x: number; y: number };
   onClose: () => void;
   locomotionMode: 'walk' | 'flight' | 'noclip';
+  allowedLocomotions: Array<'walk' | 'flight' | 'noclip'>;
   onSetLocomotionMode: (mode: 'walk' | 'flight' | 'noclip') => void;
   scalingEnabled: boolean;
   onToggleScaling: () => void;
@@ -84,6 +85,8 @@ export interface RadialContextMenuProps {
   gizmoSpace?: 'local' | 'world';
   onToggleGizmoSpace?: () => void;
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
+  collisionEnabled?: boolean;
+  onToggleCollision?: () => void;
 }
 
 /**
@@ -212,6 +215,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   position,
   onClose,
   locomotionMode,
+  allowedLocomotions = ['walk', 'flight', 'noclip'],
   onSetLocomotionMode,
   scalingEnabled,
   onToggleScaling,
@@ -247,6 +251,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   gizmoSpace,
   onToggleGizmoSpace,
   onSpawnPrimitive,
+  collisionEnabled = true,
+  onToggleCollision,
 }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'grab' | 'held' | 'light' | 'dev'>('general');
   const [menuStack, setMenuStack] = useState<ContextMenuItemDef[][]>([]);
@@ -309,9 +315,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   }, [isOpen, position]);
 
   const handleNextLocomotion = () => {
-    const next: typeof locomotionMode =
-      locomotionMode === 'walk' ? 'flight' :
-      locomotionMode === 'flight' ? 'noclip' : 'walk';
+    const idx = allowedLocomotions.indexOf(locomotionMode);
+    const next = allowedLocomotions[(idx + 1) % allowedLocomotions.length] ?? 'walk';
     onSetLocomotionMode(next);
   };
 
@@ -366,6 +371,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
     gizmoSpace,
     onToggleGizmoSpace,
     onSpawnPrimitive,
+    collisionEnabled,
+    onToggleCollision,
   };
 
   const currentItems = menuStack.length > 0
