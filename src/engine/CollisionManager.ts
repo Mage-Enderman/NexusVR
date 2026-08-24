@@ -175,25 +175,6 @@ export class CollisionManager {
     const mat = entry.obj.matrixWorld;
     const temp = new THREE.Vector3();
 
-    for (const tri of entry.triangles) {
-      // These are local-space copies; transform to world
-      // We need the original local positions, so we store them
-      // and re-transform each frame. To avoid extra storage,
-      // we store the local positions in a/b/c and overwrite with world.
-      // This means we need to store local copies separately.
-      // For now, we re-extract from geometry (slower but correct).
-    }
-
-    // Actually, we need local copies. Let me restructure:
-    // Store local triangles in the entry, and produce world triangles on demand.
-    // For simplicity, we'll just re-extract and transform each frame.
-    // This is called at most ~10 times per frame (number of mesh colliders).
-    // The extraction itself is done once in rebuildRegistry; we only transform here.
-
-    // We need to store local triangles separately. Let me use a different approach:
-    // store local a/b/c in the WorldTriangle and overwrite with world coords.
-    // But we lose the local coords. Instead, store local coords in separate arrays.
-
     // Simplest correct approach: re-extract geometry positions each frame.
     // This is wasteful but mesh colliders are rare. Optimize later if needed.
     const geom = this.findMeshGeometry(entry.obj);
@@ -417,7 +398,6 @@ export class CollisionManager {
   ): { push: THREE.Vector3; normal: THREE.Vector3 } | null {
     let bestPush: THREE.Vector3 | null = null;
     let bestNormal: THREE.Vector3 | null = null;
-    let bestNormalY = -1;
 
     for (const entry of this.colliders) {
       if (!entry.collider.characterCollider) continue;
@@ -433,7 +413,6 @@ export class CollisionManager {
           if (!bestPush || result.push.lengthSq() > bestPush.lengthSq()) {
             bestPush = result.push;
             bestNormal = result.normal;
-            bestNormalY = result.normal.y;
           }
         }
       } else if (entry.collider.type === 'mesh') {
@@ -443,7 +422,6 @@ export class CollisionManager {
             if (!bestPush || result.push.lengthSq() > bestPush.lengthSq()) {
               bestPush = result.push;
               bestNormal = result.normal;
-              bestNormalY = result.normal.y;
             }
           }
         }
@@ -495,8 +473,8 @@ export class CollisionManager {
     cameraY: number,
     cameraX: number,
     cameraZ: number,
-    verticalVelocity: number,
-    delta: number,
+    _verticalVelocity: number,
+    _delta: number,
   ): number {
     if (!this.enabled) return -Infinity;
 

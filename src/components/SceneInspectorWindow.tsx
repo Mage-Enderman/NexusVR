@@ -18,14 +18,15 @@ import {
   removeLightComponent
 } from '../engine/ResoniteLightSync.ts';
 import { type GrabbableComponent, DEFAULT_GRABBABLE, getGrabbable, setGrabbable } from '../components/grabbable/GrabbableComponent.ts';
-import { type ColliderComponent, type BoxColliderComponent, type MeshColliderComponent, DEFAULT_BOX_COLLIDER, DEFAULT_MESH_COLLIDER, getCollider, setCollider, serializeCollider, deserializeCollider } from '../components/collider/ColliderComponent.ts';
+import { type ColliderComponent, type BoxColliderComponent, type MeshColliderComponent, DEFAULT_BOX_COLLIDER, DEFAULT_MESH_COLLIDER, getCollider, setCollider } from '../components/collider/ColliderComponent.ts';
 import {
   type SkyboxComponent,
   type SkyboxMaterial,
+  DEFAULT_SKYBOX_SOLID,
+  DEFAULT_SKYBOX_GRADIENT,
   DEFAULT_SKYBOX_GRADIENT_COMPONENT,
-  DEFAULT_SKYBOX_SOLID_COMPONENT,
-  DEFAULT_SKYBOX_PROCEDURAL_COMPONENT,
-  DEFAULT_SKYBOX_TEXTURE_COMPONENT,
+  DEFAULT_SKYBOX_PROCEDURAL,
+  DEFAULT_SKYBOX_TEXTURE,
   getSkybox,
   setSkybox,
   applySkyboxToScene,

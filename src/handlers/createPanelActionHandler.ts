@@ -86,6 +86,7 @@ export function createPanelActionHandler(
     networkServiceRef,
     inventoryServiceRef,
     locomotionModeRef,
+    allowedLocomotionsRef,
     selectedAssetRef,
     setGrabMode,
     setScalingEnabled,

@@ -31,7 +31,7 @@ import { ShareModal } from './components/ShareModal.tsx';
 import { ChatPanel } from './components/ChatPanel.tsx';
 import { SettingsModal } from './components/SettingsModal.tsx';
 import { FileImportModal } from './components/FileImportModal.tsx';
-import { type AtmospherePreset,  EnvironmentManager } from './engine/EnvironmentManager.ts';
+import { EnvironmentManager } from './engine/EnvironmentManager.ts';
 import type { EnvironmentSettings } from './engine/EnvironmentManager.ts';
 import { WorldEnvironmentModal } from './components/WorldEnvironmentModal.tsx';
 import { AssetImportDialog } from './components/AssetImportDialog.tsx';
@@ -296,7 +296,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // Dedicated bump counter for mute-toggle re-render. Replaces the
   // previous setPeerCount(prev => prev) hack that relied on React
   // skipping no-op state updates (unreliable in React 19).
-  const [muteBump, setMuteBump] = useState<number>(0);
+
 
   const resetVideoInactivityTimer = useCallback(() => {
     if (videoInactivityTimerRef.current) {
@@ -543,7 +543,6 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     if (listener && listener.context.state === 'suspended') {
       listener.context.resume().catch(() => {});
     }
-    setMuteBump(b => b + 1);
   }, []);
 
 
@@ -4539,7 +4538,7 @@ const vrHud = new VRHUDManager(
               networkServiceRef.current.broadcastAssetUpdate(asset);
             }}
             worldRoot={sceneEngineRef.current?.worldRoot ?? null}
-            onDeleteAsset={() => handleDeleteSelected(asset)}
+            onDeleteAsset={() => handleDeleteSelected(asset ?? undefined)}
             onJumpToAsset={(jumpAsset) => {
               if (sceneEngineRef.current) {
                 sceneEngineRef.current.camera.position.set(
@@ -4666,7 +4665,7 @@ const vrHud = new VRHUDManager(
                   }
                   setActiveVideoAssetId(null);
                 }}
-                isFlipped={!!(activeVideoAsset.object3d.children.find(c => c.type === 'Mesh' && c.name !== 'Frame') as THREE.Mesh)?.scale.y === -1}
+                isFlipped={(activeVideoAsset.object3d.children.find(c => c.type === 'Mesh' && c.name !== 'Frame') as THREE.Mesh)?.scale.y === -1}
                 onFlip={() => {
                   const asset = activeVideoAsset;
                   if (!asset) return;

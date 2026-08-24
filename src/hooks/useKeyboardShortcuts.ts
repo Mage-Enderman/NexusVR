@@ -2,7 +2,8 @@ import { useEffect, useCallback } from 'react';
 import * as THREE from 'three';
 
 import type { SceneEngine } from '../engine/SceneEngine.ts';
-import type { AssetManager, LoadedAsset } from '../engine/AssetManager.ts';
+import { AssetManager } from '../engine/AssetManager.ts';
+import type { LoadedAsset } from '../engine/AssetManager.ts';
 import type { ManipulationManager, TransformMode } from '../engine/ManipulationManager.ts';
 import type { NetworkService, MaterialUpdate } from '../services/NetworkService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';

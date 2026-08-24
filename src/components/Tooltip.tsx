@@ -32,35 +32,39 @@ export const Tooltip: React.FC<TooltipProps> = ({ text, children }) => {
     });
   }, [visible]);
 
-  const trigger = React.cloneElement(children, {
-    ref: (el: HTMLElement | null) => {
-      (triggerRef as React.MutableRefObject<HTMLElement | null>).current = el;
-      // Preserve original ref if the child has one
-      const { ref } = children as any;
-      if (typeof ref === 'function') ref(el);
-      else if (ref) ref.current = el;
-    },
-    onMouseEnter: (e: React.MouseEvent) => {
-      show();
-      (children.props as any).onMouseEnter?.(e);
-    },
-    onMouseLeave: (e: React.MouseEvent) => {
-      hide();
-      (children.props as any).onMouseLeave?.(e);
-    },
-    onFocus: (e: React.FocusEvent) => {
-      show();
-      (children.props as any).onFocus?.(e);
-    },
-    onBlur: (e: React.FocusEvent) => {
-      hide();
-      (children.props as any).onBlur?.(e);
-    },
-  });
+  const mergedRef = useCallback((el: HTMLElement | null) => {
+    (triggerRef as React.MutableRefObject<HTMLElement | null>).current = el;
+    // Preserve original ref if the child has one
+    const { ref } = children as any;
+    if (typeof ref === 'function') ref(el);
+    else if (ref) ref.current = el;
+  }, [children]);
 
+  // Wrap in a span to avoid React 19's cloneElement ref limitation
   return (
     <>
-      {trigger}
+      <span
+        ref={mergedRef}
+        style={{ display: 'contents' }}
+        onMouseEnter={(e) => {
+          show();
+          (children.props as any).onMouseEnter?.(e);
+        }}
+        onMouseLeave={(e) => {
+          hide();
+          (children.props as any).onMouseLeave?.(e);
+        }}
+        onFocus={(e) => {
+          show();
+          (children.props as any).onFocus?.(e);
+        }}
+        onBlur={(e) => {
+          hide();
+          (children.props as any).onBlur?.(e);
+        }}
+      >
+        {children}
+      </span>
       {visible && ReactDOM.createPortal(
         <div
           style={{
