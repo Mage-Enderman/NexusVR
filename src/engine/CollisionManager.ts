@@ -438,7 +438,7 @@ export class CollisionManager {
    * Resolve horizontal (XZ) collision for desktop locomotion.
    * Y axis is NOT resolved here — the caller handles gravity + floor separately.
    */
-  public resolvePosition(proposedPosition: THREE.Vector3): THREE.Vector3 {
+  public resolvePosition(proposedPosition: THREE.Vector3, eyeHeight: number = PLAYER_HEIGHT): THREE.Vector3 {
     if (!this.enabled || this.colliders.length === 0) {
       return proposedPosition.clone();
     }
@@ -446,7 +446,7 @@ export class CollisionManager {
     const resolved = proposedPosition.clone();
     const bodyCenter = new THREE.Vector3(
       resolved.x,
-      resolved.y - PLAYER_HEIGHT * 0.5,
+      resolved.y - eyeHeight * 0.5,
       resolved.z,
     );
 
@@ -475,11 +475,13 @@ export class CollisionManager {
     cameraZ: number,
     _verticalVelocity: number,
     _delta: number,
+    eyeHeight: number = PLAYER_HEIGHT,
   ): number {
     if (!this.enabled) return -Infinity;
 
-    // Test a sphere at the feet level
-    const feetY = cameraY - PLAYER_HEIGHT;
+    // Test a sphere at the feet level — use the caller-supplied eyeHeight
+    // (which accounts for crouching) instead of the hardcoded PLAYER_HEIGHT.
+    const feetY = cameraY - eyeHeight;
     const feetSphere = new THREE.Vector3(cameraX, feetY + PLAYER_RADIUS, cameraZ);
 
     let highestFloor = -Infinity;

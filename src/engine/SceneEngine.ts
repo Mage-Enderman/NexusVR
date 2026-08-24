@@ -194,6 +194,15 @@ export class SceneEngine {
   // movement in any locomotion mode slows to ~30% of base speed. Persists
   // across orbit <-> first-person mode switches until pressed again.
   public slowMovement = false;
+  // ── Crouch ────────────────────────────────────────────────────────
+  // Press C in walk mode to toggle crouch. Smoothly interpolates eye
+  // height between standing (1.6m) and crouched (1.0m). The grounding
+  // check uses currentEyeHeight so the player stands at the correct
+  // height on platforms while crouched.
+  private isCrouching = false;
+  private readonly STANDING_EYE_HEIGHT = 1.6;
+  private readonly CROUCH_EYE_HEIGHT = 1.0;
+  private currentEyeHeight = 1.6;
   private keysPressed: Record<string, boolean> = {};
   private fpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private isPointerLocked = false;
@@ -904,6 +913,10 @@ export class SceneEngine {
 
     if (this.cameraMode === 'first-person') {
       this.keysPressed[e.code] = true;
+      // C key — toggle crouch in walk mode
+      if ((e.code === 'KeyC' || e.key === 'c' || e.key === 'C') && this.locomotionMode === 'walk') {
+        this.isCrouching = !this.isCrouching;
+      }
     } else if (this.cameraMode === 'orbit') {
       if (e.code === 'KeyC' || e.key === 'c' || e.key === 'C') {
         this.camera.position.y = Math.max(0.4, this.camera.position.y - 0.3);
@@ -1009,8 +1022,15 @@ export class SceneEngine {
     // horizontal (walking into walls) and vertical (landing on platforms)
     // via the contact normal — no separate floor check needed.
     if (this.locomotionMode === 'walk' || this.locomotionMode === 'flight') {
-      const resolved = this.collisionManager.resolvePosition(this.camera.position);
+      const resolved = this.collisionManager.resolvePosition(this.camera.position, this.currentEyeHeight);
       this.camera.position.copy(resolved);
+    }
+
+    // ── Crouch: smooth eye-height transition ────────────────────────
+    const targetHeight = this.isCrouching ? this.CROUCH_EYE_HEIGHT : this.STANDING_EYE_HEIGHT;
+    this.currentEyeHeight += (targetHeight - this.currentEyeHeight) * Math.min(1, delta * 30);
+    if (Math.abs(this.currentEyeHeight - targetHeight) < 0.01) {
+      this.currentEyeHeight = targetHeight;
     }
 
     // Grounding check for walk mode — used to allow/disallow jumping.
@@ -1023,11 +1043,15 @@ export class SceneEngine {
         this.camera.position.z,
         this.verticalVelocity,
         delta,
+        this.currentEyeHeight,
       );
       if (groundY > -Infinity) {
-        // Player is on a surface — clamp to standing height
-        const standingHeight = groundY + 1.6;
-        if (this.camera.position.y <= standingHeight) {
+        // Player is on a surface — clamp to current eye height (standing or crouched).
+        // Clamp both UP (falling into floor) and DOWN (crouching reduces eye height)
+        // so the camera follows the target height immediately rather than relying
+        // on gravity which can overshoot and push the player through the floor.
+        const standingHeight = groundY + this.currentEyeHeight;
+        if (this.camera.position.y !== standingHeight) {
           this.camera.position.y = standingHeight;
         }
         this.verticalVelocity = 0;

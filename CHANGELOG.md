@@ -158,6 +158,29 @@ All notable changes made during this session. Sorted by category.
   outer container and `max-h-[50vh] overflow-y-auto` as a safety net for vertical
   wrapping.
 
+### Build Compilation Errors (Critical)
+- Fixed 20+ TypeScript errors preventing `npm run build` from succeeding:
+  - **`src/components/SceneInspectorWindow.tsx`** — Wrong skybox imports
+    (imported `SkyboxComponent` defaults but code used `SkyboxMaterial` defaults).
+    Fixed to import `DEFAULT_SKYBOX_SOLID`/`GRADIENT`/`PROCEDURAL`/`TEXTURE`
+    from `SkyboxComponent.ts`. Removed unused `serializeCollider`/
+    `deserializeCollider` imports.
+  - **`src/App.tsx`** — Removed unused `AtmospherePreset` import, removed
+    dead `muteBump` state, fixed `handleDeleteSelected` null-vs-undefined
+    argument (`asset ?? undefined`), fixed `!!(o3d.scale.y === -1)`
+    boolean-to-number comparison.
+  - **`src/engine/CollisionManager.ts`** — Removed unused `tri` variable
+    in empty for-loop, removed unused `bestNormalY`, prefixed unused
+    `verticalVelocity`/`delta` params with `_`.
+  - **`src/handlers/createPanelActionHandler.ts`** — Added missing
+    `allowedLocomotionsRef` to destructured deps.
+  - **`src/hooks/useKeyboardShortcuts.ts`** — `AssetManager` was imported
+    as `type` but used as a value (`AssetManager.applyMaterialUpdate`).
+    Split into separate value and type imports.
+  - **`src/components/Tooltip.tsx`** — React 19 disallows `ref` as a prop
+    in `cloneElement`. Rewrote to wrap children in a `<span>` element
+    that holds the ref and event handlers directly.
+
 ---
 
 ## ✨ Features
@@ -314,6 +337,29 @@ All notable changes made during this session. Sorted by category.
 - **`src/App.tsx`** — Reduced from ~5,072 → ~4,768 lines (~304 lines removed).
   Hook call sits after all dependencies. Typed params object with zero hidden
   coupling.
+
+### Asset Import Handler Extraction
+- **`src/handlers/assetImportHandlers.ts`** (new, ~599 lines) — Extracted
+  from App.tsx:
+  - `createLoadingPlaceholder()` — builds the 3D loading spinner for
+    in-flight imports (icosahedron wireframe + ring + canvas-textured
+    sprite label with progress).
+  - `guessAssetType()` — file extension to AssetType mapping.
+  - `handleSpawnPrimitive()` — spawns primitive shapes (cube, sphere, etc.).
+  - `handleImportFile()` — full file import pipeline (placeholder creation,
+    network broadcast, VRM equip, inventory save).
+  - `handleImportAssetFromConfig()` — dialog-based import (URL or file).
+  - `handleSpawnFromInventory()` — spawn from inventory items.
+  - `handleEquipVrmFromInventory()` — equip VRM avatar from inventory.
+  - `getSpawnPositionInFrontOfUser()` — camera-relative spawn position.
+- Uses the same "deps object" pattern as `createPanelActionHandler.ts` —
+  all React refs and state-setters passed in once via `AssetImportHandlerDeps`
+  so handler closures always read fresh values.
+- **`src/App.tsx`** — Reduced from ~4,901 to ~4,375 lines (−526 lines, ~11%).
+  Factory call destructures returned handlers; `useEffect` syncs
+  `handleSpawnPrimitive` into the ref used by VR radial menu.
+  Removed `VIDEO_STREAMING_THRESHOLD`, `ImportConfig`, `ROLE_PERMISSIONS`
+  imports that were only used by extracted code.
 
 ---
 
