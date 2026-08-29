@@ -5,6 +5,7 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import type { ImportConfig } from '../components/AssetImportDialog.tsx';
+export type { ImportConfig };
 import type { MaterialUpdate } from '../services/NetworkService.ts';
 import { RawFilesStore } from '../services/RawFilesStore.ts';
 import { VideoStreamingService } from '../services/VideoStreamingService.ts';
@@ -549,9 +550,11 @@ export class AssetManager {
       // HAVE_METADATA, awaited before loadVideoFromStreamedSource
       // attaches the THREE texture).
       asset = await this.loadVideo(id, file.name, file, position, config);
-      // NetworkService will now strip oversized files and serve them via P2P chunks.
-      if (asset && arrayBuffer) {
-        asset.fileData = arrayBuffer;
+      if (asset) {
+        if (arrayBuffer) {
+          asset.fileData = arrayBuffer;
+        }
+        asset.url = blobUrl;
       }
     } else if (ext === 'vrm') {
       asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
@@ -702,9 +705,11 @@ export class AssetManager {
         // before the THREE texture attaches.
         if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
         asset = await this.loadVideo(id, name, blob, position, config);
-        // NetworkService will intercept large videos and serve via P2P chunks.
-        if (asset && arrayBuffer) {
-          asset.fileData = arrayBuffer;
+        if (asset) {
+          if (arrayBuffer) {
+            asset.fileData = arrayBuffer;
+          }
+          asset.url = url;
         }
       } else {
         asset = this.createMiscFileObject(id, name, arrayBuffer, 'application/octet-stream', arrayBuffer.byteLength, position);
@@ -1109,15 +1114,17 @@ export class AssetManager {
    */
 
 
-  private async loadVideo(id: string, name: string, source: string | File | Blob, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+  private async loadVideo(id: string, name: string, source: string | File | Blob | ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
     // Phase 2: source can now be a File/Blob directly — no ArrayBuffer
     // needed in JS heap. URL imports still pass through with a string
     // (the existing fetch + createObjectURL path) and pre-Phase-3A
     // callers can pass an already-allocated blob: URL string. Accept
-    // all three so internal/external callers don't have to fork.
+    // all four so internal/external callers don't have to fork.
     const video = document.createElement('video');
     video.src = typeof source === 'string'
       ? source
+      : source instanceof ArrayBuffer
+      ? URL.createObjectURL(new Blob([source], { type: 'video/mp4' }))
       : URL.createObjectURL(source);
     // We do NOT set crossOrigin='anonymous' on a blob: URL — it'd fail
     // with a SecurityError since the blob: scheme is opaque-origin and
@@ -1407,8 +1414,38 @@ export class AssetManager {
       object3d: group,
       fileData: undefined,
       isCollidable: true,
-      videoElement: video
+      videoElement: video,
+      url: typeof source === 'string' ? source : video.src,
+      subtitleCues,
+      subtitlesData: subtitlesText,
     };
+  }
+
+  public async spawnVideo(
+    source: string | File | Blob | ArrayBuffer,
+    name: string,
+    position = new THREE.Vector3(0, 1.5, 0),
+    config?: Partial<ImportConfig>,
+    customId?: string
+  ): Promise<LoadedAsset | null> {
+    const id = customId ?? `video-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const inFlight = this.inProgressImports.get(id);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      const asset = await this.loadVideo(id, name, source, position, config);
+      if (asset) {
+        this.worldRoot.add(asset.object3d);
+        this.assets.set(asset.id, asset);
+        for (const cb of this.onAssetAddedCallbacks) cb(asset);
+      }
+      return asset;
+    })();
+    this.inProgressImports.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inProgressImports.delete(id);
+    }
   }
 
   /**

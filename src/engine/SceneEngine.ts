@@ -927,8 +927,8 @@ export class SceneEngine {
 
     // CSS3DRenderer overlay — renders after WebGL so panels appear in front
     this.spatialPanelManager?.render(this.scene, this.camera);
-    // Crosshair hover: find panel element under screen center while locked
-    if (this.isPointerLocked && this.spatialPanelManager) {
+    // Crosshair hover: find panel element under screen center while locked or in first-person mode
+    if ((this.isPointerLocked || this.cameraMode === 'first-person') && this.spatialPanelManager) {
       const cx = (this.container.clientWidth  || window.innerWidth)  / 2;
       const cy = (this.container.clientHeight || window.innerHeight) / 2;
       this.spatialPanelManager.updateLockedHover(cx, cy);

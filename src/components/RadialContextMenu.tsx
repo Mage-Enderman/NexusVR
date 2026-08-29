@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Undo2,
   Redo2,
@@ -273,6 +273,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [virtualCursor, setVirtualCursor] = useState<{ x: number; y: number }>({ x: 180, y: 180 });
   const [isLocked, setIsLocked] = useState(document.pointerLockElement !== null);
+  const lastActionTimeRef = useRef<number>(0);
 
   useEffect(() => {
     (window as any).__isRadialMenuOpen = isOpen;
@@ -410,6 +411,9 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const activeIndex = hoveredIndex !== null ? hoveredIndex : (isLocked ? computedHover : null);
 
   const triggerSliceAction = (index: number) => {
+    const now = performance.now();
+    if (now - lastActionTimeRef.current < 250) return;
+    lastActionTimeRef.current = now;
     if (index === -1) {
       if (menuStack.length > 0) {
         setMenuStack(prev => prev.slice(0, -1));

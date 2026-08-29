@@ -425,8 +425,20 @@ export class SpatialPanelManager {
     const overlay = this.css3dRenderer.domElement;
     // Temporarily enable hit-testing through 3D CSS transforms
     overlay.style.pointerEvents = 'auto';
+    const childrenToRestore: { el: HTMLElement; prev: string }[] = [];
+    overlay.childNodes.forEach((node) => {
+      if (node instanceof HTMLElement) {
+        childrenToRestore.push({ el: node, prev: node.style.pointerEvents });
+        node.style.pointerEvents = 'auto';
+      }
+    });
+
     const el = document.elementFromPoint(cx, cy);
+
     overlay.style.pointerEvents = 'none';
+    childrenToRestore.forEach(({ el, prev }) => {
+      el.style.pointerEvents = prev;
+    });
 
     const found: Element | null = (el && this._isInAnyPanel(el)) ? el : null;
     const wasOver = this.hoveredElement !== null;
@@ -458,7 +470,6 @@ export class SpatialPanelManager {
       }
     }
 
-    // Always fire mousemove/pointermove so hover CSS states (e.g. :hover) update
     // Always fire mousemove/pointermove so hover CSS states (e.g. :hover) and sliders update
     if (found) {
       const opts = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true };
@@ -477,23 +488,30 @@ export class SpatialPanelManager {
   public handleLockedClick(): boolean {
     const rawEl = this.hoveredElement;
     if (!rawEl) return false;
-    const el = rawEl.closest('button, a, input, select, textarea, [role="button"]') || rawEl;
+    const el = rawEl.closest('button, a, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [onclick], .cursor-pointer, [tabindex]') || rawEl;
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
-    const opts = { bubbles: true, cancelable: true, button: 0, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true };
+    const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
     const isButtonOrInput = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT';
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new PointerEvent('pointerup', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.dispatchEvent(new MouseEvent('click', opts));
     if (isButtonOrInput && el instanceof HTMLElement && typeof el.click === 'function') {
-      el.click();
-    } else {
-      el.dispatchEvent(new MouseEvent('click', opts));
+      try {
+        el.click();
+      } catch {
+        /* noop */
+      }
     }
     // Focus text inputs / selects so keyboard events flow into them
     if (el instanceof HTMLElement && typeof el.focus === 'function') {
-      el.focus();
+      try {
+        el.focus();
+      } catch {
+        /* noop */
+      }
     }
     return true;
   }

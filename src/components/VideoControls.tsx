@@ -192,9 +192,8 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
       <div className="flex items-center gap-2">
         <button
           onClick={() => onStep(-5)}
-          disabled={state.duration <= 0}
           title="Skip back 5 seconds"
-          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40 disabled:opacity-30 disabled:hover:bg-slate-800/80 disabled:hover:text-slate-300"
+          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40"
         >
           <SkipBack className="w-3.5 h-3.5" />
         </button>
@@ -211,17 +210,15 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
         </button>
         <button
           onClick={() => onStep(5)}
-          disabled={state.duration <= 0}
           title="Skip forward 5 seconds"
-          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40 disabled:opacity-30 disabled:hover:bg-slate-800/80 disabled:hover:text-slate-300"
+          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40"
         >
           <SkipForward className="w-3.5 h-3.5" />
         </button>
         <button
           onClick={() => onSeek(0)}
-          disabled={state.duration <= 0}
           title="Restart from beginning"
-          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40 disabled:opacity-30 disabled:hover:bg-slate-800/80 disabled:hover:text-slate-300"
+          className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-300 transition border border-slate-700 hover:border-cyan-500/40"
         >
           <RotateCcw className="w-3.5 h-3.5" />
         </button>

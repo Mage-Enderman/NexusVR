@@ -3,9 +3,9 @@ import * as THREE from 'three';
 
 import type { SceneEngine } from '../engine/SceneEngine.ts';
 import { AssetManager } from '../engine/AssetManager.ts';
-import type { LoadedAsset } from '../engine/AssetManager.ts';
+import type { LoadedAsset, ImportConfig } from '../engine/AssetManager.ts';
 import type { ManipulationManager, TransformMode } from '../engine/ManipulationManager.ts';
-import type { NetworkService, MaterialUpdate } from '../services/NetworkService.ts';
+import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 import type { UndoRedoManager } from '../services/UndoRedoManager.ts';
 import type { VRHUDManager } from '../engine/VRHUDManager.ts';
@@ -52,6 +52,7 @@ interface UseKeyboardShortcutsParams {
   assetManagerRef: React.RefObject<AssetManager | null>;
   manipulationManagerRef: React.RefObject<ManipulationManager | null>;
   networkServiceRef: React.RefObject<NetworkService>;
+  streamingSuppressedAssetIdsRef?: React.MutableRefObject<Set<string>>;
 
   // ── Shared ref (created in App.tsx, shared with paste handler) ────────
   plainPasteModeRef: React.RefObject<boolean>;
@@ -88,6 +89,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
     assetManagerRef,
     manipulationManagerRef,
     networkServiceRef,
+    streamingSuppressedAssetIdsRef,
     onSetMode,
     onFocusSelected,
     onDeleteSelected,
@@ -109,13 +111,13 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
       fileData: asset.fileData,
       url: asset.url,
       primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as any,
-      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+      materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as any,
       metadata:
         asset.metadata ||
         (asset.fileData ? { fileSize: asset.fileData.byteLength } : undefined),
     };
     inventoryServiceRef.current.saveItem(item).then(() => {
-      console.log(`[Inventory] Saved "${asset.name}" to inventory`);
+      console.log(`[Inventory] Saved "${asset.name}" to inventory via Ctrl+S`);
     });
   }, [selectedAsset]);
 
@@ -174,6 +176,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
         id: newAsset.id,
         name: newAsset.name,
         type: newAsset.type as any,
+        primitiveType: primType,
         position: [
           newAsset.object3d.position.x,
           newAsset.object3d.position.y,
@@ -192,13 +195,44 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
         url: newAsset.url,
         fileData: newAsset.fileData,
         isCollidable: newAsset.isCollidable,
+        videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any,
+        subtitlesData: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
       });
     };
 
     if (asset.type === 'primitive' && primType) {
-      const newAsset = am.spawnPrimitive(primType, pos);
+      const newId = `prim-${primType}-${Date.now()}`;
+      streamingSuppressedAssetIdsRef?.current.add(newId);
+      const newAsset = am.spawnPrimitive(primType, pos, newId);
       afterImport(newAsset);
       return;
+    }
+
+    if (asset.type === 'video') {
+      const net = networkServiceRef.current;
+      const hosted = net?.getHostedFile(asset.id);
+      const videoSource = hosted instanceof ArrayBuffer ? new Blob([hosted]) : hosted || asset.url || asset.videoElement?.src;
+      if (videoSource) {
+        const config: Partial<ImportConfig> = {
+          videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any || 'auto',
+          subtitleText: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
+          videoSyncMode: asset.metadata?.videoSyncMode || (asset.object3d.userData as Record<string, unknown> & { videoState?: { syncMode?: 'persistent' | 'watch-party' } })?.videoState?.syncMode || 'persistent',
+        };
+        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config);
+        if (newAsset) {
+          if (hosted) {
+            net?.registerHostedFile(newAsset.id, hosted);
+          } else if (newAsset.fileData) {
+            net?.registerHostedFile(newAsset.id, newAsset.fileData);
+          }
+          const prevFlipped = (asset.object3d.userData as Record<string, unknown> & { videoState?: { flipped?: boolean } })?.videoState?.flipped;
+          if (typeof prevFlipped === 'boolean') {
+            am.applyVideoState(newAsset.id, { flipped: prevFlipped });
+          }
+          afterImport(newAsset);
+        }
+        return;
+      }
     }
 
     if (asset.fileData && asset.name) {

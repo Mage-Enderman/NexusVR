@@ -6,7 +6,7 @@ import confetti from 'canvas-confetti';
 import { SceneEngine } from './engine/SceneEngine.ts';
 import type { GraphicsSettings } from './engine/SceneEngine.ts';
 import { AssetManager } from './engine/AssetManager.ts';
-import type { AssetType, LoadedAsset } from './engine/AssetManager.ts';
+import type { AssetType, LoadedAsset, ImportConfig } from './engine/AssetManager.ts';
 import { ManipulationManager } from './engine/ManipulationManager.ts';
 import type { TransformMode } from './engine/ManipulationManager.ts';
 import { AvatarManager } from './engine/AvatarManager.ts';
@@ -1895,7 +1895,8 @@ const vrHud = new VRHUDManager(
         return;
       }
       if (data.type === 'primitive' && data.primitiveType) {
-        const prim = assetManager.spawnPrimitive(data.primitiveType, pos);
+        streamingSuppressedAssetIdsRef.current.add(data.id);
+        const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
         prim.object3d.rotation.set(...data.rotation);
         prim.object3d.scale.set(...data.scale);
         // Restore the sender's persistent flag onto userData so the
@@ -2170,6 +2171,7 @@ const vrHud = new VRHUDManager(
             return;
           }
           if (data.type === 'primitive' && data.primitiveType) {
+            streamingSuppressedAssetIdsRef.current.add(data.id);
             const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
             prim.object3d.rotation.set(...data.rotation);
             prim.object3d.scale.set(...data.scale);
@@ -2367,10 +2369,11 @@ const vrHud = new VRHUDManager(
     const onCanvasClick = (e: MouseEvent) => {
       if (e.button !== 0) return;
 
-      // While locked, if the crosshair is over a panel route the click there
+      // While locked or in first-person mode, if the crosshair is over a panel route the click there
       // instead of doing world raycasting.
       const spm = sceneEngine.spatialPanelManager;
-      if (document.pointerLockElement && spm) {
+      const isLockedOrFp = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
+      if (isLockedOrFp && spm) {
         spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
         if (spm.isOverPanel) {
           spm.handleLockedClick();
@@ -2979,6 +2982,7 @@ const vrHud = new VRHUDManager(
         id: newAsset.id,
         name: newAsset.name,
         type: newAsset.type as AssetSpawnData['type'],
+        primitiveType: primType,
         position: [
           newAsset.object3d.position.x,
           newAsset.object3d.position.y,
@@ -2997,13 +3001,44 @@ const vrHud = new VRHUDManager(
         url: newAsset.url,
         fileData: newAsset.fileData,
         isCollidable: newAsset.isCollidable,
+        videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any,
+        subtitlesData: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
       });
     };
 
     if (asset.type === 'primitive' && primType) {
-      const newAsset = am.spawnPrimitive(primType, pos);
+      const newId = `prim-${primType}-${Date.now()}`;
+      streamingSuppressedAssetIdsRef.current.add(newId);
+      const newAsset = am.spawnPrimitive(primType, pos, newId);
       afterImport(newAsset);
       return;
+    }
+
+    if (asset.type === 'video') {
+      const net = networkServiceRef.current;
+      const hosted = net?.getHostedFile(asset.id);
+      const videoSource = hosted instanceof ArrayBuffer ? new Blob([hosted]) : hosted || asset.url || asset.videoElement?.src;
+      if (videoSource) {
+        const config: Partial<ImportConfig> = {
+          videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any || 'auto',
+          subtitleText: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
+          videoSyncMode: asset.metadata?.videoSyncMode || (asset.object3d.userData as Record<string, unknown> & { videoState?: { syncMode?: 'persistent' | 'watch-party' } })?.videoState?.syncMode || 'persistent',
+        };
+        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config);
+        if (newAsset) {
+          if (hosted) {
+            net?.registerHostedFile(newAsset.id, hosted);
+          } else if (newAsset.fileData) {
+            net?.registerHostedFile(newAsset.id, newAsset.fileData);
+          }
+          const prevFlipped = (asset.object3d.userData as Record<string, unknown> & { videoState?: { flipped?: boolean } })?.videoState?.flipped;
+          if (typeof prevFlipped === 'boolean') {
+            am.applyVideoState(newAsset.id, { flipped: prevFlipped });
+          }
+          afterImport(newAsset);
+        }
+        return;
+      }
     }
 
     if (asset.fileData && asset.name) {
@@ -3651,6 +3686,7 @@ const vrHud = new VRHUDManager(
     assetManagerRef,
     manipulationManagerRef,
     networkServiceRef,
+    streamingSuppressedAssetIdsRef,
     plainPasteModeRef,
     onSetMode: handleSetMode,
     onFocusSelected: handleFocusSelected,

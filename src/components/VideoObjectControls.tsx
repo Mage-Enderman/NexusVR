@@ -382,7 +382,6 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                 state.playing ? onPause() : onPlay();
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={state.duration <= 0}
               title={state.playing ? 'Pause' : 'Play'}
               className="btn-dark-slate-lg"
             >
@@ -396,7 +395,6 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                 e.stopPropagation();
                 onStep(-5);
               }}
-              disabled={state.duration <= 0}
               title="Rewind 5 seconds"
               className="btn-dark-slate"
             >
@@ -409,7 +407,6 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                 onSeek(0);
                 onPause();
               }}
-              disabled={state.duration <= 0}
               title="Stop playback"
               className="btn-dark-slate"
             >
@@ -421,7 +418,6 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                 e.stopPropagation();
                 onStep(5);
               }}
-              disabled={state.duration <= 0}
               title="Fast forward 5 seconds"
               className="btn-dark-slate"
             >
