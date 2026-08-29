@@ -29,7 +29,11 @@ export const Tooltip: React.FC<TooltipProps> = ({ text, children }) => {
 
   const computeAndShow = useCallback(() => {
     if (!triggerRef.current) return;
-    const rect = triggerRef.current.getBoundingClientRect();
+    // triggerRef.current is the span wrapper which has display: contents.
+    // getBoundingClientRect() on display: contents elements returns 0s,
+    // so measure the actual child element instead.
+    const target = (triggerRef.current.firstElementChild as HTMLElement) || triggerRef.current;
+    const rect = target.getBoundingClientRect();
     // If there isn't room for a ~28px tooltip above the trigger, flip below.
     const placement = rect.top < 40 ? ('below' as const) : ('above' as const);
     setPos({
@@ -53,10 +57,18 @@ export const Tooltip: React.FC<TooltipProps> = ({ text, children }) => {
     setVisible(false);
   }, [clearShowTimer]);
 
-  // Reposition while visible (layout shifts / scroll).
+  // Reposition while visible (layout shifts / scroll / resize).
   useEffect(() => {
     if (!visible || !triggerRef.current) return;
-    computeAndShow();
+    const updatePosition = () => {
+      computeAndShow();
+    };
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
   }, [visible, computeAndShow]);
 
   useEffect(() => clearShowTimer, [clearShowTimer]);
