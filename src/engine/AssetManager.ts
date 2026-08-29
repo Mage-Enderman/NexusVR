@@ -1164,6 +1164,18 @@ export class AssetManager {
     // when the user hits Play inside a Three.js panel.
     video.preload = 'auto';
     video.playsInline = true;
+    const ensureFirstFramePainted = () => {
+      if (video.paused && video.currentTime === 0) {
+        try {
+          video.currentTime = 0.001;
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    video.addEventListener('loadedmetadata', ensureFirstFramePainted, { once: true });
+    video.addEventListener('loadeddata', ensureFirstFramePainted, { once: true });
+    video.addEventListener('canplay', ensureFirstFramePainted, { once: true });
     try { video.load(); } catch { /* ignore */ }
 
     // Phase 2 + tier-aware VRAM cap. Default VideoTexture ships a

@@ -1789,8 +1789,8 @@ const vrHud = new VRHUDManager(
                 if (typeof vs.flipped === 'boolean') {
                   assetManager.applyVideoState(data.id, { flipped: vs.flipped });
                 }
-                if (vs.currentTime && typeof vs.currentTime === 'number') {
-                  try { asset.videoElement.currentTime = vs.currentTime; } catch { /* ignore */ }
+                if (typeof vs.currentTime === 'number') {
+                  try { asset.videoElement.currentTime = vs.currentTime > 0 ? vs.currentTime : 0.001; } catch { /* ignore */ }
                 }
                 if (vs.playing) {
                   asset.videoElement.play().catch(() => {});
@@ -2978,6 +2978,16 @@ const vrHud = new VRHUDManager(
         });
       }
       recordSpawnUndo(newAsset);
+
+      const origVs = (asset.object3d.userData as Record<string, unknown>)?.videoState as any;
+      const hostedFile = networkServiceRef.current.getHostedFile(newAsset.id);
+      const isVideo = newAsset.type === 'video';
+      const fileSize = hostedFile instanceof File || hostedFile instanceof Blob
+        ? hostedFile.size
+        : hostedFile instanceof ArrayBuffer
+        ? hostedFile.byteLength
+        : (asset.object3d.userData as any)?.fileSize;
+
       networkServiceRef.current.broadcastSpawn({
         id: newAsset.id,
         name: newAsset.name,
@@ -3001,8 +3011,19 @@ const vrHud = new VRHUDManager(
         url: newAsset.url,
         fileData: newAsset.fileData,
         isCollidable: newAsset.isCollidable,
+        isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+        materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as any,
         videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any,
-        subtitlesData: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
+        subtitlesData: asset.subtitlesData || origVs?.subtitlesData,
+        subtitlesEnabled: origVs?.subtitlesEnabled,
+        videoState: isVideo ? {
+          playing: Boolean(origVs?.playing),
+          currentTime: typeof origVs?.currentTime === 'number' ? origVs.currentTime : (asset.videoElement?.currentTime || 0),
+          globalVolume: typeof origVs?.globalVolume === 'number' ? origVs.globalVolume : 0.8,
+          flipped: origVs?.flipped !== false,
+        } : undefined,
+        fileSize,
+        importerPeerId: networkServiceRef.current.localPeerId,
       });
     };
 
@@ -3016,24 +3037,44 @@ const vrHud = new VRHUDManager(
 
     if (asset.type === 'video') {
       const net = networkServiceRef.current;
-      const hosted = net?.getHostedFile(asset.id);
+      const vss = videoStreamingServiceRef?.current;
+      let hosted = net?.getHostedFile(asset.id);
+      if (!hosted && (asset.url?.startsWith('blob:') || asset.videoElement?.src?.startsWith('blob:'))) {
+        try {
+          const res = await fetch(asset.url || asset.videoElement!.src);
+          if (res.ok) {
+            hosted = await res.blob();
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       const videoSource = hosted instanceof ArrayBuffer ? new Blob([hosted]) : hosted || asset.url || asset.videoElement?.src;
       if (videoSource) {
+        const newId = `video-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        streamingSuppressedAssetIdsRef.current.add(newId);
+        if (hosted) {
+          net?.registerHostedFile(newId, hosted);
+          if (vss && (hosted instanceof File || hosted instanceof Blob)) {
+            vss.registerHostFile(hosted, newId, (hosted as any).type || 'video/mp4');
+          }
+        }
+        const origVs = (asset.object3d.userData as Record<string, unknown>)?.videoState as any;
         const config: Partial<ImportConfig> = {
           videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any || 'auto',
-          subtitleText: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
-          videoSyncMode: asset.metadata?.videoSyncMode || (asset.object3d.userData as Record<string, unknown> & { videoState?: { syncMode?: 'persistent' | 'watch-party' } })?.videoState?.syncMode || 'persistent',
+          subtitleText: asset.subtitlesData || origVs?.subtitlesData,
+          videoSyncMode: asset.metadata?.videoSyncMode || origVs?.syncMode || 'persistent',
         };
-        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config);
+        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config, newId);
         if (newAsset) {
-          if (hosted) {
-            net?.registerHostedFile(newAsset.id, hosted);
-          } else if (newAsset.fileData) {
-            net?.registerHostedFile(newAsset.id, newAsset.fileData);
-          }
-          const prevFlipped = (asset.object3d.userData as Record<string, unknown> & { videoState?: { flipped?: boolean } })?.videoState?.flipped;
-          if (typeof prevFlipped === 'boolean') {
-            am.applyVideoState(newAsset.id, { flipped: prevFlipped });
+          if (origVs) {
+            am.applyVideoState(newAsset.id, {
+              flipped: origVs.flipped,
+              currentTime: origVs.currentTime,
+              playing: origVs.playing,
+              globalVolume: origVs.globalVolume,
+              subtitlesEnabled: origVs.subtitlesEnabled,
+            });
           }
           afterImport(newAsset);
         }
@@ -3686,6 +3727,7 @@ const vrHud = new VRHUDManager(
     assetManagerRef,
     manipulationManagerRef,
     networkServiceRef,
+    videoStreamingServiceRef,
     streamingSuppressedAssetIdsRef,
     plainPasteModeRef,
     onSetMode: handleSetMode,

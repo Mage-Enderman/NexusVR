@@ -5,6 +5,7 @@ import type { SceneEngine } from '../engine/SceneEngine.ts';
 import { AssetManager } from '../engine/AssetManager.ts';
 import type { LoadedAsset, ImportConfig } from '../engine/AssetManager.ts';
 import type { ManipulationManager, TransformMode } from '../engine/ManipulationManager.ts';
+import type { VideoStreamingService } from '../services/VideoStreamingService.ts';
 import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 import type { UndoRedoManager } from '../services/UndoRedoManager.ts';
@@ -52,6 +53,7 @@ interface UseKeyboardShortcutsParams {
   assetManagerRef: React.RefObject<AssetManager | null>;
   manipulationManagerRef: React.RefObject<ManipulationManager | null>;
   networkServiceRef: React.RefObject<NetworkService>;
+  videoStreamingServiceRef?: React.RefObject<VideoStreamingService | null>;
   streamingSuppressedAssetIdsRef?: React.MutableRefObject<Set<string>>;
 
   // ── Shared ref (created in App.tsx, shared with paste handler) ────────
@@ -89,6 +91,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
     assetManagerRef,
     manipulationManagerRef,
     networkServiceRef,
+    videoStreamingServiceRef,
     streamingSuppressedAssetIdsRef,
     onSetMode,
     onFocusSelected,
@@ -172,6 +175,16 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
         });
       }
       onRecordSpawnUndo(newAsset);
+
+      const origVs = (asset.object3d.userData as Record<string, unknown>)?.videoState as any;
+      const hostedFile = networkServiceRef.current.getHostedFile(newAsset.id);
+      const isVideo = newAsset.type === 'video';
+      const fileSize = hostedFile instanceof File || hostedFile instanceof Blob
+        ? hostedFile.size
+        : hostedFile instanceof ArrayBuffer
+        ? hostedFile.byteLength
+        : (asset.object3d.userData as any)?.fileSize;
+
       networkServiceRef.current.broadcastSpawn({
         id: newAsset.id,
         name: newAsset.name,
@@ -195,8 +208,19 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
         url: newAsset.url,
         fileData: newAsset.fileData,
         isCollidable: newAsset.isCollidable,
+        isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+        materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as any,
         videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any,
-        subtitlesData: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
+        subtitlesData: asset.subtitlesData || origVs?.subtitlesData,
+        subtitlesEnabled: origVs?.subtitlesEnabled,
+        videoState: isVideo ? {
+          playing: Boolean(origVs?.playing),
+          currentTime: typeof origVs?.currentTime === 'number' ? origVs.currentTime : (asset.videoElement?.currentTime || 0),
+          globalVolume: typeof origVs?.globalVolume === 'number' ? origVs.globalVolume : 0.8,
+          flipped: origVs?.flipped !== false,
+        } : undefined,
+        fileSize,
+        importerPeerId: networkServiceRef.current.localPeerId,
       });
     };
 
@@ -210,24 +234,46 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
 
     if (asset.type === 'video') {
       const net = networkServiceRef.current;
-      const hosted = net?.getHostedFile(asset.id);
+      const vss = videoStreamingServiceRef?.current;
+      let hosted = net?.getHostedFile(asset.id);
+      if (!hosted && (asset.url?.startsWith('blob:') || asset.videoElement?.src?.startsWith('blob:'))) {
+        try {
+          const res = await fetch(asset.url || asset.videoElement!.src);
+          if (res.ok) {
+            hosted = await res.blob();
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       const videoSource = hosted instanceof ArrayBuffer ? new Blob([hosted]) : hosted || asset.url || asset.videoElement?.src;
       if (videoSource) {
+        const newId = `video-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        if (streamingSuppressedAssetIdsRef?.current) {
+          streamingSuppressedAssetIdsRef.current.add(newId);
+        }
+        if (hosted) {
+          net?.registerHostedFile(newId, hosted);
+          if (vss && (hosted instanceof File || hosted instanceof Blob)) {
+            vss.registerHostFile(hosted, newId, (hosted as any).type || 'video/mp4');
+          }
+        }
+        const origVs = (asset.object3d.userData as Record<string, unknown>)?.videoState as any;
         const config: Partial<ImportConfig> = {
           videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as any || 'auto',
-          subtitleText: asset.subtitlesData || (asset.object3d.userData as Record<string, unknown> & { videoState?: { subtitlesData?: string } })?.videoState?.subtitlesData,
-          videoSyncMode: asset.metadata?.videoSyncMode || (asset.object3d.userData as Record<string, unknown> & { videoState?: { syncMode?: 'persistent' | 'watch-party' } })?.videoState?.syncMode || 'persistent',
+          subtitleText: asset.subtitlesData || origVs?.subtitlesData,
+          videoSyncMode: asset.metadata?.videoSyncMode || origVs?.syncMode || 'persistent',
         };
-        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config);
+        const newAsset = await am.spawnVideo(videoSource, asset.name, pos, config, newId);
         if (newAsset) {
-          if (hosted) {
-            net?.registerHostedFile(newAsset.id, hosted);
-          } else if (newAsset.fileData) {
-            net?.registerHostedFile(newAsset.id, newAsset.fileData);
-          }
-          const prevFlipped = (asset.object3d.userData as Record<string, unknown> & { videoState?: { flipped?: boolean } })?.videoState?.flipped;
-          if (typeof prevFlipped === 'boolean') {
-            am.applyVideoState(newAsset.id, { flipped: prevFlipped });
+          if (origVs) {
+            am.applyVideoState(newAsset.id, {
+              flipped: origVs.flipped,
+              currentTime: origVs.currentTime,
+              playing: origVs.playing,
+              globalVolume: origVs.globalVolume,
+              subtitlesEnabled: origVs.subtitlesEnabled,
+            });
           }
           afterImport(newAsset);
         }

@@ -493,20 +493,26 @@ export class SpatialPanelManager {
     const cy = window.innerHeight / 2;
     const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
     const isButtonOrInput = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT';
+    const isTextInputOrSelect = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
+
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new PointerEvent('pointerup', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
-    el.dispatchEvent(new MouseEvent('click', opts));
+
     if (isButtonOrInput && el instanceof HTMLElement && typeof el.click === 'function') {
       try {
         el.click();
       } catch {
         /* noop */
       }
+    } else {
+      el.dispatchEvent(new MouseEvent('click', opts));
     }
-    // Focus text inputs / selects so keyboard events flow into them
-    if (el instanceof HTMLElement && typeof el.focus === 'function') {
+
+    // ONLY focus text inputs / textareas / selects so keyboard text typing flows into them,
+    // without shifting focus off the canvas for buttons/links (which drops pointer lock and freezes movement).
+    if (isTextInputOrSelect && el instanceof HTMLElement && typeof el.focus === 'function') {
       try {
         el.focus();
       } catch {
