@@ -1,10 +1,14 @@
-import React, { useEffect, useRef } from 'react';
-import type { VideoPlaybackState } from '../engine/AssetManager.ts';
+import React, { useEffect, useRef, useState } from 'react';
+import type { AssetManager, VideoPlaybackState } from '../engine/AssetManager.ts';
 import { Film } from 'lucide-react';
 
 export interface VideoObjectControlsProps {
   /** Live playback state mirror. Read-only — the parent drives mutations via callbacks. */
   state: VideoPlaybackState;
+  /** Optional asset ID for live subscription to playback changes */
+  assetId?: string;
+  /** Optional AssetManager reference */
+  assetManager?: AssetManager | null;
   /** Optional asset name displayed in the top bar */
   assetName?: string;
   onPlay: () => void;
@@ -56,6 +60,8 @@ function formatTime(seconds: number): string {
  */
 export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   state,
+  assetId,
+  assetManager,
   assetName,
   onPlay,
   onPause,
@@ -80,9 +86,34 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   const durationRef = useRef<HTMLSpanElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const volumeTrackRef = useRef<HTMLDivElement | null>(null);
+  const subtitleInputRef = useRef<HTMLInputElement | null>(null);
 
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  const [liveState, setLiveState] = useState<VideoPlaybackState>(state);
+
+  useEffect(() => {
+    setLiveState(state);
+  }, [state]);
+
+  useEffect(() => {
+    if (!assetId || !assetManager) return;
+    const update = () => {
+      const s = assetManager.getVideoState(assetId);
+      if (s) setLiveState({ ...s });
+    };
+    update();
+    const unsub = assetManager.registerOnVideoPlaybackChanged((id) => {
+      if (id === assetId) {
+        update();
+      }
+    });
+    return () => {
+      unsub();
+    };
+  }, [assetId, assetManager]);
+
+  const effectiveState = liveState || state;
+  const stateRef = useRef(effectiveState);
+  stateRef.current = effectiveState;
 
   useEffect(() => {
     let raf = 0;
@@ -163,18 +194,19 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
     track.addEventListener('pointerup', up);
   };
 
-  const activeVolume = state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
-  const displayedVolume = state.muted ? 0 : activeVolume;
+  const activeVolume = effectiveState.volumeMode === 'global' ? effectiveState.globalVolume : effectiveState.localVolume;
+  const displayedVolume = effectiveState.muted ? 0 : activeVolume;
 
   return (
     <div
       onClick={() => onClose?.()}
-      className="w-full h-full flex flex-col justify-between bg-transparent text-white font-sans select-none overflow-hidden pointer-events-auto cursor-pointer"
+      className="w-full h-full flex flex-col justify-between bg-transparent text-white font-sans select-none overflow-hidden pointer-events-auto cursor-default"
       title="Click empty space to close overlay"
     >
       {/* Top Bar Overlay */}
       <div
         onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         className="w-full flex items-start justify-between p-6 bg-gradient-to-b from-slate-950/95 via-slate-950/70 to-transparent cursor-default"
       >
         <div className="flex flex-col">
@@ -194,6 +226,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                     e.stopPropagation();
                     onSyncModeToggle?.(syncMode === 'persistent' ? 'watch-party' : 'persistent');
                   }}
+                  onPointerDown={(e) => e.stopPropagation()}
                   className={`px-3 py-1.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 transition-all shadow-md ${
                     syncMode === 'watch-party'
                       ? 'bg-purple-500/30 text-purple-200 border border-purple-400/60 hover:bg-purple-500/40'
@@ -221,10 +254,12 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
 
         {onRemoveVideo && (
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onRemoveVideo();
             }}
+            onPointerDown={(e) => e.stopPropagation()}
             title="Destroy Video Asset"
             className="btn-dark-slate"
             style={{ borderColor: 'rgba(244,63,94,0.6)', color: '#fda4af' }}
@@ -238,6 +273,7 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
       <div className="w-full flex-1 flex items-center justify-end px-8 pointer-events-none">
         <div
           onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
           className="pointer-events-auto flex flex-col items-center gap-3.5 py-6 px-4 rounded-3xl shadow-2xl cursor-default"
           style={{
             backgroundColor: 'rgba(24, 26, 32, 0.96)',
@@ -248,15 +284,17 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
         >
           {/* Mute Button */}
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
               onMuteToggle();
             }}
-            title={state.muted ? 'Unmute audio' : 'Mute audio'}
+            onPointerDown={(e) => e.stopPropagation()}
+            title={effectiveState.muted ? 'Unmute audio' : 'Mute audio'}
             className="btn-dark-slate"
             style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            <span className="font-bold text-lg">{state.muted ? '🔇' : '🔊'}</span>
+            <span className="font-bold text-lg">{effectiveState.muted ? '🔇' : '🔊'}</span>
           </button>
 
           {/* Vertical Volume Slider Track (EXPLICIT INLINE STYLES FOR ZERO-TAILWIND FAILURE RISK) */}
@@ -330,15 +368,17 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
 
           {/* Global / Local Mode Switcher Button */}
           <button
+            type="button"
             onClick={(e) => {
               e.stopPropagation();
-              onVolumeModeToggle(state.volumeMode === 'global' ? 'local' : 'global');
+              onVolumeModeToggle(effectiveState.volumeMode === 'global' ? 'local' : 'global');
             }}
-            title={`Audio Mode: ${state.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            title={`Audio Mode: ${effectiveState.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
             className="btn-dark-slate"
             style={{ width: '44px', height: '44px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           >
-            <span className="font-bold text-base">{state.volumeMode === 'global' ? '🌐' : '👤'}</span>
+            <span className="font-bold text-base">{effectiveState.volumeMode === 'global' ? '🌐' : '👤'}</span>
           </button>
         </div>
       </div>
@@ -346,12 +386,13 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
       {/* Bottom Bar Overlay: Timeline Row & Playback Controls Row */}
       <div
         onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         className="w-full flex flex-col gap-4 p-6 bg-gradient-to-t from-slate-950/95 via-slate-950/80 to-transparent cursor-default"
       >
         {/* Row 1: Scrub Timeline */}
         <div className="flex items-center gap-4">
           <span ref={timeRef} className="text-base font-mono font-medium text-slate-200 min-w-[52px]">
-            {formatTime(state.currentTime)}
+            {formatTime(effectiveState.currentTime)}
           </span>
 
           <div
@@ -364,12 +405,12 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             <div
               ref={fillRef}
               className="absolute top-0 left-0 h-full bg-gradient-to-r from-amber-500 to-amber-400 rounded-full transition-all duration-75"
-              style={{ width: `${Math.min(100, Math.max(0, (state.currentTime / (state.duration || 1)) * 100))}%` }}
+              style={{ width: `${Math.min(100, Math.max(0, (effectiveState.currentTime / (effectiveState.duration || 1)) * 100))}%` }}
             />
           </div>
 
-          <span className="text-base font-mono font-medium text-slate-400 min-w-[52px]">
-            {formatTime(state.duration)}
+          <span ref={durationRef} className="text-base font-mono font-medium text-slate-400 min-w-[52px]">
+            {formatTime(effectiveState.duration)}
           </span>
         </div>
 
@@ -377,24 +418,27 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
         <div className="flex items-center justify-between pt-1">
           <div className="flex items-center gap-3">
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                state.playing ? onPause() : onPlay();
+                effectiveState.playing ? onPause() : onPlay();
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              title={state.playing ? 'Pause' : 'Play'}
+              title={effectiveState.playing ? 'Pause' : 'Play'}
               className="btn-dark-slate-lg"
             >
               <span className="font-extrabold text-xl text-amber-300 pointer-events-none">
-                {state.playing ? '⏸' : '▶'}
+                {effectiveState.playing ? '⏸' : '▶'}
               </span>
             </button>
 
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onStep(-5);
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               title="Rewind 5 seconds"
               className="btn-dark-slate"
             >
@@ -402,11 +446,13 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onSeek(0);
                 onPause();
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               title="Stop playback"
               className="btn-dark-slate"
             >
@@ -414,10 +460,12 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onStep(5);
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               title="Fast forward 5 seconds"
               className="btn-dark-slate"
             >
@@ -425,10 +473,12 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             </button>
 
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 onSeek(0);
               }}
+              onPointerDown={(e) => e.stopPropagation()}
               title="Restart video"
               className="btn-dark-slate"
             >
@@ -441,10 +491,12 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             {/* Flip Video Button */}
             {onFlip && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   onFlip();
                 }}
+                onPointerDown={(e) => e.stopPropagation()}
                 title={isFlipped ? 'Unflip video' : 'Flip video vertically (fix upside-down)'}
                 className="px-3 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-amber-500/60 text-slate-200 hover:text-white flex items-center gap-2 text-xs font-bold transition-all cursor-pointer shadow-sm"
               >
@@ -455,30 +507,38 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
             {/* Subtitles / Captions Toggle Button */}
             {onSubtitlesToggle && (
               <button
+                type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   onSubtitlesToggle();
                 }}
-                title={state.subtitlesEnabled ? 'Turn off subtitles' : 'Turn on subtitles'}
+                onPointerDown={(e) => e.stopPropagation()}
+                title={effectiveState.subtitlesEnabled ? 'Turn off subtitles' : 'Turn on subtitles'}
                 className={`px-3 py-2.5 rounded-xl border flex items-center gap-2 text-xs font-bold transition-all cursor-pointer shadow-sm ${
-                  state.subtitlesEnabled
+                  effectiveState.subtitlesEnabled
                     ? 'bg-amber-500/20 text-amber-300 border-amber-500/60'
                     : 'bg-[#181a20] text-slate-400 border-slate-700/80 hover:bg-[#242833] hover:text-white'
                 }`}
               >
-                <span>💬 CC {state.subtitlesEnabled ? 'ON' : 'OFF'}</span>
+                <span>💬 CC {effectiveState.subtitlesEnabled ? 'ON' : 'OFF'}</span>
               </button>
             )}
 
             {/* Import Subtitle File Button */}
             {onAddSubtitles && (
-              <label
-                onClick={(e) => e.stopPropagation()}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  subtitleInputRef.current?.click();
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
                 title="Attach .srt or .vtt subtitle file to this video"
                 className="px-3 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-indigo-500/60 text-slate-200 hover:text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer shadow-sm"
               >
                 <span>📁 Add Subtitles</span>
                 <input
+                  ref={subtitleInputRef}
                   type="file"
                   accept=".srt,.vtt"
                   className="hidden"
@@ -490,19 +550,21 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
                     }
                   }}
                 />
-              </label>
+              </button>
             )}
 
             {/* Global / Local Mode Switcher Pill Button */}
             <button
+              type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onVolumeModeToggle(state.volumeMode === 'global' ? 'local' : 'global');
+                onVolumeModeToggle(effectiveState.volumeMode === 'global' ? 'local' : 'global');
               }}
-              title={`Switch Audio Mode. Currently: ${state.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
+              onPointerDown={(e) => e.stopPropagation()}
+              title={`Switch Audio Mode. Currently: ${effectiveState.volumeMode === 'global' ? 'Global (broadcasts to room)' : 'Local (headset only)'}`}
               className="px-4 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-amber-500/60 text-slate-200 hover:text-white flex items-center gap-2.5 text-xs font-bold transition-all cursor-pointer shadow-sm"
             >
-              {state.volumeMode === 'global' ? (
+              {effectiveState.volumeMode === 'global' ? (
                 <span>🌐 Global Volume Mode</span>
               ) : (
                 <span>👤 Local Volume Mode</span>

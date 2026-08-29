@@ -488,12 +488,12 @@ export class SpatialPanelManager {
   public handleLockedClick(): boolean {
     const rawEl = this.hoveredElement;
     if (!rawEl) return false;
-    const el = rawEl.closest('button, a, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [onclick], .cursor-pointer, [tabindex]') || rawEl;
+    const el = rawEl.closest('button, a, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [onclick], [tabindex]') || rawEl;
     const cx = window.innerWidth / 2;
     const cy = window.innerHeight / 2;
     const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
     const isButtonOrInput = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT';
-    const isTextInputOrSelect = el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
+    const isTextInputOrSelect = (el.tagName === 'INPUT' && (el as HTMLInputElement).type !== 'file') || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
 
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));

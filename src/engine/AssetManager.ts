@@ -1216,7 +1216,7 @@ export class AssetManager {
     let canvasEl: HTMLCanvasElement | null = null;
     let canvasCtx: CanvasRenderingContext2D | null = null;
 
-    if (downscalePlan.downscale || subtitleCues.length > 0) {
+    if (downscalePlan.downscale) {
       canvasEl = document.createElement('canvas');
       canvasEl.width = downscalePlan.width || 1280;
       canvasEl.height = downscalePlan.height || 720;
@@ -1286,9 +1286,14 @@ export class AssetManager {
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = false;
 
+      let lastDrawnTime = -1;
       this.videoTickCallbacks.set(id, () => {
-        if (video.readyState >= 1) {
-          texture.needsUpdate = true;
+        if (video.readyState >= 2) {
+          const curTime = video.currentTime;
+          if (!video.paused || curTime !== lastDrawnTime) {
+            texture.needsUpdate = true;
+            lastDrawnTime = curTime;
+          }
         }
       });
     }
@@ -1380,23 +1385,22 @@ export class AssetManager {
     });
     video.addEventListener('play', () => {
       videoState.playing = true;
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
     });
     video.addEventListener('pause', () => {
       videoState.playing = false;
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
     });
     video.addEventListener('volumechange', () => {
-      // Keep state.muted / volumeMode-derived value coherent with the
-      // element so re-mounting the UI after a network-snap reads
-      // consistent data. Mute is authoritative (user-driven), the
-      // mirrors handle element-driven changes like browser autoplay
-      // stripping audio.
       videoState.muted = video.muted;
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
     });
     video.addEventListener('ended', () => {
       videoState.playing = false;
-      // Notify subscribers (e.g. App.tsx) so the React play/pause
-      // icon updates without waiting for an unrelated re-render.
       for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
+    });
+    video.addEventListener('seeked', () => {
+      if (texture) (texture as THREE.Texture).needsUpdate = true;
     });
 
     // Phase 2 fix-up: stash the downscale-mode + cleanup handles on
@@ -1900,6 +1904,9 @@ export class AssetManager {
       }
       changed = true;
     }
+    if (changed) {
+      for (const cb of this.onVideoPlaybackChangedCallbacks) cb(assetId);
+    }
     return changed;
   }
 
@@ -2054,6 +2061,47 @@ export class AssetManager {
 
     let lastDrawnCue: SubtitleCue | null | undefined = undefined;
     let lastEnabled: boolean | undefined = undefined;
+    let lastCueIdx = 0;
+
+    const findCue = (cues: SubtitleCue[], curTime: number): SubtitleCue | null => {
+      if (cues.length === 0) return null;
+      // Fast path: check current cached index
+      const safeIdx = Math.max(0, Math.min(lastCueIdx, cues.length - 1));
+      const current = cues[safeIdx];
+      if (current.start <= curTime && curTime <= current.end) {
+        return current;
+      }
+      // Fast path: check next sequential index (most common in playback)
+      if (safeIdx + 1 < cues.length) {
+        const next = cues[safeIdx + 1];
+        if (next.start <= curTime && curTime <= next.end) {
+          lastCueIdx = safeIdx + 1;
+          return next;
+        }
+      }
+      // Binary search fallback for seeks / jumps
+      let low = 0;
+      let high = cues.length - 1;
+      let bestIdx = -1;
+      while (low <= high) {
+        const mid = (low + high) >> 1;
+        const c = cues[mid];
+        if (c.start <= curTime && curTime <= c.end) {
+          lastCueIdx = mid;
+          return c;
+        } else if (c.start > curTime) {
+          high = mid - 1;
+        } else {
+          bestIdx = mid;
+          low = mid + 1;
+        }
+      }
+      if (bestIdx >= 0 && cues[bestIdx].start <= curTime && curTime <= cues[bestIdx].end) {
+        lastCueIdx = bestIdx;
+        return cues[bestIdx];
+      }
+      return null;
+    };
 
     // CHAIN, don't replace: videoTickCallbacks is keyed by asset id and
     // already holds the video-texture update tick at attach time.
@@ -2069,7 +2117,7 @@ export class AssetManager {
       let activeCue: SubtitleCue | null = null;
       if (enabled && cues.length > 0) {
         const curTime = video.currentTime;
-        activeCue = cues.find((c) => c.start <= curTime && curTime <= c.end) ?? null;
+        activeCue = findCue(cues, curTime);
       }
       if (activeCue === lastDrawnCue && enabled === lastEnabled && lastDrawnCue !== undefined) return;
 

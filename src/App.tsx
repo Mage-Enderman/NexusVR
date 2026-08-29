@@ -4249,6 +4249,8 @@ const vrHud = new VRHUDManager(
             >
               <VideoObjectControls
                 state={activeVideoState}
+                assetId={activeVideoAsset.id}
+                assetManager={assetManagerRef.current}
                 assetName={activeVideoAsset.name}
                 onPlay={() => {
                   handleVideoAction(activeVideoAsset.id, 'play');
