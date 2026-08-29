@@ -1,5 +1,5 @@
-import React from 'react';
-import { Share2, Smartphone, Glasses, Settings, MessageSquare, ShieldCheck, WifiOff, Users, Globe, Footprints, Orbit, Sparkles, Save } from 'lucide-react';
+import React, { useState } from 'react';
+import { Share2, Smartphone, Glasses, Settings, MessageSquare, ShieldCheck, WifiOff, Users, Globe, Footprints, Orbit, Sparkles, Save, MoreHorizontal } from 'lucide-react';
 import type { ConnectionMode } from '../services/NetworkService.ts';
 import { Tooltip } from './Tooltip.tsx';
 
@@ -21,6 +21,19 @@ interface NavbarProps {
   unreadChatCount: number;
 }
 
+/**
+ * Overflow entry used by the small-screen "⋯" menu. Below the `lg` breakpoint
+ * the Save/Load Room, Pair Device and Enter VR buttons were simply hidden
+ * (`hidden lg:flex`), making those features unreachable on narrower windows.
+ * The overflow menu keeps every action available at any width.
+ */
+interface MoreMenuItem {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+}
+
 export const Navbar: React.FC<NavbarProps> = ({
   mode,
   roomId,
@@ -38,6 +51,14 @@ export const Navbar: React.FC<NavbarProps> = ({
   onEnterVR,
   unreadChatCount,
 }) => {
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  const moreItems: MoreMenuItem[] = [
+    ...(onOpenSaveLoad ? [{ key: 'saveload', label: 'Save / Load Room', icon: <Save className="w-4 h-4 text-purple-400" />, onClick: onOpenSaveLoad }] : []),
+    { key: 'pair', label: 'Pair Device', icon: <Smartphone className="w-4 h-4 text-cyan-400" />, onClick: onOpenPairing },
+    { key: 'vr', label: 'Enter VR', icon: <Glasses className="w-4 h-4 text-[#00f0ff]" />, onClick: onEnterVR },
+  ];
+
   return (
     <header className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-center gap-2 pointer-events-none max-w-[95vw]">
       {/* Brand & Status Badge */}
@@ -159,6 +180,38 @@ export const Navbar: React.FC<NavbarProps> = ({
         </Tooltip>
 
         <div className="h-5 w-[1px] bg-slate-700/50 mx-1" />
+
+        {/* Overflow menu: exposes the actions hidden below the lg breakpoint */}
+        <div className="lg:hidden relative">
+          <button
+            onClick={() => setMoreOpen((v) => !v)}
+            className={`btn btn-glass btn-icon ${moreOpen ? 'active' : ''}`}
+            title="More actions"
+          >
+            <MoreHorizontal className="w-4 h-4 text-slate-300" />
+          </button>
+          {moreOpen && (
+            <>
+              {/* Click-away catcher above everything else in the navbar */}
+              <div className="fixed inset-0 z-40" onClick={() => setMoreOpen(false)} />
+              <div className="absolute right-0 top-full mt-2 w-48 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl py-1.5 z-50 animate-in fade-in slide-in-from-top-2">
+                {moreItems.map((item) => (
+                  <button
+                    key={item.key}
+                    onClick={() => {
+                      setMoreOpen(false);
+                      item.onClick();
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white flex items-center gap-2.5 transition-colors"
+                  >
+                    {item.icon}
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
         <Tooltip text="Text Chat">
           <button

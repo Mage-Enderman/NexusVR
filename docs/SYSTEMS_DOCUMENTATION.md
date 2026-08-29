@@ -316,6 +316,8 @@ The grab system implements a **camera-anchored "gravity gun" pattern:**
 
 **Scroll wheel while grabbing:** Plain wheel = push/pull (adjust `_grabDepth`). Shift+wheel = scale the held asset. Ctrl+wheel = scale self (the user).
 
+**E + drag while grabbing (E-rotate):** Hold E while RMB-grabbing and drag to rotate the object instead of carrying it. Rotation is yaw-around-world-Y (horizontal drag) + pitch-around-world-X (vertical drag); Shift suppresses pitch. The camera view stays STILL during E-rotate — mouse movement is consumed by the object rotation (SceneEngine's mouse-look is suppressed via the `isERotateActive` hook wired to `ManipulationManager.isERotateMouseActive`). The same applies to E + LMB-drag on a selected asset, including orbit mode (OrbitControls is disabled for the gesture).
+
 **Left-click while grabbing:** Snap-rotate to nearest 90° on all axes.
 
 **Release:** On RMB-up anywhere (even outside the window). Also on window blur (alt-tab safety net).
@@ -347,7 +349,7 @@ Single-handed grip-grab is ended first if active on the same asset.
 | Key | Action |
 |-----|--------|
 | Y | Snap-rotate (90°) |
-| E (hold) | During grab: rotate around pivot (Y-axis drag rotation) |
+| E (hold) | During grab: rotate around pivot (Y-axis drag rotation); the camera view stays still while E-rotate is active |
 | Ctrl+Z | Undo |
 | Ctrl+Y / Ctrl+Shift+Z | Redo |
 

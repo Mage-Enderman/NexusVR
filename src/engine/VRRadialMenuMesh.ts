@@ -23,6 +23,7 @@ export interface VRRadialMenuState {
   selectionMode?: 'single' | 'multi';
   gizmoMode?: 'translate' | 'rotate' | 'scale';
   gizmoSpace?: 'local' | 'world';
+  allowedLocomotions?: Array<'walk' | 'flight' | 'noclip'>;
 }
 
 export interface VRRadialMenuCallbacks {
@@ -51,6 +52,7 @@ export interface VRRadialMenuCallbacks {
   onSetGizmoMode?: (mode: 'translate' | 'rotate' | 'scale') => void;
   onToggleGizmoSpace?: () => void;
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
+  onSetLocomotionMode?: (mode: 'walk' | 'flight' | 'noclip') => void;
 }
 
 const SIZE = 512;      // canvas px
@@ -515,6 +517,8 @@ export class VRRadialMenuMesh {
       onSetGizmoMode: cb.onSetGizmoMode,
       onToggleGizmoSpace: cb.onToggleGizmoSpace,
       onSpawnPrimitive: cb.onSpawnPrimitive,
+      allowedLocomotions: s.allowedLocomotions,
+      onSetLocomotionMode: cb.onSetLocomotionMode,
     };
   }
 

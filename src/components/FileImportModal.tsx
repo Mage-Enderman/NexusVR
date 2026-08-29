@@ -15,7 +15,6 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
   const [equipVrmIfAvatar, setEquipVrmIfAvatar] = useState(true);
   const [videoSyncMode, setVideoSyncMode] = useState<'persistent' | 'watch-party'>('persistent');
   const [isUploading, setIsUploading] = useState(false);
-  const [statusText, setStatusText] = useState('');
   
   const uploadingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -26,19 +25,13 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
     uploadingRef.current = true;
     setIsUploading(true);
 
+    onClose();
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      setStatusText(`Importing ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`);
-      try {
-        await onImportFile(file, saveToInventory, equipVrmIfAvatar, videoSyncMode);
-      } catch (err) {
+      onImportFile(file, saveToInventory, equipVrmIfAvatar, videoSyncMode).catch((err) => {
         console.error('File import error:', err);
-      }
+      });
     }
-
-    setIsUploading(false);
-    setStatusText('');
-    onClose();
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -195,13 +188,6 @@ export const FileImportModal: React.FC<FileImportModalProps> = ({
           </div>
         </div>
 
-        {/* Uploading Status Overlay */}
-        {isUploading && (
-          <div className="p-4 bg-cyan-500/10 border border-cyan-500/30 rounded-2xl flex items-center gap-3 animate-pulse">
-            <div className="w-5 h-5 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin shrink-0" />
-            <span className="text-xs font-semibold text-cyan-300">{statusText}</span>
-          </div>
-        )}
       </div>
     </div>
   );

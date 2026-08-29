@@ -31,6 +31,10 @@ export interface VideoControlsProps {
   onMuteToggle: () => void;
   /** Close the video — typically removes the asset. */
   onClose: () => void;
+  /** Subtitles toggle callback. */
+  onSubtitlesToggle?: () => void;
+  /** Add subtitle file callback. */
+  onAddSubtitles?: (file: File) => void;
   /**
    * If true, render with no header / actions row (compact mode). Used
    * when the controls are embedded inside a section of another panel
@@ -80,6 +84,8 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
   onVolumeModeToggle,
   onMuteToggle,
   onClose,
+  onSubtitlesToggle,
+  onAddSubtitles,
   compact = false,
 }) => {
   // Refs for live sync of inputs that change continuously (timeline
@@ -291,8 +297,7 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
             step={1}
             value={Math.round(displayedVolume * 100)}
             onChange={handleVolumeInput}
-            disabled={state.duration <= 0}
-            className="flex-1 accent-fuchsia-400 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+            className="flex-1 accent-fuchsia-400 cursor-pointer"
             aria-label={`${state.volumeMode === 'global' ? 'Global' : 'Local'} volume`}
           />
           <span className="text-[11px] font-mono font-bold text-fuchsia-300 w-10 text-right">
@@ -328,6 +333,39 @@ export const VideoControls: React.FC<VideoControlsProps> = ({
           <User className="w-3.5 h-3.5" />
           <span>Locally</span>
         </button>
+        {onSubtitlesToggle && (
+          <button
+            onClick={onSubtitlesToggle}
+            title={state.subtitlesEnabled ? 'Turn off subtitles' : 'Turn on subtitles'}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition border ${
+              state.subtitlesEnabled
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
+                : 'bg-slate-800/60 text-slate-400 border-slate-700 hover:bg-slate-800 hover:text-slate-300'
+            }`}
+          >
+            <span>💬 CC</span>
+          </button>
+        )}
+        {onAddSubtitles && (
+          <label
+            title="Attach .srt or .vtt subtitle file"
+            className="px-2.5 py-1.5 rounded-lg text-xs font-bold flex items-center justify-center gap-1 transition border bg-slate-800/60 text-slate-300 border-slate-700 hover:bg-slate-800 hover:border-indigo-500/50 cursor-pointer"
+          >
+            <span>📁 Subtitles</span>
+            <input
+              type="file"
+              accept=".srt,.vtt"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) {
+                  onAddSubtitles(file);
+                  e.target.value = '';
+                }
+              }}
+            />
+          </label>
+        )}
       </div>
     </div>
   );

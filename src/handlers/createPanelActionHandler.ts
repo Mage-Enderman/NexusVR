@@ -50,7 +50,7 @@ export interface PanelActionHandlerDeps {
   handleDeleteSelected: () => void;
   handleVideoAction: (
     assetId: string,
-    kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute' | 'syncMode',
+    kind: 'play' | 'pause' | 'seek' | 'step' | 'volume' | 'volumeMode' | 'mute' | 'syncMode' | 'subtitlesToggle',
     payload?: number | 'global' | 'local' | 'persistent' | 'watch-party'
   ) => void;
   handleVideoClose: (assetId: string) => void;

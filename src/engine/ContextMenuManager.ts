@@ -55,6 +55,32 @@ export interface ContextMenuContext {
   onToggleGizmoSpace?: () => void;
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
   onToggleCollision?: () => void;
+  allowedLocomotions?: Array<'walk' | 'flight' | 'noclip'>;
+  onSetLocomotionMode?: (mode: 'walk' | 'flight' | 'noclip') => void;
+}
+
+/**
+ * Builds the locomotion submenu items, filtered by allowedLocomotions.
+ * The current mode is highlighted; clicking a mode calls onSetLocomotionMode.
+ */
+function buildLocomotionSubmenu(context: ContextMenuContext): ContextMenuItemDef[] {
+  const allowed = context.allowedLocomotions ?? ['walk', 'flight', 'noclip'];
+  const modes: Array<{ id: 'walk' | 'flight' | 'noclip'; label: string; subLabel: string; icon: string }> = [
+    { id: 'walk', label: 'Walk/Run', subLabel: 'with climbing', icon: 'locomotion' },
+    { id: 'flight', label: 'Fly', subLabel: 'Free flight', icon: 'locomotion' },
+    { id: 'noclip', label: 'Noclip', subLabel: 'No collision', icon: 'locomotion' },
+  ];
+  return modes
+    .filter((m) => allowed.includes(m.id))
+    .map((m) => ({
+      id: `loco_${m.id}`,
+      label: m.label,
+      subLabel: context.locomotionMode === m.id ? 'Active' : m.subLabel,
+      color: context.locomotionMode === m.id ? '#22c55e' : '#f59e0b',
+      icon: m.icon,
+      action: () => context.onSetLocomotionMode?.(m.id),
+      closeOnClick: true,
+    }));
 }
 
 /**
@@ -112,8 +138,8 @@ export function buildActiveMenuItems(
         subLabel: context.locomotionMode === 'walk' ? 'Walk/Run (with climbing)' : context.locomotionMode,
         color: '#f59e0b',
         icon: 'locomotion',
-        action: context.onNextLocomotion,
         closeOnClick: false,
+        submenu: buildLocomotionSubmenu(context),
       },
       {
         id: 'scaling',
@@ -327,8 +353,8 @@ export function buildActiveMenuItems(
         subLabel: context.locomotionMode,
         color: '#f59e0b',
         icon: 'locomotion',
-        action: context.onNextLocomotion,
         closeOnClick: false,
+        submenu: buildLocomotionSubmenu(context),
       },
       {
         id: 'scaling',
@@ -515,8 +541,8 @@ export function buildActiveMenuItems(
       subLabel: context.locomotionMode,
       color: '#f59e0b',
       icon: 'locomotion',
-      action: context.onNextLocomotion,
       closeOnClick: false,
+      submenu: buildLocomotionSubmenu(context),
     },
     {
       id: 'scaling',

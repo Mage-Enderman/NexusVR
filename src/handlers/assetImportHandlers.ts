@@ -20,6 +20,7 @@ import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { UserRole } from '../types/permissions.ts';
 import type { ToolType } from '../components/WorldToolsPanel.tsx';
 import type { ImportConfig } from '../components/AssetImportDialog.tsx';
+import { toast } from '../services/ToastService.ts';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -75,6 +76,7 @@ export function createLoadingPlaceholder(
   if (!ctx) return { group, dispose: () => { group.traverse((c) => { if (c instanceof THREE.Mesh) { c.geometry.dispose(); (c.material as THREE.Material).dispose(); } }); }, setProgress: () => {} };
 
   let lastDrawnPct = -1;
+  let spriteTexture: THREE.CanvasTexture | null = null;
   const redraw = () => {
     if (!ctx) return;
     const now = (performance.now && performance.now()) || Date.now();
@@ -103,19 +105,18 @@ export function createLoadingPlaceholder(
     ctx.fillStyle = '#64748b';
     ctx.fillText(`by ${requesterName}`, 256, 100);
 
-    lastDrawnPct = lastDrawnPct; // no change
+    if (spriteTexture) spriteTexture.needsUpdate = true;
   };
 
-  redraw();
-
-  const spriteTexture = new THREE.CanvasTexture(canvas);
+  spriteTexture = new THREE.CanvasTexture(canvas);
   spriteTexture.minFilter = THREE.LinearFilter;
   spriteTexture.magFilter = THREE.LinearFilter;
+  redraw();
 
   const spriteMat = new THREE.SpriteMaterial({ map: spriteTexture, transparent: true });
   const sprite = new THREE.Sprite(spriteMat);
   sprite.scale.set(1.8, 0.45, 1);
-  sprite.position.y = 0.9;
+  sprite.position.set(0, 0.9, 0);
   group.add(sprite);
 
   // Start the pulsing animation — ice‑blue ring breathes in and out
@@ -302,6 +303,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     pendingAssetsRef.current.set(placeholderId, localEntry);
 
     streamingSuppressedAssetIdsRef.current.add(placeholderId);
+    if (file) net.registerHostedFile(placeholderId, file);
     try {
       const asset = await assetManager.importFile(file, pos, { videoSyncMode }, placeholderId);
       if (asset) {
@@ -312,9 +314,18 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
           resetVideoInactivityTimer();
         }
         recordSpawnUndo(asset);
+        if (asset) {
+          asset.object3d.userData.fileSize = file.size;
+          asset.object3d.userData.importerPeerId = net.localPeerId;
+          if (file) {
+            net.registerHostedFile(asset.id, file);
+          }
+        }
+        const isP2PTransferNeeded = !asset.fileData && file;
+        const p2pTransferHint = isP2PTransferNeeded ? { id: asset.id, size: file.size } : undefined;
         if (asset.type === 'video') {
           const vss = videoStreamingServiceRef.current;
-          const hint = file.size > VIDEO_STREAMING_THRESHOLD ? vss.registerHostFile(file, asset.id, file.type) : undefined;
+          const hint = file ? vss.registerHostFile(file, asset.id, file.type) : undefined;
           if (hint) {
             (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
           }
@@ -329,6 +340,10 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
               url: asset.url,
               primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
               fileData: (videoSyncMode !== 'watch-party' && file.size <= VIDEO_STREAMING_THRESHOLD) ? asset.fileData : undefined,
+              fileDataOversized: isP2PTransferNeeded ? true : undefined,
+              p2pTransferHint,
+              fileSize: file.size,
+              importerPeerId: net.localPeerId,
               isCollidable: asset.isCollidable,
               isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
               materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
@@ -359,6 +374,9 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
           };
           await inventoryServiceRef.current.saveItem(item);
         }
+        toast.success(`Imported "${displayName}"`);
+      } else {
+        throw new Error('AssetManager returned null');
       }
     } catch (err) {
       sceneEngineRef.current?.worldRoot.remove(localEntry.group);
@@ -368,6 +386,9 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
         net.broadcastPendingCancel(placeholderId);
       }
       console.warn('[Import] Failed:', err);
+      // Surface the failure to the user — previously this was console-only,
+      // so a bad GLB/URL just looked like the import silently vanished.
+      toast.error(`Import failed for "${displayName}": ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       streamingSuppressedAssetIdsRef.current.delete(placeholderId);
     }
@@ -381,6 +402,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
     if (config.file && config.file.name.toLowerCase().endsWith('.vrm') && config.vrmAction === 'equip-avatar') {
       await avatarManagerRef.current?.loadLocalVRM(config.file);
+      toast.success(`Avatar "${config.file.name}" equipped`);
       if (config.saveToInventory && inventoryServiceRef.current) {
         const buffer = await config.file.arrayBuffer();
         await inventoryServiceRef.current.saveItem({
@@ -421,6 +443,13 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
     let asset: LoadedAsset | null = null;
     streamingSuppressedAssetIdsRef.current.add(placeholderId);
+    if (config.file && assetType === 'video') {
+      net.registerHostedFile(placeholderId, config.file);
+      const vss = videoStreamingServiceRef.current;
+      if (vss) {
+        vss.registerHostFile(config.file, placeholderId, config.file.type);
+      }
+    }
     try {
       if (config.file) {
         asset = await assetManager.importFile(config.file, pos, config, placeholderId);
@@ -436,43 +465,42 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
           resetVideoInactivityTimer();
         }
         recordSpawnUndo(asset);
-        if (
-          config.file &&
-          asset.type === 'video' &&
-          config.file.size > VIDEO_STREAMING_THRESHOLD
-        ) {
-          const vss = videoStreamingServiceRef.current;
-          const hint = vss.registerHostFile(config.file, asset.id, config.file.type);
-          (asset.object3d.userData as Record<string, unknown>).streamingHint = hint;
-          if (net.mode !== 'offline') {
-            net.broadcastSpawn({
-              id: asset.id,
-              name: asset.name,
-              type: asset.type as AssetSpawnData['type'],
-              position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
-              rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
-              scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
-              url: asset.url,
-              primitiveType: (asset.object3d.userData as Record<string, unknown>)?.primitiveType as AssetSpawnData['primitiveType'],
-              fileData: asset.fileData,
-              isCollidable: asset.isCollidable,
-              isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
-              materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
-              videoAspectRatio: (asset.object3d.userData as Record<string, unknown>)?.videoAspectRatio as '16:9' | '9:16' | '1:1' | 'auto' | undefined,
-              streamingHint: hint,
-              grabbable: (asset.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined
-            });
-            for (const peerId of net.peers) {
-              if (config.videoSyncMode === 'watch-party' && asset.videoElement) {
-                vss.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
-              } else {
-                vss.beginStreamingToPeer(hint, peerId).catch((err) => {
-                  console.warn('[VideoStreaming] pump failed for', peerId, err);
-                });
-              }
-            }
-          }
+
+        if (config.file) {
+          net.registerHostedFile(asset.id, config.file);
         }
+
+        if (net.mode !== 'offline') {
+          const isP2PNeeded = !asset.fileData && Boolean(config.file);
+          const p2pTransferHint = isP2PNeeded ? { id: asset.id, size: config.file!.size } : undefined;
+          const vs = asset.object3d.userData?.videoState as Record<string, unknown> | undefined;
+          net.broadcastSpawn({
+            id: asset.id,
+            name: asset.name,
+            type: asset.type as AssetSpawnData['type'],
+            position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+            rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+            scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+            url: asset.url,
+            fileData: asset.fileData,
+            fileDataOversized: isP2PNeeded ? true : undefined,
+            p2pTransferHint,
+            isCollidable: asset.isCollidable,
+            isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+            videoAspectRatio: config.videoAspectRatio,
+            subtitlesData: vs?.subtitlesData as string | undefined,
+            subtitlesEnabled: vs?.subtitlesEnabled as boolean | undefined,
+            // Compact playback/orientation snapshot so spawn receivers
+            // (and their late joiners) match the importer's flip state.
+            videoState: vs ? {
+              playing: Boolean(vs.playing),
+              currentTime: typeof vs.currentTime === 'number' ? vs.currentTime : 0,
+              globalVolume: typeof vs.globalVolume === 'number' ? vs.globalVolume : 0.8,
+              flipped: vs.flipped !== false,
+            } : undefined,
+          });
+        }
+
         if (config.saveToInventory && inventoryServiceRef.current) {
           await inventoryServiceRef.current.saveItem({
             id: asset.id,
@@ -484,6 +512,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             metadata: asset.metadata
           });
         }
+        toast.success(`Imported "${displayName}"`);
       } else {
         throw new Error('AssetManager returned null');
       }
@@ -495,6 +524,11 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
         net.broadcastPendingCancel(placeholderId);
       }
       console.warn('[Import] Failed:', err);
+      // Surface to user AND rethrow so callers (AssetImportDialog) can keep
+      // their UI open and let the user adjust settings instead of closing
+      // as if everything had succeeded.
+      toast.error(`Import failed for "${displayName}": ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
     }
   };
 

@@ -43,6 +43,16 @@ export interface AssetSpawnData {
   isPersistent?: boolean;
   materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
+  subtitlesData?: string;
+  subtitlesEnabled?: boolean;
+  /** Compact playback snapshot (host's playhead at snapshot time) so
+   *  late joiners resume at the room's position instead of 0:00. */
+  videoState?: {
+    playing?: boolean;
+    currentTime?: number;
+    globalVolume?: number;
+    flipped?: boolean;
+  };
   grabbable?: Record<string, unknown>;
   collider?: Record<string, unknown>;
   // Phase 3A: when the host imports a video too large for the sync
@@ -61,6 +71,8 @@ export interface AssetSpawnData {
     size: number;
   };
   senderPeerId?: string;
+  fileSize?: number;
+  importerPeerId?: string;
 }
 
 export interface MaterialUpdate {
@@ -201,6 +213,10 @@ export interface VideoStateData {
   playing: boolean;
   currentTime: number;
   globalVolume: number;
+  subtitlesData?: string;
+  subtitlesEnabled?: boolean;
+  /** Synced screen-mesh Y orientation (true = default flipped). */
+  flipped?: boolean;
 }
 
 export interface SceneStateSnapshot {
@@ -268,8 +284,7 @@ type EnvelopeType =
   //                      also broadcast but ONLY by the originator —
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
-  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat'
-  | 'inspector'
+  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat' | 'p2preq' | 'p2pchunk' | 'inspector'
   | 'leave' | 'ping';
 
 interface Envelope {
@@ -343,7 +358,7 @@ export class NetworkService {
   // so large asset transfers on the reliable channel cannot head-of-line
   // block movement updates.
   private readonly realtimeConns: Map<string, DataConnection> = new Map();
-  private readonly hostedAssets: Map<string, ArrayBuffer> = new Map();
+  private readonly hostedAssets: Map<string, ArrayBuffer | File | Blob> = new Map();
   // Phase 3A: outbound binary conns (host's `openBinaryChannel` dials)
   // AND inbound binary conns that arrived via `peer.on('connection')`
   // and matched the `vid-binary` metadata discriminator. Storing both
@@ -405,6 +420,27 @@ export class NetworkService {
   // "You are the host of …" every 3-4 seconds. Reset to 0 on
   // `disconnect()` so a fresh room always gets its first host message.
   private lastBecomeHostTime = 0;
+  // Pending retry scheduled when a becomeHost() call was blocked by the
+  // cooldown. Without this, a client whose host-claim attempt landed
+  // inside the throttle window silently did NOTHING — it stayed with the
+  // stale default `isHost = true`, never registered `${roomId}-host`, and
+  // no future connection event ever corrected it: a permanent phantom
+  // host. The retry re-runs the claim once the cooldown expires.
+  private becomeHostRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  // Broker-connection retry: one-shot timer + exponential-backoff
+  // counter + outage-announced flag. Drives recovery when the PeerJS
+  // signaling server drops or rate-limits us (the free cloud returns
+  // 429s under load). See scheduleBrokerRetry / recreatePeerAfterBrokerLoss.
+  private brokerRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  // How many broker-connect retries have run since the last successful
+  // 'open' — 1 s, 2 s, 4 s, … capped at 30 s. Reset to 0 on 'open' so
+  // a fresh outage starts from the shortest delay.
+  private brokerRetryAttempts = 0;
+  // True once a broker outage has been announced in chat. Cleared on
+  // the next successful 'open' (which then announces "Reconnected").
+  // Guarantees at most one "Lost connection" + one "Reconnected"
+  // message per outage episode instead of per-error spam.
+  private brokerDownNotified = false;
   // Last system-chat text + timestamp. `notifySystemChat` drops
   // identical text fired within `SYSTEM_CHAT_DEDUPE_MS` so a tight
   // loop in the network code (e.g. unavailable-id re-firing) doesn't
@@ -499,20 +535,24 @@ export class NetworkService {
       // Start as guest with a random id — we'll try to dial `${roomId}-host`
       // and only fall through to host-claim if no host exists.
       this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
+      // Assume GUEST until proven otherwise. isHost may still be true here
+      // from the class default or a previous offline session; leaving it
+      // set made every joining client render the HOST badge (App.tsx reads
+      // net.isHost immediately after initSession resolves, which is before
+      // the host dial even completes). evaluateHost() flips this back to
+      // true if the host claim actually succeeds.
+      this.isHost = false;
+      this.hostId = `${roomId}-host`;
     } else if (mode === 'paired') {
       // Pair mode: roomId IS the other peer's full peer id. We still need
       // our OWN id to register with the broker before dialing.
       this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
+      this.isHost = false;
     } else {
       return;
     }
 
-    this.peer = new Peer(this.localPeerId, {
-      debug: 1,
-      config: { iceServers: NetworkService.ICE_SERVERS }
-    });
-
-    this.bindPeerHandlers();
+    this.createPeer();
     this.registerUnloadHandlers();
     this.startHeartbeat();
   }
@@ -531,29 +571,20 @@ export class NetworkService {
    */
   public requestAssetChunk(assetId: string, peerId: string, start: number, end: number): void {
     if (this.mode === 'offline' || this.bannedPeers.has(peerId)) return;
-    let conn: DataConnection;
-    try {
-      conn = this.openAssetBinaryChannel(peerId);
-    } catch (err) {
-      console.warn('[PeerJS] failed to open asset-binary channel for', peerId, err);
-      return;
-    }
-    const req = JSON.stringify({ type: 'p2preq', id: assetId, start, end });
-    if (conn.open) {
-      try { conn.send(req); } catch (err) {
-        console.warn('[PeerJS] asset-binary request send failed for', peerId, err);
-      }
-    } else {
-      let pending = this.pendingAssetBinaryRequests.get(peerId);
-      if (!pending) {
-        pending = [];
-        this.pendingAssetBinaryRequests.set(peerId, pending);
-      }
-      if (pending.length >= SEND_TO_MAX_QUEUED) {
-        pending.shift();
-      }
-      pending.push(req);
-    }
+    this.broadcastEnvelope(this.buildEnvelope('p2preq', { id: assetId, start, end }), peerId);
+  }
+
+  /**
+   * Request an asset chunk from EVERY connected peer. Used as a
+   * recovery path when the designated sender stalls or disappears
+   * (host migration / rejoin): whichever peer currently hosts the
+   * file replies with a 'p2pchunk'; peers without it ignore the
+   * request. Receivers dedupe overlapping chunks by slot, so multiple
+   * respondents are harmless.
+   */
+  public requestAssetChunkFromAny(assetId: string, start: number, end: number): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('p2preq', { id: assetId, start, end }));
   }
 
   private registerUnloadHandlers(): void {
@@ -596,10 +627,77 @@ export class NetworkService {
     }, 4000);
   }
 
+  /** Construct a fresh Peer for the current localPeerId and bind the
+   *  standard handlers. Shared by initSession, the unavailable-id
+   *  fallback, becomeHost, and broker-outage recovery so every Peer
+   *  gets identical options and handlers. */
+  private createPeer(): void {
+    if (this.peer && !this.peer.destroyed) {
+      try { this.peer.destroy(); } catch { /* noop */ }
+    }
+    this.peer = new Peer(this.localPeerId, {
+      debug: 1,
+      config: { iceServers: NetworkService.ICE_SERVERS }
+    });
+    this.bindPeerHandlers();
+  }
+
+  /**
+   * Schedule the next broker-connection retry with exponential backoff
+   * (1 s, 2 s, 4 s, … capped at 30 s). Only one retry is ever pending:
+   * if a timer is already scheduled the request is ignored, and the
+   * retry's outcome (open / error) drives the next scheduling, so the
+   * loop can never pile up timers. The backoff counter resets on a
+   * successful broker 'open'.
+   */
+  private scheduleBrokerRetry(retryAction: () => void): void {
+    if (this.brokerRetryTimer) return;
+    const delay = Math.min(1000 * 2 ** this.brokerRetryAttempts, 30000);
+    this.brokerRetryAttempts++;
+    this.brokerRetryTimer = setTimeout(() => {
+      this.brokerRetryTimer = null;
+      if (this.mode === 'offline' || !this.roomId) return; // session torn down
+      try { retryAction(); } catch (err) {
+        console.warn('[Net] broker retry threw:', err);
+      }
+    }, delay);
+  }
+
+  /**
+   * Broker outage recovery: destroy the current Peer and register a
+   * fresh one so a rate-limit keyed on our old id/token can't keep
+   * blocking us. Guests roll a new random id; the host keeps
+   * `${roomId}-host` — if the broker still holds the old registration,
+   * the existing unavailable-id → guest → re-claim loop heals identity.
+   */
+  private recreatePeerAfterBrokerLoss(): void {
+    if (this.mode === 'offline' || !this.roomId) return;
+    if (this.mode === 'online' && this.localPeerId === `${this.roomId}-host`) {
+      // Host keeps its stable id.
+    } else {
+      this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
+    }
+    // Every conn that ran through the dead socket is gone — drop them
+    // so broadcasts don't hit PeerJS "Connection is not open" errors.
+    this.dataConns.clear();
+    this.realtimeConns.clear();
+    this.pendingEnvelopes.clear();
+    this.pendingRealtimeEnvelopes.clear();
+    this.createPeer();
+  }
+
   private bindPeerHandlers(): void {
     if (!this.peer) return;
 
     this.peer.on('open', (_id) => {
+      // Broker (re)connected. Reset the backoff counter so the next
+      // outage starts from the shortest delay, and close out a previous
+      // outage episode with a single "Reconnected" message.
+      this.brokerRetryAttempts = 0;
+      if (this.brokerDownNotified) {
+        this.brokerDownNotified = false;
+        this.notifySystemChat('Reconnected to the network.');
+      }
       // The broker confirmed our id. If we expected to fall back to host
       // dial or to dial-room-host, fire those now — UNLESS we ARE the
       // host (localPeerId has been re-pinned to `${roomId}-host` after a
@@ -670,6 +768,25 @@ export class NetworkService {
       // err is a typed union ('peer-unavailable' | 'unavailable-id' |
       // 'network' | 'server-error' | 'socket-error' | 'socket-closed' | …).
       const errType = (err && (err as { type?: string }).type) ?? 'unknown';
+      // Broker-level failures: the WebSocket to the PeerJS signaling
+      // server is down or rate-limited (the free cloud returns 429s
+      // under load). Notify ONCE per outage episode and schedule a
+      // backoff retry instead of spamming the chat on every error —
+      // the old code pushed "Network error: network" every ~3 s for
+      // the entire duration of an outage.
+      const brokerLevel =
+        errType === 'network' ||
+        errType === 'socket-error' ||
+        errType === 'socket-closed' ||
+        errType === 'server-error';
+      if (brokerLevel) {
+        if (!this.brokerDownNotified) {
+          this.brokerDownNotified = true;
+          this.notifySystemChat('Lost connection to the network. Retrying…');
+        }
+        this.scheduleBrokerRetry(() => this.recreatePeerAfterBrokerLoss());
+        return;
+      }
       if (errType === 'unavailable-id') {
         // Our chosen peer id was rejected. The most common cause is the
         // race where another peer claimed `${roomId}-host` first.
@@ -685,12 +802,8 @@ export class NetworkService {
         if (this.mode === 'online' && this.roomId) {
           this.isHost = false;
           this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
-          this.hostId = this.localPeerId;
-          this.peer = new Peer(this.localPeerId, {
-            debug: 1,
-            config: { iceServers: NetworkService.ICE_SERVERS }
-          });
-          this.bindPeerHandlers();
+          this.hostId = `${this.roomId}-host`;
+          this.createPeer();
           this.notifySystemChat(`Host id was taken — joining as guest.`);
         }
         return;
@@ -700,11 +813,17 @@ export class NetworkService {
     });
 
     this.peer.on('disconnected', () => {
-      // Socket dropped (e.g. broker connection lost). Try to reconnect with
-      // the SAME id so the rest of the room's peer list and our own
-      // published id stay stable.
+      // Socket dropped (e.g. broker connection lost). PeerJS's
+      // reconnect() keeps our id so the room's peer list stays stable,
+      // but retrying IMMEDIATELY during a broker outage hammers the
+      // server and just re-triggers the error spam. Back off instead
+      // (1 s, 2 s, 4 s, … capped at 30 s). If the reconnect keeps
+      // failing, the broker-level error handler escalates to a full
+      // peer recreate with a fresh id.
       if (this.peer && !this.peer.destroyed) {
-        try { this.peer.reconnect(); } catch { /* noop */ }
+        this.scheduleBrokerRetry(() => {
+          try { this.peer?.reconnect(); } catch { /* error handler escalates */ }
+        });
       }
     });
   }
@@ -774,7 +893,25 @@ export class NetworkService {
     // host/guest lines. Reset to 0 on `disconnect()` so a fresh room
     // always gets its first host message.
     const now = Date.now();
-    if (now - this.lastBecomeHostTime < NetworkService.BECOME_HOST_COOLDOWN_MS) {
+    const sinceLast = now - this.lastBecomeHostTime;
+    if (sinceLast < NetworkService.BECOME_HOST_COOLDOWN_MS) {
+      // Throttled — but do NOT silently drop the claim. A dropped claim
+      // used to strand the client as a phantom host (stale isHost=true,
+      // never registered `${roomId}-host`, nothing ever corrected it).
+      // Schedule a single retry for when the cooldown expires instead.
+      if (!this.becomeHostRetryTimer) {
+        this.becomeHostRetryTimer = setTimeout(() => {
+          this.becomeHostRetryTimer = null;
+          if (
+            this.mode === 'online' &&
+            this.roomId &&
+            !this.isHost &&
+            this.localPeerId !== `${this.roomId}-host`
+          ) {
+            this.becomeHost(this.roomId);
+          }
+        }, NetworkService.BECOME_HOST_COOLDOWN_MS - sinceLast + 50);
+      }
       return;
     }
     this.lastBecomeHostTime = now;
@@ -794,17 +931,19 @@ export class NetworkService {
     }
     this.assetBinaryConns.clear();
     this.pendingAssetBinaryRequests.clear();
-    this.hostedAssets.clear();
+    // NOTE: deliberately do NOT clear `hostedAssets` here. On host
+    // migration the local scene keeps every asset id it had as a guest,
+    // including videos this client previously downloaded via P2P chunk
+    // transfer and registered at download-completion time. Clearing the
+    // map used to orphan those assets: the new host could not serve
+    // chunks, syncresp fell back to the departed importer's peerId, and
+    // every late joiner stalled on "Loading (0%)" forever.
     this.chunkedMessages.clear();
     this.pendingEnvelopes.clear();
     this.localPeerId = `${roomId}-host`;
     this.hostId = this.localPeerId;
     this.isHost = true;
-    this.peer = new Peer(this.localPeerId, {
-      debug: 1,
-      config: { iceServers: NetworkService.ICE_SERVERS }
-    });
-    this.bindPeerHandlers();
+    this.createPeer();
     void this.enableVoiceChat();
     this.notifySystemChat(`You are the host of "${roomId}".`);
   }
@@ -946,152 +1085,52 @@ export class NetworkService {
     } else {
       conn.on('open', onConnOpen);
     }
-
-    conn.on('data', (raw) => {
-      this.handleAssetBinaryMessage(conn, raw);
-    });
-
-    conn.on('close', () => {
-      if (this.assetBinaryConns.get(conn.peer) === conn) {
-        this.assetBinaryConns.delete(conn.peer);
-      }
-    });
-
-    conn.on('error', (err) => {
-      console.warn('[PeerJS] asset-binary conn error:', conn.peer, err);
-      if (this.assetBinaryConns.get(conn.peer) === conn) {
-        this.assetBinaryConns.delete(conn.peer);
-      }
-    });
   }
 
-  /**
-   * Open (or reuse) a raw-binary DataConnection to a peer for oversized
-   * asset chunk transfer. The conn is tagged with `kind: 'asset-binary'`
-   * so the remote side routes it here instead of into the JSON envelope
-   * parser.
-   */
-  private openAssetBinaryChannel(peerId: string): DataConnection {
-    if (!this.peer) throw new Error('NetworkService peer not initialized');
-    if (peerId === this.localPeerId) throw new Error('Cannot open asset-binary channel to self');
-    if (this.bannedPeers.has(peerId)) throw new Error('Cannot open asset-binary channel to a banned peer');
-    const existing = this.assetBinaryConns.get(peerId);
-    if (existing) {
-      if (existing.open) return existing;
-      // Stale closed conn: tear it down and create a fresh one.
-      try { existing.removeAllListeners(); existing.close(); } catch { /* noop */ }
-      this.assetBinaryConns.delete(peerId);
-    }
-    const conn = this.peer.connect(peerId, {
-      reliable: true,
-      serialization: 'binary',
-      metadata: { kind: 'asset-binary' }
-    });
-    this.assetBinaryConns.set(peerId, conn);
-    conn.on('open', () => {
-      this.lastSeenPeers.set(peerId, Date.now());
-      const pending = this.pendingAssetBinaryRequests.get(peerId);
-      if (pending && pending.length > 0) {
-        for (const req of pending) {
-          try { conn.send(req); } catch (err) {
-            console.warn('[PeerJS] asset-binary pending request send failed for', peerId, err);
-          }
+  private async handleAssetBinaryRequestViaEnvelope(targetPeerId: string, req: { id: string; start: number; end: number }): Promise<void> {
+    if (this.bannedPeers.has(targetPeerId)) return;
+    let hosted = this.hostedAssets.get(req.id);
+    if (!hosted) {
+      for (const [id, file] of this.hostedAssets.entries()) {
+        if (id === req.id || id.includes(req.id) || req.id.includes(id)) {
+          hosted = file;
+          break;
         }
-        this.pendingAssetBinaryRequests.delete(peerId);
       }
-    });
-    conn.on('close', () => {
-      if (this.assetBinaryConns.get(peerId) === conn) {
-        this.assetBinaryConns.delete(peerId);
-      }
-    });
-    conn.on('error', (err) => {
-      console.warn('[PeerJS] asset-binary outbound conn error:', peerId, err);
-      if (this.assetBinaryConns.get(peerId) === conn) {
-        this.assetBinaryConns.delete(peerId);
-      }
-    });
-    conn.on('data', (raw) => { this.handleAssetBinaryMessage(conn, raw); });
-    return conn;
-  }
-
-  /**
-   * Parse a raw asset-binary message. String payloads carry JSON control
-   * messages (`p2preq`); binary payloads carry a chunked data header
-   * followed by raw bytes. Fires `onP2PChunkDataCallbacks` on the
-   * receiving side.
-   *
-   * PeerJS's `serialization: 'binary'` channel can deliver the bytes in
-   * several forms depending on the browser / RTCDataChannel binaryType:
-   *   - ArrayBuffer (most desktop browsers)
-   *   - Blob (some Chromium builds when binaryType is 'blob')
-   *   - Uint8Array / other TypedArray / DataView wrappers
-   * We normalize all of those to an ArrayBuffer before decoding so the
-   * framing parser always sees the same shape.
-   */
-  private handleAssetBinaryMessage(conn: DataConnection, raw: unknown): void {
-    if (typeof raw === 'string') {
-      try {
-        const msg = JSON.parse(raw) as { type: string; id: string; start: number; end: number };
-        if (msg.type === 'p2preq') {
-          this.handleAssetBinaryRequest(conn, msg);
-        }
-      } catch (err) {
-        console.warn('[PeerJS] asset-binary control parse error from', conn.peer, err);
-      }
+    }
+    if (!hosted) {
+      console.warn('[NetworkService] p2preq requested asset not hosted:', req.id);
       return;
     }
-    // Blob payloads must be converted asynchronously. All other binary
-    // shapes are normalized synchronously to an ArrayBuffer.
-    if (raw instanceof Blob) {
-      blobToArrayBuffer(raw).then((buf) => {
-        if (buf) this.processAssetBinaryChunk(conn, buf);
-      }).catch((err) => {
-        console.warn('[PeerJS] asset-binary Blob read error from', conn.peer, err);
-      });
-      return;
-    }
-    const buf = normalizeBinaryPayload(raw);
-    if (!buf) {
-      console.warn('[PeerJS] unexpected asset-binary message type from', conn.peer, typeof raw);
-      return;
-    }
-    this.processAssetBinaryChunk(conn, buf);
-  }
 
-  private processAssetBinaryChunk(conn: DataConnection, buf: ArrayBuffer): void {
-    try {
-      const chunk = decodeAssetBinaryChunk(buf);
-      for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
-    } catch (err) {
-      console.warn('[PeerJS] asset-binary chunk decode error from', conn.peer, err);
-    }
-  }
-
-  /**
-   * Host-side handler for a chunk request received over the asset-binary
-   * channel. Reads the requested slice from `hostedAssets` and sends it
-   * back as a raw binary message on the same DataConnection so the reply
-   * cannot be routed to a stale or overwritten conn.
-   */
-  private handleAssetBinaryRequest(conn: DataConnection, req: { id: string; start: number; end: number }): void {
-    if (this.bannedPeers.has(conn.peer)) return;
-    const buffer = this.hostedAssets.get(req.id);
-    if (!buffer) return;
-    // Clamp the chunk size so a single reply never exceeds the
-    // WebRTC message comfort zone, even if a peer asks for the
-    // whole file at once.
+    const totalSize = hosted instanceof File || hosted instanceof Blob ? hosted.size : hosted.byteLength;
     let end = Math.min(req.end, req.start + MAX_ASSET_BINARY_CHUNK_BYTES);
-    end = Math.min(end, buffer.byteLength);
+    end = Math.min(end, totalSize);
     const chunkLength = end - req.start;
     if (chunkLength <= 0 || req.start < 0) {
-      console.warn('[PeerJS] invalid asset-binary request range from', conn.peer, req);
+      console.warn('[NetworkService] invalid p2preq range from', targetPeerId, req);
       return;
     }
-    const encoded = encodeAssetBinaryChunk(req.id, req.start, end, buffer, req.start, chunkLength);
-    if (conn.open) {
-      conn.send(encoded);
+
+    let chunkBuffer: ArrayBuffer;
+    if (hosted instanceof File || hosted instanceof Blob) {
+      const slice = hosted.slice(req.start, end);
+      chunkBuffer = await slice.arrayBuffer();
+    } else {
+      chunkBuffer = hosted.slice(req.start, end);
     }
+
+    const base64Data = arrayBufferToBase64(chunkBuffer);
+    const chunkEnv: Envelope = {
+      type: 'p2pchunk',
+      payload: {
+        id: req.id,
+        start: req.start,
+        end,
+        data: base64Data
+      }
+    };
+    this.broadcastEnvelope(chunkEnv, targetPeerId);
   }
 
   private callPeerForAudio(peerId: string): void {
@@ -1297,14 +1336,38 @@ export class NetworkService {
   // Envelope routing
   // ===========================================================================
   private buildEnvelope(type: EnvelopeType, payload: unknown): Envelope {
-    // AssetSpawnData.fileData is an ArrayBuffer; JSON.stringify can't
-    // serialize that natively, so base64-encode on the way out.
+    /**
+     * =========================================================================
+     * ARCHITECTURAL RULE — NEVER BASE64 ENCODE VIDEO FILES IN JSON ENVELOPES:
+     * =========================================================================
+     * Base64 encoding multi-megabyte video files (e.g. 10 MB - 500 MB) into
+     * JSON strings creates 13M-600M character strings. Passing these to
+     * `JSON.stringify` causes massive V8 main-thread GC freezes that lock up
+     * the webapp for the importer!
+     * 
+     * ALL video assets MUST bypass inline Base64 encoding (`pd.type === 'video'`).
+     * They ship with `fileData: undefined` + `fileDataOversized: true` + `p2pTransferHint`,
+     * streaming directly on-demand from browser File handles via WebRTC DataChannels.
+     */
     let prepared: unknown = payload;
     if (type === 'spawn' && payload && typeof payload === 'object') {
       const pd = payload as AssetSpawnData;
-      if (pd.fileData instanceof ArrayBuffer) {
+      const hostedFile = this.hostedAssets.get(pd.id);
+      if (pd.type === 'video' || hostedFile !== undefined) {
+        const size = hostedFile instanceof File || hostedFile instanceof Blob
+          ? hostedFile.size
+          : hostedFile instanceof ArrayBuffer
+          ? hostedFile.byteLength
+          : (pd.fileData instanceof ArrayBuffer ? pd.fileData.byteLength : 0);
+        prepared = {
+          ...pd,
+          fileData: undefined,
+          fileDataOversized: true,
+          p2pTransferHint: { id: pd.id, size },
+          senderPeerId: this.localPeerId
+        };
+      } else if (pd.fileData instanceof ArrayBuffer) {
         if (pd.fileData.byteLength > MAX_INLINED_FILE_BYTES) {
-          // Store the buffer so peers can request it later
           this.hostedAssets.set(pd.id, pd.fileData);
           prepared = {
             ...pd,
@@ -1318,20 +1381,31 @@ export class NetworkService {
         }
       }
     } else if (type === 'syncresp' && payload && typeof payload === 'object') {
-      // Sync snapshots carry an array of assets, each potentially with
-      // its own ArrayBuffer fileData. The original code only base64-
-      // encoded 'spawn' payloads — so late-joining guests received
-      // stripped fileData on syncresp and silently failed to
-      // reconstruct existing assets. Map over the array and encode
-      // each asset's fileData independently so the snapshot round-trips
-      // cleanly through the chunked-transfer path. Also applies the
-      // same per-asset size cap as the 'spawn' branch so a host with a
-      // giant asset in the scene doesn't ship a multi-MB snapshot
-      // to the late-joining guest.
       const pd = payload as SceneStateSnapshot;
       prepared = {
         ...pd,
         assets: pd.assets.map((a) => {
+          // Videos are always served via P2P chunk transfer / streaming.
+          if (a.type === 'video') {
+            const hostedFile = this.hostedAssets.get(a.id || '');
+            const size = hostedFile instanceof File || hostedFile instanceof Blob
+              ? hostedFile.size
+              : hostedFile instanceof ArrayBuffer
+              ? hostedFile.byteLength
+              : (a.fileSize || a.streamingHint?.fileSize || (a.fileData instanceof ArrayBuffer ? a.fileData.byteLength : 10000000));
+            const targetSender = hostedFile
+              ? this.localPeerId
+              : (a.importerPeerId || a.senderPeerId || this.localPeerId);
+            return {
+              ...a,
+              fileData: undefined,
+              fileDataOversized: true,
+              p2pTransferHint: { id: a.id, size: size > 0 ? size : 10000000 },
+              senderPeerId: targetSender
+            };
+          }
+
+          // Non-video assets (images, GLBs, VRMs): inline if under size cap for instant sync.
           if (a.fileData instanceof ArrayBuffer) {
             if (a.fileData.byteLength > MAX_INLINED_FILE_BYTES) {
               this.hostedAssets.set(a.id, a.fileData);
@@ -1344,6 +1418,24 @@ export class NetworkService {
               };
             }
             return { ...a, fileData: arrayBufferToBase64(a.fileData) };
+          }
+
+          const hostedFile = this.hostedAssets.get(a.id || '');
+          if (hostedFile !== undefined) {
+            const size = hostedFile instanceof File || hostedFile instanceof Blob
+              ? hostedFile.size
+              : hostedFile instanceof ArrayBuffer
+              ? hostedFile.byteLength
+              : 0;
+            if (size > MAX_INLINED_FILE_BYTES) {
+              return {
+                ...a,
+                fileData: undefined,
+                fileDataOversized: true,
+                p2pTransferHint: { id: a.id, size },
+                senderPeerId: this.localPeerId
+              };
+            }
           }
           return a;
         })
@@ -1426,6 +1518,20 @@ export class NetworkService {
     }
     this.lastSeenPeers.set(fromPeerId, Date.now());
 
+    // ISOLATION: a throwing subscriber callback (e.g. an app-level
+    // 'vidstate' handler hitting a runtime error) used to propagate
+    // straight out of PeerJS's data event and take the whole message
+    // pump down with it — every envelope after it was dropped and the
+    // session appeared completely dead. Dispatch in its own stack
+    // frame so one bad handler only loses its own envelope.
+    try {
+      this.dispatchEnvelope(env, fromPeerId);
+    } catch (err) {
+      console.warn(`[NetworkService] handler threw for '${env.type}' from ${fromPeerId}:`, err);
+    }
+  }
+
+  private dispatchEnvelope(env: Envelope, fromPeerId: string): void {
     switch (env.type) {
       case 'leave':
         this.removePeer(fromPeerId);
@@ -1462,6 +1568,29 @@ export class NetworkService {
         for (const cb of this.onSpawnCallbacks) cb(data);
         break;
       }
+      case 'p2preq': {
+        const req = env.payload as { id: string; start: number; end: number };
+        if (req && req.id) {
+          this.handleAssetBinaryRequestViaEnvelope(fromPeerId, req);
+        }
+        break;
+      }
+      case 'p2pchunk': {
+        const pd = env.payload as { id: string; start: number; end: number; data: string };
+        if (pd && pd.id && typeof pd.data === 'string') {
+          const arrayBuf = base64ToArrayBuffer(pd.data);
+          if (arrayBuf) {
+            const chunk: P2PChunkData = {
+              id: pd.id,
+              start: pd.start,
+              end: pd.end,
+              data: arrayBuf
+            };
+            for (const cb of this.onP2PChunkDataCallbacks) cb(chunk);
+          }
+        }
+        break;
+      }
       case 'rem': {
         const removedId = env.payload as string;
         // Drop any hosted oversized asset buffer for the removed id so
@@ -1482,7 +1611,9 @@ export class NetworkService {
         const snapshot = env.payload as SceneStateSnapshot;
         if (snapshot && snapshot.assets) {
           for (const asset of snapshot.assets) {
-            asset.senderPeerId = fromPeerId;
+            if (!asset.senderPeerId) {
+              asset.senderPeerId = fromPeerId;
+            }
           }
         }
         for (const cb of this.onSyncRespCallbacks) cb(snapshot);
@@ -1983,6 +2114,14 @@ export class NetworkService {
     return () => { set.delete(cb); };
   }
 
+  public registerHostedFile(id: string, fileData: ArrayBuffer | File | Blob): void {
+    this.hostedAssets.set(id, fileData);
+  }
+
+  public getHostedFile(id: string): ArrayBuffer | File | Blob | undefined {
+    return this.hostedAssets.get(id);
+  }
+
   public broadcastRemove(id: string): void {
     if (this.mode === 'offline') return;
     // Free the oversized asset buffer we were hosting for P2P chunk
@@ -2125,6 +2264,16 @@ export class NetworkService {
       clearTimeout(this.hostDialTimer);
       this.hostDialTimer = null;
     }
+    if (this.becomeHostRetryTimer) {
+      clearTimeout(this.becomeHostRetryTimer);
+      this.becomeHostRetryTimer = null;
+    }
+    if (this.brokerRetryTimer) {
+      clearTimeout(this.brokerRetryTimer);
+      this.brokerRetryTimer = null;
+    }
+    this.brokerRetryAttempts = 0;
+    this.brokerDownNotified = false;
 
     // Drop our media connections BEFORE we destroy the peer so callers
     // get a clean 'close' event rather than an abrupt drop.
@@ -2423,96 +2572,9 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 // This avoids base64 expansion and JSON.stringify overhead, which is
 // what crashes Quest on large fileData payloads.
 
-const ASSET_BINARY_MAGIC = 0x4E455841; // 'NEXA'
 // Maximum bytes the host will return in a single asset-binary chunk.
 // Keeps each WebRTC message well under the 64 KB JSON chunk ceiling
 // and avoids a single reply from bloating the SCTP send buffer.
 const MAX_ASSET_BINARY_CHUNK_BYTES = 256 * 1024;
 
-function encodeAssetBinaryChunk(
-  id: string,
-  start: number,
-  end: number,
-  source: ArrayBuffer,
-  sourceOffset: number,
-  sourceLength: number
-): ArrayBuffer {
-  const idBytes = new TextEncoder().encode(id);
-  const headerSize = 16 + idBytes.length;
-  const total = headerSize + sourceLength;
-  const buf = new ArrayBuffer(total);
-  const view = new DataView(buf);
-  let offset = 0;
-  view.setUint32(offset, ASSET_BINARY_MAGIC, true); offset += 4;
-  view.setUint32(offset, idBytes.length, true); offset += 4;
-  view.setUint32(offset, start, true); offset += 4;
-  view.setUint32(offset, end, true); offset += 4;
-  const u8 = new Uint8Array(buf);
-  u8.set(idBytes, offset);
-  offset += idBytes.length;
-  u8.set(new Uint8Array(source, sourceOffset, sourceLength), offset);
-  return buf;
-}
 
-function decodeAssetBinaryChunk(buf: ArrayBuffer): P2PChunkData {
-  const view = new DataView(buf);
-  let offset = 0;
-  const magic = view.getUint32(offset, true); offset += 4;
-  if (magic !== ASSET_BINARY_MAGIC) {
-    throw new Error(`Invalid asset-binary magic: 0x${magic.toString(16)}`);
-  }
-  const idLen = view.getUint32(offset, true); offset += 4;
-  const start = view.getUint32(offset, true); offset += 4;
-  const end = view.getUint32(offset, true); offset += 4;
-  if (offset + idLen > buf.byteLength) {
-    throw new Error('Asset-binary header claims id length beyond buffer');
-  }
-  const idBytes = new Uint8Array(buf, offset, idLen);
-  const id = new TextDecoder().decode(idBytes);
-  offset += idLen;
-  const data = buf.slice(offset);
-  return { id, start, end, data };
-}
-
-/**
- * Normalize a raw binary payload from PeerJS into a usable ArrayBuffer.
- * PeerJS's `serialization: 'binary'` DataConnection can deliver bytes as
- * ArrayBuffer, Blob, Uint8Array, or other TypedArray/DataView wrappers
- * depending on the browser's RTCDataChannel binaryType. This helper
- * converts all of those into a plain ArrayBuffer so the asset-binary
- * framing parser only has to deal with one shape.
- */
-function normalizeBinaryPayload(raw: unknown): ArrayBuffer | null {
-  if (raw instanceof ArrayBuffer) return raw;
-  if (ArrayBuffer.isView(raw)) {
-    // TypedArrays and DataViews both implement ArrayBuffer.isView.
-    // Slice the underlying buffer to get a standalone ArrayBuffer.
-    return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
-  }
-  return null;
-}
-
-/**
- * Convert a Blob to an ArrayBuffer. Uses the native `blob.arrayBuffer()`
- * when available, falling back to FileReader for older browsers (e.g.
- * Safari < 14). Returns null if the read fails so callers can log and
- * continue rather than throwing.
- */
-function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer | null> {
-  if (typeof blob.arrayBuffer === 'function') {
-    return blob.arrayBuffer().catch(() => null);
-  }
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = reader.result;
-      if (result instanceof ArrayBuffer) {
-        resolve(result);
-      } else {
-        resolve(null);
-      }
-    };
-    reader.onerror = () => resolve(null);
-    reader.readAsArrayBuffer(blob);
-  });
-}

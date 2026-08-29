@@ -59,6 +59,13 @@ export class ManipulationManager {
   private orbitControls: any = null;
   public worldRoot: THREE.Object3D | null = null;
 
+  // ====== E-rotate view suppression ======
+  // OrbitControls state captured when we disable orbit for an E+LMB
+  // selected-asset rotate (orbit mode). `null` = we did not disable it.
+  // The camera must stay still while E-rotate consumes the mouse (see
+  // isERotateMouseActive, consulted by SceneEngine.onMouseMoveForLook).
+  private _eRotateOrbitPrevEnabled: boolean | null = null;
+
   // ====== RMB-grab state (Controls-Keybinds.txt: Right Mouse Button - Grab - Move objects) ======
   // The grabbed asset and a flat "we are mid-drag" flag, distinct from
   // `isDragging` (which TransformControls also flips). Public so App.tsx
@@ -723,6 +730,18 @@ export class ManipulationManager {
         `[RMB] onPointerDown ENTER  button=${e.button}  (expected 2)  pointerType=${e.pointerType}  isGrabDragging(before)=${this.isGrabDragging}  assetMap.size=${this.assetMap?.size ?? 'null'}  isPointerLocked=${document.pointerLockElement === this.domElement}`
       );
     }
+    // E + LMB on a selected asset (orbit mode): disable OrbitControls so
+    // the camera doesn't orbit while the user E-rotates the selection.
+    // This capture-phase handler runs before OrbitControls' own pointerdown
+    // (which early-returns when `enabled === false`), so the orbit drag
+    // never starts. Restored on pointerup / window blur. RMB-grab already
+    // disables orbit in beginGrab, so the grab path is unaffected.
+    if (e.button === 0 && this.isEKeyPressed && this.selectedAsset && !this.isSpatialWindow(this.selectedAsset)) {
+      if (this.orbitControls && this.orbitControls.enabled) {
+        this._eRotateOrbitPrevEnabled = this.orbitControls.enabled;
+        this.orbitControls.enabled = false;
+      }
+    }
     if (e.button !== 2) {
       if (ManipulationManager.RMB_DEBUG_ENABLED) {
         console.log(`[RMB] onPointerDown EARLY-RETURN  reason=button_is_not_2  (got ${e.button})`);
@@ -883,13 +902,20 @@ export class ManipulationManager {
   };
 
   private onPointerUpWindow = (e: PointerEvent): void => {
+    if (e.button === 0) {
+      // E+LMB selected-asset rotate ended — restore orbit.
+      this.restoreEOrbitControls();
+      return;
+    }
     if (e.button !== 2) return;
     if (!this.isGrabDragging) return;
     this.endGrab();
   };
 
   private onWindowBlur = (): void => {
-    // Alt-tab / window-switch / dev-tools-open — release any grab in flight.
+    // Alt-tab / window-switch / dev-tools-open — restore orbit state and
+    // release any grab in flight.
+    this.restoreEOrbitControls();
     if (this.isGrabDragging) this.endGrab();
   };
 
@@ -1190,6 +1216,40 @@ export class ManipulationManager {
     return !!(asset.object3d.userData as Record<string, unknown>)?.isSpatialWindow;
   }
 
+  /**
+   * True while mouse movement should be consumed by E-rotate instead of
+   * camera look / orbit. Consulted by SceneEngine.onMouseMoveForLook via
+   * the `isERotateActive` hook (wired in App.tsx) so the view stays still
+   * while the user rotates an object with E+drag.
+   *
+   * Covers both E-rotate paths:
+   *   - E + RMB-grab: the grabbed asset is being rotated. Spatial windows
+   *     are excluded — holding E while carrying a panel keeps the normal
+   *     gravity-gun "moves with view" behavior.
+   *   - E + LMB-drag on a selected (non-window) asset: requires the left
+   *     button to actually be held (E alone with a selection does nothing).
+   */
+  public isERotateMouseActive(buttons: number): boolean {
+    if (!this.isEKeyPressed) return false;
+    if (this.isGrabDragging && this.grabbedAsset) {
+      return !this.isSpatialWindow(this.grabbedAsset);
+    }
+    if (this.selectedAsset && (buttons & 1) === 1) {
+      return !this.isSpatialWindow(this.selectedAsset);
+    }
+    return false;
+  }
+
+  /**
+   * Restore OrbitControls after an E+LMB selected-asset rotate disabled
+   * it (see onPointerDown). Safe to call when nothing was disabled.
+   */
+  private restoreEOrbitControls(): void {
+    if (this._eRotateOrbitPrevEnabled !== null && this.orbitControls) {
+      this.orbitControls.enabled = this._eRotateOrbitPrevEnabled;
+    }
+    this._eRotateOrbitPrevEnabled = null;
+  }
 
 
   private onMouseMove = (e: MouseEvent | PointerEvent): void => {
@@ -1304,6 +1364,15 @@ export class ManipulationManager {
   public selectAsset(asset: LoadedAsset | null): void {
     if (this.selectedAsset === asset) return;
 
+    /**
+     * =========================================================================
+     * ARCHITECTURAL RULE — NEVER CALL document.exitPointerLock() HERE:
+     * =========================================================================
+     * `selectAsset` is called automatically whenever an asset is imported.
+     * Calling `document.exitPointerLock()` inside this function forcibly breaks
+     * browser pointer lock during 1st-person crosshair mode, which freezes
+     * mouse movement controls and locks up the webapp for the importer!
+     */
     this.selectedAsset = asset;
     const inVR = !!(window as any).__NEXUS_VR_PRESENTING;
     if (asset && !inVR) {
@@ -1442,6 +1511,7 @@ export class ManipulationManager {
     // no separate force-clearing fallback needed (the earlier backup
     // block was unreachable dead code).
     if (this.isGrabDragging) this.endGrab();
+    this.restoreEOrbitControls();
     this.domElement.removeEventListener('pointerdown', this.onPointerDown, { capture: true });
     window.removeEventListener('mousedown', this.onMouseDownWindow, { capture: true });
     window.removeEventListener('pointerup', this.onPointerUpWindow);

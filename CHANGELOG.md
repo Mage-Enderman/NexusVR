@@ -4,7 +4,91 @@ All notable changes made during this session. Sorted by category.
 
 ---
 
+## ⚡ Performance
+
+### Subtitle Rendering FPS Recovery (High)
+- **`src/engine/AssetManager.ts`** — Cached per-cue word-wrap layout on the `SubtitleCue` object (invalidated when font size or wrap width changes). The subtitle renderer previously re-ran the full `measureText` word-wrap loop for the active cue **every animation frame** per subtitled video — dozens of text-measurement calls at 60 fps was the single largest cost, dropping two-video scenes from 60 fps into the 30s–40s.
+- **`src/engine/AssetManager.ts`** — Added dirty-tracking to both subtitle compositing tick callbacks (import-time canvas path and `enableSubtitleCanvasForVideo`). The frame copy + full-canvas GPU texture upload is now skipped entirely when the video is paused and the active cue hasn't changed, instead of redrawing 60×/s unconditionally.
+- **`src/engine/AssetManager.ts`** — Capped the `enableSubtitleCanvasForVideo` compositing canvas at 1280 wide. It previously allocated the video's native resolution — a 4K source meant a 3840×2160 canvas redrawn and re-uploaded every frame.
+- **`src/utils/subtitleParser.ts`** — Added `_wrapFontPx` cache-key field to `SubtitleCue`.
+- **`src/engine/AssetManager.ts`** — Switched subtitles from compositing into the video frame to a lightweight transparent **overlay plane** that redraws only when the active cue changes. Videos with subtitles no longer take the CPU canvas-copy path at all: the picture stays on the GPU-native `VideoTexture`, restoring full framerate for playing subtitled videos (previously ~60 → ~40 fps with two subtitled videos). The overlay's geometry follows screen resizes on `loadedmetadata`, and `enableSubtitleCanvasForVideo` now attaches an overlay instead of replacing the video texture with a full-resolution compositing canvas.
+
 ## 🐛 Bug Fixes
+
+### P2P Broke During PeerJS Broker Outage (High)
+- **`src/services/NetworkService.ts`** — The free PeerJS cloud broker (`0.peerjs.com`) rate-limits under load (HTTP 429), and the app fought it: the `disconnected` handler called `peer.reconnect()` immediately (a hot loop against the rate-limiter), and the peer `error` handler pushed `Network error: …` into chat — the 3 s text-dedupe still allowed ~20 messages/minute for the whole outage, plus a console flood of PeerJS errors. Reconnect is now scheduled with exponential backoff (1 s → 30 s cap, reset on `open`), broker-level failures (`network` / `socket-error` / `socket-closed` / `server-error`) escalate to a full peer recreate — guests with a fresh id so a rate-limit keyed on the old id/token can't keep blocking them, host keeping `${roomId}-host` so the existing unavailable-id → guest → re-claim loop heals identity — and chat now announces the outage once ("Lost connection to the network. Retrying…") plus a single "Reconnected to the network." when the broker comes back, instead of per-error spam.
+- **`src/services/NetworkService.ts`** — Peer construction is centralized in `createPeer()` (shared by initSession, the unavailable-id fallback, becomeHost, and broker-outage recovery) so every Peer gets identical options and handlers; retry state is cleared on `disconnect()`.
+
+### Video / Subtitle Orientation Lost Across Peers (High)
+- **`src/engine/AssetManager.ts`** — `attachSubtitleOverlay` hardcoded `overlay.scale.y = -1`, so subtitles attached to an already-unflipped video (screen at `scale.y = 1`) rendered upside down — on the importer after a manual unflip, and on every remote user who received `subtitlesData` via a `vidstate` broadcast while their synced screen sat at `scale.y = 1`. The overlay now mirrors the screen mesh's **current** scale.y at attach time (later flips still move both together via `applyVideoState`).
+- **`src/App.tsx`** — `applyVideoState` silently no-ops while an asset isn't in the AssetManager map yet, so a flip (or subtitle attach) broadcast during a video's P2P transfer window was dropped and the video landed upside down for that peer. `net.onVideoState` now stashes the latest flip/subtitle payload per assetId in `pendingVideoStateRef`, and the P2P (`finishIfDone`) and URL import completion paths apply + clear it once the asset lands.
+- **`src/App.tsx`** — The `onAssetAdded` re-broadcast spawn for P2P-imported videos omitted `videoState` entirely, so peers receiving the video via that echo spawn lost the sender's flip orientation. The echo spawn now carries the same compact `videoState` snapshot (playing / currentTime / globalVolume / flipped) as the original spawn.
+
+### View Moved While E-Rotating Objects (High)
+- **`src/engine/SceneEngine.ts`** — `onMouseMoveForLook` rotated the camera on every mousemove while pointer-locked, even when mouse input was being consumed by E-rotate. The look handler now consults a new `isERotateActive` hook (wired to `ManipulationManager.isERotateMouseActive` in App.tsx) and bails while the user is E-rotating an object (E + RMB-grab or E + LMB on a selection) — the view stays still and only the object rotates.
+- **`src/engine/ManipulationManager.ts`** — E + LMB on a selected asset in orbit mode disabled OrbitControls at capture-phase pointerdown (restored on pointerup/blur) so the camera can't orbit mid-rotation.
+
+### Chat Composer Stole Keyboard Input (High)
+- **`src/components/ChatPanel.tsx`** — The composer autofocused when the panel opened AND refocused on every incoming message (`messages` was in the effect deps), so WASD always landed in the chat box and the user had to close the panel to walk. The panel no longer grabs focus at all (click into the input to type) and Escape releases focus back to the game without closing the panel.
+
+### Every Client Displayed Itself as Host (High)
+- **`src/services/NetworkService.ts`** — `initSession` left `isHost = true` (the class default / offline-session value) during the whole join-dial window, and App.tsx snapshots `net.isHost` immediately after `initSession` resolves — before the host dial even starts. Every joining client therefore rendered the HOST badge; a client whose dial never completed kept it forever. Online/paired sessions now start with `isHost = false` and `hostId = ${roomId}-host`; `evaluateHost()` flips it if the claim succeeds.
+- **`src/services/NetworkService.ts`** — When `becomeHost()` was blocked by the 5s race cooldown it returned silently, stranding the client as a phantom host: stale `isHost`, never registered `${roomId}-host`, and no future connection event to correct it. The claim is now rescheduled via a retry timer that fires when the cooldown expires (and is cancelled on disconnect).
+- **`src/services/NetworkService.ts`** — The `unavailable-id` guest fallback set `hostId` to the client's own freshly re-rolled peer id instead of `${roomId}-host`; corrected.
+
+### Subtitle Attach Crash Took Down Peer Messaging (Critical)
+- **`src/engine/AssetManager.ts`** — `enableSubtitleCanvasForVideo` called `group.find(...)`, but THREE.`Object3D` has no array methods — every subtitle attach (or incoming `vidstate` carrying subtitle data) for an overlay-less video threw `TypeError: group.find is not a function`. Now traverses children manually.
+- **`src/services/NetworkService.ts`** — Envelope dispatch had no exception isolation: one throwing subscriber callback propagated out of PeerJS's data event and killed the connection's message pump, making the whole session appear network-dead. Dispatch now runs in its own stack frame (`dispatchEnvelope`) with per-envelope try/catch, so a bad handler only loses its own message.
+
+### Video Volume Defaults to Local Mode
+- **`src/engine/AssetManager.ts`** — New videos now default `volumeMode: 'local'` in both `loadVideo` and `loadVideoFromStreamedSource`. The slider is a personal preference by default; 'global' remains the explicit opt-in for room-wide audio.
+
+### Synced Flip Never Applied on Remote / Rejoined Clients (Critical)
+- **`src/engine/AssetManager.ts`** — `applyVideoState` compared the incoming `flipped` value against `state.flipped`, but callers that pre-merge a network payload into `userData.videoState` (App.tsx `finishIfDone`) write that field into state *before* the handler runs — so the comparison always saw "already applied" and **skipped the mesh transform entirely**. Remote clients and rejoining importers stayed stuck on the default orientation (video AND captions upside down) while the original importer saw their manual flip. The handler now treats the mesh's actual `scale.y` as the source of truth and applies whenever it differs.
+
+### Black Screen + Upside-Down Captions on Subtitled Import (Critical)
+- **`src/engine/AssetManager.ts`** — The subtitle-overlay tick registered under the same `videoTickCallbacks` asset-id key as the video-texture update tick, **replacing** it — the video texture never received `needsUpdate`, so every import with subtitles rendered a black screen. The overlay tick now chains the previously-registered callback instead of replacing it.
+- **`src/engine/AssetManager.ts`** — Caption overlay now carries the screen mesh's `scale.y = -1` orientation convention (and mirrors manual flips), fixing upside-down subtitle text.
+
+### Late-Joiner Video Orientation Not Synced (High)
+- **`src/App.tsx`** — The video flip button (`onFlip`) only mutated the local `screenMesh.scale.y`; it was never broadcast or persisted, so any manually-flipped video appeared **upside down to every other peer and late joiner**. Flips now flow through `applyVideoState` + `broadcastVideoState` and ride the scene snapshot, and the `isFlipped` UI state reads the actual screen mesh instead of the frame box.
+- **`src/engine/AssetManager.ts`** — Added synced `flipped` field to `VideoPlaybackState`; `applyVideoState` applies it by flipping the screen mesh (excluding the caption overlay plane, which stays upright).
+- **`src/handlers/assetImportHandlers.ts`** / **`src/services/NetworkService.ts`** — Spawn envelopes and `AssetSpawnData.videoState` now carry the flip flag alongside playback state.
+
+### Late-Join & Rejoin Video Sync & P2P Chunk Transfer Pipeline (Critical)
+- **`src/App.tsx`** — Unified all video asset sync events (`onSpawn`, `onSyncResp`) directly through `startP2PAssetTransfer`. Removed legacy `attachReceiver` / `vid-binary` secondary WebRTC channel hijack blocks that previously intercepted video snapshot items and caused late-joiners to stall indefinitely on `Loading (0%)` or render black screens.
+- **`src/App.tsx`** — Fixed asset lookup key in `startP2PAssetTransfer` (`const assetId = data.id`). Previously, `startP2PAssetTransfer` defaulted to `hint.id` (`vs-xyz123`), which failed to match `data.id` stored in `NetworkService.hostedAssets`. The host logged `p2preq requested asset not hosted` and dropped chunk requests. Correcting this ensures `p2preq` chunk requests match `hostedAssets` 100%.
+- **`src/services/NetworkService.ts`** — Preserved target `senderPeerId` on snapshot assets in `handleEnvelopeFrom('syncresp')` (`if (!asset.senderPeerId) asset.senderPeerId = fromPeerId`). Ensures chunk requests target the actual peer hosting the file handle.
+- **`src/services/NetworkService.ts`** — Removed recursive `p2preq` control envelope forwarding in `handleAssetBinaryRequestViaEnvelope` that previously caused infinite network ping-pong loops and browser main-thread freezes when an asset ID was unhosted.
+- **`src/engine/AssetManager.ts`** — Lowered `videoTickCallbacks` VideoTexture update threshold from `video.readyState >= 2` to `video.readyState >= 1` (`HAVE_METADATA`). Paused videos created from local Blob URLs reach `readyState = 1` before `play()`; lowering the threshold allows thumbnail frame 0 to upload to the GPU texture immediately, eliminating black screens.
+- **`src/App.tsx`** — Added explicit image MIME type resolution (`image/jpeg`, `image/png`, `image/webp`) when reconstructing `File` objects from `data.fileData` in `onSyncResp`, ensuring `AssetManager.importFile` identifies image extensions and loads textures immediately.
+- **`src/App.tsx`** — Synchronized `videoState` (`currentTime`, `playing` status) in `finishIfDone` inside `startP2PAssetTransfer`, ensuring late-joining clients match the room host's playback position and play status upon chunk download completion.
+- **`src/App.tsx`** — Restored subtitle data for late joiners on both video paths: the scene-snapshot builder (`onSyncReq`) now includes `subtitlesData` / `subtitlesEnabled` / compact playback `videoState` from each asset's `userData.videoState`, and `finishIfDone` passes `subtitleText` through to `importFile` so re-imported videos take the subtitle CanvasTexture path from the first frame (previously videos imported with subtitles via advanced import settings loaded captionless, and captions attached after import never reached late joiners).
+
+### Host-Migration Video Hosting Loss (Critical)
+- **`src/services/NetworkService.ts`** — Stopped clearing `hostedAssets` in `becomeHost()`. After host migration the new host kept every scene asset id but lost the file bytes it had downloaded as a guest, so it could not serve chunk requests; `syncresp` fell back to the departed importer's `senderPeerId` and every subsequent late joiner stalled on "Loading (0%)" forever.
+- **`src/services/NetworkService.ts`** — Added `requestAssetChunkFromAny()` broadcasting a `p2preq` envelope to all connected peers as a recovery path.
+- **`src/App.tsx`** — Added a stall watchdog to `startP2PAssetTransfer`: when no chunk bytes arrive for 5 s, remaining requests switch from the designated sender to broadcast-to-all-peers mode, so transfers complete from whichever peer still hosts the asset even if the snapshot's `senderPeerId` is stale.
+
+### Taskbar Click / Focus-Loss Frame Stall Falling Bug (Critical)
+- **`src/engine/SceneEngine.ts`** — Clamped frame `delta` in `animate()` to at most `0.1s` (100ms) and added `blur`, `focus`, and `visibilitychange` listeners. Previously, the exact moment the user clicked another window on the taskbar, Windows context-switched focus away from Chrome, causing Chrome's main thread to stall for 200ms–2000ms. Chrome executed one last render frame right as focus was lost; with an uncapped `delta` of $1\text{s} - 2\text{s}$, gravity plunged the player 50+ meters straight down in a single frame before the window suspended.
+
+### Player Falling Through Floor & Inverted Penetration Normal (Critical)
+- **`src/engine/CollisionManager.ts`** — Fixed axis of least penetration in `sphereBoxTest`. When a sphere center penetrates the top face of a floor box collider (local $Z$), `localNormal.z` is forced to `+1` (world $+Y$). Previously, sinking $5\text{cm}$ into a thin floor box inverted the normal to `-1` (downward), causing grounding checks to fail and pushing the player downward out of the bottom of the floor into the void.
+
+### Feet Height Jump & Loss of Grounding During Crouch (High)
+- **`src/engine/SceneEngine.ts`** — Anchored feet position to ground level ($Y_{\text{ground}}$) during crouch transitions. Previously, `getGroundedFloorY` computed `feetY = cameraY - currentEyeHeight` using transient camera heights, causing the feet sphere to jump $0.6\text{m}$ into the air during crouch lerps and breaking grounded status.
+- Added headroom ceiling check via `CollisionManager.checkHeadroom()`. Pressing `C` to stand up now queries overhead clearance; if a low ceiling is detected, uncrouching is blocked until stepping out into open space.
+
+### VR Locomotion Missing Collider Grounding (High)
+- **`src/engine/SceneEngine.ts`** — Connected VR walk locomotion branch to `CollisionManager.getGroundedFloorY()`. Previously, VR gravity hardcoded floor height at $Y=0$, ignoring all scene colliders. VR players can now stand on elevated boxes, ramps, and platforms.
+
+## 🚀 Features & Enhancements
+
+### Capsule Character Collider (High)
+- **`src/engine/CollisionManager.ts`** & **`src/engine/SceneEngine.ts`** — Upgraded character collision resolution from a single sphere to a multi-sphere **Capsule Collider** ($P_{\text{bottom}}$ feet, $P_{\text{mid}}$ waist, $P_{\text{top}}$ head). Both the body and head now collide with walls, low overhangs, and ceilings instead of clipping through.
+
+---
 
 ### Texture Anisotropic Slider Not Interactive in Pointer-Lock (High)
 - **`src/components/SceneInspectorWindow.tsx`** — Replaced `<input type="range">`

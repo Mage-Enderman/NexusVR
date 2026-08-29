@@ -373,6 +373,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
     onSpawnPrimitive,
     collisionEnabled,
     onToggleCollision,
+    allowedLocomotions,
+    onSetLocomotionMode,
   };
 
   const currentItems = menuStack.length > 0

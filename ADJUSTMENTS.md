@@ -20,6 +20,37 @@
 
 <!-- Copy the next block into here, then update -->
 
+### 2026-08-26 — P2P recovery during PeerJS broker outage
+
+- **Asked by:** user ("P2P as a whole just broke ;-;" — chat spam of "Network error: network" and console flood of PeerJS errors)
+- **What I tried to do:** stop P2P from dying (and spamming) when the PeerJS signaling server is down or rate-limiting (the free cloud returns HTTP 429 under load — verified by probing `0.peerjs.com`).
+- **Root causes & fixes applied:**
+  - **Reconnect hot loop (`src/services/NetworkService.ts`):** `disconnected` called `peer.reconnect()` immediately; against a rate-limiter every attempt failed and re-triggered the error handler. Now scheduled with exponential backoff (1 s → 30 s cap, reset on broker `open`).
+  - **Chat spam (`src/services/NetworkService.ts`):** the peer `error` handler pushed `Network error: …` to chat per error, deduped only 3 s for identical text (~20 msgs/min for the whole outage). Broker-level failures (`network`/`socket-error`/`socket-closed`/`server-error`) now notify once per episode ("Lost connection to the network. Retrying…") + a single "Reconnected to the network." on the next `open`.
+  - **No recovery path (`src/services/NetworkService.ts`):** a rate-limit keyed on our id/token could block `reconnect()` forever. Broker-level errors now escalate to `recreatePeerAfterBrokerLoss()` — destroy + register a fresh peer (guests roll a new id; the host keeps `${roomId}-host` so the unavailable-id → guest → re-claim loop heals identity). Peer construction centralized in `createPeer()`; retry state cleared on `disconnect()`.
+- **Outcome:** succeeded. Verified with `npm run build`. Underlying root cause is the free PeerJS cloud being rate-limited; the app now recovers automatically and stays quiet while it does.
+
+### 2026-08-26 — Video / subtitle orientation sync fixes
+
+- **Asked by:** user ("Sometimes subtitles will be upside for remote users. Sometimes the video is upside down for everyone. I can't tell what's causing this")
+- **What I tried to do:** find why video orientation / subtitle orientation goes wrong across peers.
+- **Root causes & fixes applied:**
+  1. **Subtitle overlay hardcoded to -1 (`src/engine/AssetManager.ts`):** `attachSubtitleOverlay` always set `overlay.scale.y = -1`, so captions attached to a video whose screen was at `scale.y = 1` (unflipped) rendered upside down — importer after a manual unflip, and all remotes receiving `subtitlesData` via `vidstate`. Fixed: the overlay now mirrors the screen mesh's current scale.y at attach time.
+  2. **Flip lost during P2P transfer (`src/App.tsx`):** `applyVideoState` no-ops while the asset isn't imported yet, so a flip broadcast during a video's transfer window was dropped and the video landed upside down for that peer. Fixed: `net.onVideoState` stashes the latest flip/subtitle payload in `pendingVideoStateRef`; P2P `finishIfDone` and URL import paths apply + clear it on landing.
+  3. **Echo spawn dropped videoState (`src/App.tsx`):** the `onAssetAdded` re-broadcast for P2P-imported videos omitted `videoState`, so peers receiving the video via the echo lost the sender's flip. Fixed: echo spawn now carries the same compact `videoState` snapshot.
+- **Outcome:** succeeded. Verified with `npm run build`.
+
+### 2026-08-26 — E-rotate view suppression
+
+- **Asked by:** user ("When the user is holding an object and holding right click and E the mouse input should be used to rotate the object and not move their view")
+- **What I tried to do:** stop the camera from rotating while the user E-rotates an object (first-person mouse-look and orbit mode).
+- **Root causes & fixes applied:**
+  - **View moved during E-rotate (`SceneEngine.ts`, `ManipulationManager.ts`, `App.tsx`):**
+    - `SceneEngine.onMouseMoveForLook` rotated the camera on every mousemove while pointer-locked (or dragging), unaware of E-rotate — so RMB-grab + E + drag rotated both the object AND the view (double rotation).
+    - Added `ManipulationManager.isERotateMouseActive(buttons)` and a `SceneEngine.isERotateActive` hook (wired in App.tsx) consulted by `onMouseMoveForLook` to suppress look while E-rotate consumes the mouse. Covers E + RMB-grab and E + LMB-drag on a selection, pointer-locked and non-locked. Spatial windows excluded (carry keeps the gravity-gun feel).
+    - Orbit mode: E + LMB on a selected asset now disables OrbitControls at capture-phase pointerdown (restored on pointerup/blur) so the camera can't orbit mid-rotation.
+- **Outcome:** succeeded. Verified with `npm run build` + `npm run lint`.
+
 ### 2026-07-08 — Inspector Separate-Linked Object placement & Resonite Desktop Tool Bindings (1..8)
 
 - **Asked by:** user ("The inspector should not be parented to the object it's inspecting they are separate though linked objects" and "Here are some Resonite desktop bindings If you could apply what's relevant to Nexus that'd be great: 1 - Dequip, 2 - Developer Tool, 3 - ProtoFlux Tool, 4 - Material Tool, 5 - Shape Tool, 6 - Light Tool, 7 - Grabbable Setter Tool, 8 - Character Collider Setter Tool")

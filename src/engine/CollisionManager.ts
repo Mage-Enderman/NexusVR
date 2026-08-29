@@ -30,6 +30,12 @@ import {
 /** Player collision parameters. */
 const PLAYER_HEIGHT = 1.6;   // Eye height above floor (meters)
 const PLAYER_RADIUS = 0.3;   // Collision sphere radius (meters)
+/** Extra margin added to the feet sphere during grounding checks.
+ *  Prevents the player from "falling through" the floor when standing
+ *  at exactly the correct height — without this, the sphere-box test's
+ *  strict >= check causes a miss when the sphere barely touches the
+ *  floor surface (dist == radius). */
+const GROUND_TOLERANCE = 0.05;
 
 /** Max slope angle (in dot-product terms) the player can stand on. normal.y must exceed this. */
 const STANDABLE_NORMAL_Y = 0.3;
@@ -279,7 +285,10 @@ export class CollisionManager {
         localNormal.y = localRelative.y >= 0 ? 1 : -1;
         localPush = localNormal.clone().multiplyScalar(penY + sphereRadius);
       } else {
-        localNormal.z = localRelative.z >= 0 ? 1 : -1;
+        // Local Z penetration (e.g. floor top/bottom faces).
+        // If relative Z is above or near mid-plane (>-0.5 * halfExtents.z), force localNormal.z = +1 (upward)
+        // so penetrating a floor box from above always pushes UP, never DOWN.
+        localNormal.z = localRelative.z >= -halfExtents.z * 0.5 ? 1 : -1;
         localPush = localNormal.clone().multiplyScalar(penZ + sphereRadius);
       }
     } else {
@@ -392,6 +401,10 @@ export class CollisionManager {
    * and the "best" surface normal (the one with the highest Y component,
    * used for grounding checks).
    */
+  /**
+   * Test a sphere against all colliders and return the combined push-out
+   * and the "best" surface normal.
+   */
   private testAllColliders(
     sphereCenter: THREE.Vector3,
     sphereRadius: number,
@@ -432,31 +445,91 @@ export class CollisionManager {
     return { push: bestPush, normal: bestNormal! };
   }
 
-  // ─── Movement validation ───────────────────────────────────────────────────
+  // ─── Movement validation (Capsule) ─────────────────────────────────────────
 
   /**
-   * Resolve horizontal (XZ) collision for desktop locomotion.
-   * Y axis is NOT resolved here — the caller handles gravity + floor separately.
+   * Resolve horizontal and vertical collision for a capsule character collider.
+   * Tests bottom (feet), middle (waist), and top (head) spheres.
    */
-  public resolvePosition(proposedPosition: THREE.Vector3, eyeHeight: number = PLAYER_HEIGHT): THREE.Vector3 {
+  public resolvePosition(
+    proposedPosition: THREE.Vector3,
+    eyeHeight: number = PLAYER_HEIGHT,
+    capsuleHeight: number = PLAYER_HEIGHT + 0.1,
+  ): THREE.Vector3 {
     if (!this.enabled || this.colliders.length === 0) {
       return proposedPosition.clone();
     }
 
     const resolved = proposedPosition.clone();
-    const bodyCenter = new THREE.Vector3(
-      resolved.x,
-      resolved.y - eyeHeight * 0.5,
-      resolved.z,
-    );
+    const feetY = resolved.y - eyeHeight;
+    const radius = PLAYER_RADIUS;
 
-    const result = this.testAllColliders(bodyCenter, PLAYER_RADIUS);
-    if (result) {
-      resolved.x += result.push.x;
-      resolved.z += result.push.z;
+    // Capsule spheres
+    const feetSphere = new THREE.Vector3(resolved.x, feetY + radius, resolved.z);
+    const headSphere = new THREE.Vector3(resolved.x, feetY + capsuleHeight - radius, resolved.z);
+    const waistSphere = new THREE.Vector3(resolved.x, feetY + capsuleHeight * 0.5, resolved.z);
+
+    const spheres = [feetSphere, waistSphere, headSphere];
+
+    for (const sphere of spheres) {
+      const result = this.testAllColliders(sphere, radius);
+      if (result) {
+        resolved.x += result.push.x;
+        resolved.z += result.push.z;
+        // If head sphere collides with a low ceiling (downward push), push camera Y down
+        if (sphere === headSphere && result.normal.y < -0.3 && result.push.y < 0) {
+          resolved.y += result.push.y;
+        }
+      }
     }
 
     return resolved;
+  }
+
+  /**
+   * Check if there is enough vertical clearance above the player to uncrouch / stand up.
+   * Tests sphere samples between current top sphere and target standing top sphere.
+   * Returns true if clear (can stand up), false if blocked by an overhead collider.
+   */
+  public checkHeadroom(
+    x: number,
+    z: number,
+    feetY: number,
+    currentHeight: number,
+    targetHeight: number,
+  ): boolean {
+    if (!this.enabled || targetHeight <= currentHeight) return true;
+
+    const radius = PLAYER_RADIUS;
+    const startY = feetY + currentHeight - radius;
+    const endY = feetY + targetHeight - radius;
+
+    const stepCount = 4;
+    for (let i = 1; i <= stepCount; i++) {
+      const sampleY = startY + (endY - startY) * (i / stepCount);
+      const sampleSphere = new THREE.Vector3(x, sampleY, z);
+
+      for (const entry of this.colliders) {
+        if (!entry.collider.characterCollider) continue;
+
+        if (entry.collider.type === 'box') {
+          const result = this.sphereBoxTest(
+            sampleSphere,
+            radius * 0.9,
+            entry.collider as BoxColliderComponent,
+            entry.cache,
+          );
+          if (result) return false;
+        } else if (entry.collider.type === 'mesh') {
+          for (const tri of entry.triangles) {
+            const result = this.sphereTriangleTest(sampleSphere, radius * 0.9, tri);
+            if (result) return false;
+          }
+        }
+      }
+    }
+
+    return true;
   }
 
   /**
@@ -484,6 +557,11 @@ export class CollisionManager {
     const feetY = cameraY - eyeHeight;
     const feetSphere = new THREE.Vector3(cameraX, feetY + PLAYER_RADIUS, cameraZ);
 
+    // Use a slightly larger sphere for grounding detection. The extra
+    // GROUND_TOLERANCE prevents the strict >= check in sphereBoxTest from
+    // missing the floor when the sphere barely touches the surface.
+    const groundRadius = PLAYER_RADIUS + GROUND_TOLERANCE;
+
     let highestFloor = -Infinity;
 
     for (const entry of this.colliders) {
@@ -492,14 +570,23 @@ export class CollisionManager {
       if (entry.collider.type === 'box') {
         const result = this.sphereBoxTest(
           feetSphere,
-          PLAYER_RADIUS,
+          groundRadius,
           entry.collider as BoxColliderComponent,
           entry.cache,
         );
-        if (result && result.normal.y > STANDABLE_NORMAL_Y) {
+        // Accept the surface if EITHER:
+        //  (a) the surface normal faces upward (slope < ~72°), OR
+        //  (b) the push has an upward component — this handles the case
+        //      where the sphere is slightly INSIDE the box on the wrong
+        //      side of the center plane (e.g. a thin floor). The least-
+        //      penetration axis pushes downward, but the sphere is still
+        //      above the actual top face, so we should treat it as standable.
+        if (result && (result.normal.y > STANDABLE_NORMAL_Y || result.push.y > 0.01)) {
           // This surface is standable. Compute where the feet would rest.
           // The push moves the sphere out of the surface. The floor Y is
-          // where the sphere center ends up minus the radius.
+          // where the sphere center ends up minus the actual PLAYER_RADIUS
+          // (not the tolerance-inflated one) so the player stands at the
+          // correct height.
           const contactY = feetSphere.y + result.push.y - PLAYER_RADIUS;
           if (contactY > highestFloor) {
             highestFloor = contactY;
@@ -507,8 +594,8 @@ export class CollisionManager {
         }
       } else if (entry.collider.type === 'mesh') {
         for (const tri of entry.triangles) {
-          const result = this.sphereTriangleTest(feetSphere, PLAYER_RADIUS, tri);
-          if (result && result.normal.y > STANDABLE_NORMAL_Y) {
+          const result = this.sphereTriangleTest(feetSphere, groundRadius, tri);
+          if (result && (result.normal.y > STANDABLE_NORMAL_Y || result.push.y > 0.01)) {
             const contactY = feetSphere.y + result.push.y - PLAYER_RADIUS;
             if (contactY > highestFloor) {
               highestFloor = contactY;

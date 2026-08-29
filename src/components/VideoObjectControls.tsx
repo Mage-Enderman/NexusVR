@@ -33,6 +33,10 @@ export interface VideoObjectControlsProps {
   onFlip?: () => void;
   /** Whether the video is currently flipped */
   isFlipped?: boolean;
+  /** Subtitles toggle callback */
+  onSubtitlesToggle?: () => void;
+  /** Add subtitle file callback */
+  onAddSubtitles?: (file: File) => void;
 }
 
 /**
@@ -67,6 +71,8 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
   canToggleSyncMode = true,
   onFlip,
   isFlipped = false,
+  onSubtitlesToggle,
+  onAddSubtitles,
 }) => {
   const fillRef = useRef<HTMLDivElement | null>(null);
   const thumbRef = useRef<HTMLDivElement | null>(null);
@@ -448,6 +454,47 @@ export const VideoObjectControls: React.FC<VideoObjectControlsProps> = ({
               >
                 <span>↕️ Flip</span>
               </button>
+            )}
+
+            {/* Subtitles / Captions Toggle Button */}
+            {onSubtitlesToggle && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSubtitlesToggle();
+                }}
+                title={state.subtitlesEnabled ? 'Turn off subtitles' : 'Turn on subtitles'}
+                className={`px-3 py-2.5 rounded-xl border flex items-center gap-2 text-xs font-bold transition-all cursor-pointer shadow-sm ${
+                  state.subtitlesEnabled
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/60'
+                    : 'bg-[#181a20] text-slate-400 border-slate-700/80 hover:bg-[#242833] hover:text-white'
+                }`}
+              >
+                <span>💬 CC {state.subtitlesEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            )}
+
+            {/* Import Subtitle File Button */}
+            {onAddSubtitles && (
+              <label
+                onClick={(e) => e.stopPropagation()}
+                title="Attach .srt or .vtt subtitle file to this video"
+                className="px-3 py-2.5 rounded-xl bg-[#181a20] hover:bg-[#242833] border border-slate-700/80 hover:border-indigo-500/60 text-slate-200 hover:text-white flex items-center gap-1.5 text-xs font-bold transition-all cursor-pointer shadow-sm"
+              >
+                <span>📁 Add Subtitles</span>
+                <input
+                  type="file"
+                  accept=".srt,.vtt"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      onAddSubtitles(file);
+                      e.target.value = '';
+                    }
+                  }}
+                />
+              </label>
             )}
 
             {/* Global / Local Mode Switcher Pill Button */}

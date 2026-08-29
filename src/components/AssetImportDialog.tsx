@@ -16,6 +16,7 @@ import {
   Lock,
   CheckCircle2,
 } from 'lucide-react';
+import { toast } from '../services/ToastService.ts';
 
 export interface ImportConfig {
   file?: File;
@@ -37,11 +38,14 @@ export interface ImportConfig {
   imageDisplayMode: '2d-plane' | 'billboard' | 'panel' | 'panorama-360' | 'skybox';
   textureFiltering: 'smooth' | 'pixel-art';
   maxResolution: 'original' | '1024' | '512' | '2048';
+  skipCameraFacing?: boolean;
   // Videos
   videoSyncMode: 'persistent' | 'watch-party';
   videoAspectRatio: '16:9' | '9:16' | '1:1' | 'auto';
   videoLoop: boolean;
   videoAutoplay: boolean;
+  subtitleFile?: File;
+  subtitleText?: string;
   // VRM
   vrmAction: 'equip-avatar' | 'spawn-npc';
   /** Flip standard 3D model (GLB/GLTF/OBJ/FBX) 180° around X axis (fixes upside-down OpenCV +Y down export format). Defaults to false. */
@@ -218,6 +222,8 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16' | '1:1' | 'auto'>('auto');
   const [videoLoop, setVideoLoop] = useState<boolean>(true);
   const [videoAutoplay, setVideoAutoplay] = useState<boolean>(true);
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [subtitleText, setSubtitleText] = useState<string>('');
 
   // VRM settings
   const [vrmAction, setVrmAction] = useState<'equip-avatar' | 'spawn-npc'>('equip-avatar');
@@ -275,8 +281,22 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setSelectedFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      const files = Array.from(e.target.files);
+      const videoF = files.find(f => ['.mp4', '.webm', '.mov'].some(ext => f.name.toLowerCase().endsWith(ext)));
+      const subF = files.find(f => ['.srt', '.vtt'].some(ext => f.name.toLowerCase().endsWith(ext)));
+      if (videoF) {
+        setSelectedFile(videoF);
+        if (subF) {
+          setSubtitleFile(subF);
+          subF.text().then(setSubtitleText).catch(() => {});
+        }
+      } else if (subF) {
+        setSubtitleFile(subF);
+        subF.text().then(setSubtitleText).catch(() => {});
+      } else {
+        setSelectedFile(files[0]);
+      }
       if (page === 'select-source') {
         goToPage('what-are-you-importing');
       }
@@ -286,8 +306,22 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setSelectedFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files);
+      const videoF = files.find(f => ['.mp4', '.webm', '.mov'].some(ext => f.name.toLowerCase().endsWith(ext)));
+      const subF = files.find(f => ['.srt', '.vtt'].some(ext => f.name.toLowerCase().endsWith(ext)));
+      if (videoF) {
+        setSelectedFile(videoF);
+        if (subF) {
+          setSubtitleFile(subF);
+          subF.text().then(setSubtitleText).catch(() => {});
+        }
+      } else if (subF) {
+        setSubtitleFile(subF);
+        subF.text().then(setSubtitleText).catch(() => {});
+      } else {
+        setSelectedFile(files[0]);
+      }
       setActiveTab('file');
       if (page === 'select-source') {
         goToPage('what-are-you-importing');
@@ -310,6 +344,15 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     submittingRef.current = true;
     setIsSubmitting(true);
 
+    let finalSubText = subtitleText;
+    if (!finalSubText && subtitleFile) {
+      try {
+        finalSubText = await subtitleFile.text();
+      } catch {
+        finalSubText = '';
+      }
+    }
+
     const config: ImportConfig = {
       file: activeTab === 'file' && selectedFile ? selectedFile : undefined,
       url: activeTab === 'url' ? urlInput.trim() : undefined,
@@ -326,6 +369,8 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       videoAspectRatio,
       videoLoop,
       videoAutoplay,
+      subtitleFile: subtitleFile || undefined,
+      subtitleText: finalSubText.trim() ? finalSubText : undefined,
       vrmAction,
       flipModel180,
       // splatFlip180 is the user-facing toggle bound to the "Flip Model
@@ -340,9 +385,21 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       splatEnableLod,
     };
 
-    await onImport(config);
-    setIsSubmitting(false);
-    onClose();
+    // Keep the dialog open (spinner visible) until the import promise
+    // settles. Previously we closed immediately, so the "Running Import..."
+    // state was never visible and failures were completely silent.
+    try {
+      await onImport(config);
+      onClose();
+    } catch (err) {
+      console.warn('[Import] Failed:', err);
+      const label = selectedFile ? ` for "${selectedFile.name}"` : '';
+      toast.error(`Import failed${label}: ${err instanceof Error ? err.message : String(err)}`);
+      // Stay open and re-arm the submit button so the user can adjust
+      // settings (e.g. different scale mode) and retry.
+      setIsSubmitting(false);
+      submittingRef.current = false;
+    }
   };
 
   const category = getFileCategory();
@@ -1279,6 +1336,42 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                       />
                       <span>Autoplay Video & Audio</span>
                     </label>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-800">
+                    <span className="text-[11px] text-slate-300 block mb-1 font-semibold">
+                      Subtitles / Captions (.srt, .vtt)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <label className="btn btn-glass text-[11px] py-1.5 px-3 cursor-pointer flex items-center gap-1.5 text-cyan-300 border-cyan-500/30 hover:border-cyan-400">
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{subtitleFile ? subtitleFile.name : 'Attach Subtitle File (.srt / .vtt)'}</span>
+                        <input
+                          type="file"
+                          accept=".srt,.vtt"
+                          className="hidden"
+                          onChange={(e) => {
+                            if (e.target.files && e.target.files[0]) {
+                              const file = e.target.files[0];
+                              setSubtitleFile(file);
+                              file.text().then(setSubtitleText).catch(() => {});
+                            }
+                          }}
+                        />
+                      </label>
+                      {subtitleFile && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSubtitleFile(null);
+                            setSubtitleText('');
+                          }}
+                          className="text-xs text-rose-400 hover:text-rose-300 underline font-semibold"
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}

@@ -148,6 +148,8 @@ export interface VideoActions {
   onVolumeChange: (vol: number) => void;
   onVolumeModeToggle: (mode: 'global' | 'local') => void;
   onMuteToggle: () => void;
+  onSubtitlesToggle?: () => void;
+  onAddSubtitles?: (file: File) => void;
   onClose: () => void;
 }
 
@@ -3549,6 +3551,8 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
               onVolumeChange={videoActions.onVolumeChange}
               onVolumeModeToggle={videoActions.onVolumeModeToggle}
               onMuteToggle={videoActions.onMuteToggle}
+              onSubtitlesToggle={videoActions.onSubtitlesToggle}
+              onAddSubtitles={videoActions.onAddSubtitles}
               onClose={videoActions.onClose}
               compact={true}
             />

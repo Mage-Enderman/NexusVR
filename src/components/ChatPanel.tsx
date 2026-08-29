@@ -20,6 +20,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [input, setInput] = useState('');
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const unbind = networkService.onChat((msg) => {
@@ -31,9 +32,18 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   useEffect(() => {
     if (isOpen) {
       onReadMessages();
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [isOpen, messages, onReadMessages]);
+  }, [isOpen, onReadMessages]);
+
+  // Scroll to the newest message whenever the log changes, but do NOT
+  // (re)focus the composer here. Autofocusing — and worse, refocusing on
+  // every incoming message — steals keyboard input from movement: WASD
+  // landed in the chat box and the user had to close the panel to walk
+  // again. The composer only takes focus when the user clicks/tabs into
+  // it; Escape releases it back to the game.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,7 +81,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               className={`flex flex-col ${msg.isSystem ? 'items-center my-2' : (msg.senderId === networkService.localPeerId ? 'items-end' : 'items-start')}`}
             >
               {msg.isSystem ? (
-                <span className="text-[10px] font-semibold text-slate-400 bg-slate-800/80 px-2.5 py-1 rounded-full border border-white/5">
+                <span className="selectable-text text-[10px] font-semibold text-slate-400 bg-slate-800/80 px-2.5 py-1 rounded-full border border-white/5">
                   {msg.text}
                 </span>
               ) : (
@@ -88,7 +98,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                       {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
-                  <p className="leading-relaxed break-words">{msg.text}</p>
+                  <p className="selectable-text leading-relaxed break-words">{msg.text}</p>
                 </div>
               )}
             </div>
@@ -100,10 +110,19 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       {/* Input */}
       <form onSubmit={handleSend} className="p-3 border-t border-white/10 bg-slate-900/60 flex items-center gap-2">
         <input
+          ref={inputRef}
           type="text"
           placeholder="Type a message..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            // Escape releases keyboard focus back to the game so movement
+            // keys work again without having to close the whole panel.
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              inputRef.current?.blur();
+            }
+          }}
           className="text-input text-xs py-2 px-3 flex-1 rounded-xl bg-black/40"
         />
         <button

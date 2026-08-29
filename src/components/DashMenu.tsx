@@ -5,11 +5,12 @@ import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryItem } from '../services/InventoryService.ts';
 import type { GraphicsSettings, PerformanceStats } from '../engine/SceneEngine.ts';
 import { SplatGraphicsSection } from './SplatGraphicsSection.tsx';
+import type { SubtitleSettings } from '../utils/subtitleSettings.ts';
 import { 
   Shield, Users, Key, Settings as SettingsIcon, Package, HelpCircle, 
   X, Volume2, VolumeX, RefreshCw, Navigation, UserX, AlertTriangle, 
   Check, Sparkles, Trash2, Edit2, FolderPlus, Folder, FolderInput, ChevronDown,
-  Mic, MicOff, Monitor, Eye, Sliders, Cpu, User
+  Mic, MicOff, Monitor, Eye, Sliders, Cpu, User, Tv
 } from 'lucide-react';
 
 export interface DashMenuProps {
@@ -41,6 +42,8 @@ export interface DashMenuProps {
   graphicsSettings?: GraphicsSettings;
   performanceStats?: PerformanceStats;
   onUpdateGraphicsSettings?: (newSettings: Partial<GraphicsSettings>) => void;
+  subtitleSettings?: SubtitleSettings;
+  onUpdateSubtitleSettings?: (newSettings: Partial<SubtitleSettings>) => void;
   /**
    * SceneEngine reference, forwarded to `SplatGraphicsSection` so the
    * "No Limit" preset can display the platform default LoD budget.
@@ -89,8 +92,10 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   onToggleMute,
   onOpenSaveLoad,
   onRespawnSelf,
+  subtitleSettings,
+  onUpdateSubtitleSettings,
 }) => {
-  const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'splats' | 'controls'>('session');
+  const [activeTab, setActiveTab] = useState<'session' | 'inventory' | 'settings' | 'video' | 'splats' | 'controls'>('session');
   const [sessionSubTab, setSessionSubTab] = useState<'users' | 'permissions'>('users');
   const [dashNameInput, setDashNameInput] = useState<string>(userName);
 
@@ -109,6 +114,12 @@ export const DashMenu: React.FC<DashMenuProps> = ({
   const [isRenamingFolder, setIsRenamingFolder] = useState<boolean>(false);
   const [folderRenameInput, setFolderRenameInput] = useState<string>('');
   const [showFolderMoveDropdown, setShowFolderMoveDropdown] = useState<boolean>(false);
+
+  // Two-click confirmation for destructive actions. First click arms the
+  // button (stores what is pending deletion / ban); second click within the
+  // window executes. Clicking elsewhere / re-selecting disarms.
+  const [pendingDeleteKey, setPendingDeleteKey] = useState<string | null>(null);
+  const [pendingBanPeerId, setPendingBanPeerId] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -155,7 +166,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
     }>
       <div className={isSpatial
         ? 'w-full h-full flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden'
-        : 'w-full max-w-5xl h-[80vh] flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden'
+        : 'w-full max-w-5xl h-[85vh] max-h-[850px] min-h-[480px] flex flex-col bg-slate-900/95 border border-slate-700/80 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.8)] overflow-hidden'
       }>
         
         {/* Top Header */}
@@ -182,10 +193,10 @@ export const DashMenu: React.FC<DashMenuProps> = ({
         </div>
 
         {/* Main Body with Tabs */}
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex min-h-0 overflow-hidden">
           
           {/* Left Navigation Tabs */}
-          <div className={isSpatial ? 'w-48 border-r border-slate-800 bg-slate-950/40 p-2 flex flex-col gap-1' : 'w-60 border-r border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-1.5'}>
+          <div className={isSpatial ? 'w-48 border-r border-slate-800 bg-slate-950/40 p-2 flex flex-col gap-1 overflow-y-auto' : 'w-60 border-r border-slate-800 bg-slate-950/40 p-3 flex flex-col gap-1.5 overflow-y-auto'}>
             <button
               onClick={() => setActiveTab('session')}
               className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'session' ? 'dash-tab-active-cyan' : 'dash-tab'}`}
@@ -231,6 +242,17 @@ export const DashMenu: React.FC<DashMenuProps> = ({
             </button>
 
             <button
+              onClick={() => setActiveTab('video')}
+              className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'video' ? 'dash-tab-active-indigo' : 'dash-tab'}`}
+            >
+              <Tv className={isSpatial ? 'w-4 h-4 text-indigo-400' : 'w-5 h-5 text-indigo-400'} />
+              <div className="flex-1">
+                <div className={isSpatial ? 'text-xs' : ''}>Video & Subtitles</div>
+                <div className="text-[10px] text-slate-500 font-normal">Captions, styles & defaults</div>
+              </div>
+            </button>
+
+            <button
               onClick={() => setActiveTab('splats')}
               className={`flex items-center gap-2 ${isSpatial ? 'px-3 py-2' : 'px-4 py-3'} text-left ${activeTab === 'splats' ? 'dash-tab-active-emerald' : 'dash-tab'}`}
             >
@@ -255,7 +277,7 @@ export const DashMenu: React.FC<DashMenuProps> = ({
           </div>
 
           {/* Right Content Area */}
-          <div className={isSpatial ? 'flex-1 overflow-y-auto p-4' : 'flex-1 overflow-y-auto p-6'}>
+          <div className={isSpatial ? 'flex-1 overflow-y-auto min-h-0 p-4' : 'flex-1 overflow-y-auto min-h-0 p-6'}>
             
             {/* SESSION TAB */}
             {activeTab === 'session' && (
@@ -395,10 +417,23 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
                                 {canAdmin && (
                                   <button
-                                    onClick={() => onModerateUser('ban', user.id)}
-                                    className="px-3 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition ml-auto"
+                                    onClick={() => {
+                                      if (pendingBanPeerId === user.id) {
+                                        setPendingBanPeerId(null);
+                                        onModerateUser('ban', user.id);
+                                      } else {
+                                        setPendingBanPeerId(user.id);
+                                      }
+                                    }}
+                                    className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition ml-auto border ${
+                                      pendingBanPeerId === user.id
+                                        ? 'bg-rose-600/50 hover:bg-rose-600/60 text-white border-rose-400 animate-pulse'
+                                        : 'bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border-rose-500/40'
+                                    }`}
+                                    title={pendingBanPeerId === user.id ? 'Click again to confirm permanent ban' : 'Ban this user permanently (requires two clicks)'}
                                   >
-                                    <AlertTriangle className="w-3.5 h-3.5" /> Ban Forever
+                                    <AlertTriangle className="w-3.5 h-3.5" />
+                                    {pendingBanPeerId === user.id ? 'Confirm Ban?' : 'Ban Forever'}
                                   </button>
                                 )}
                               </>
@@ -669,6 +704,13 @@ export const DashMenu: React.FC<DashMenuProps> = ({
 
                       <button
                         onClick={() => {
+                          const key = selectedFolder ? `folder:${selectedFolder}` : selectedItem?.id ?? null;
+                          if (!key) return;
+                          if (pendingDeleteKey !== key) {
+                            setPendingDeleteKey(key);
+                            return;
+                          }
+                          setPendingDeleteKey(null);
                           if (selectedFolder) {
                             onDeleteInventoryFolder?.(selectedFolder);
                             setSelectedItemId(null);
@@ -679,14 +721,16 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                         }}
                         disabled={(!selectedItem || isSelectedPrimitive) && !selectedFolder}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
-                          selectedFolder || (selectedItem && !isSelectedPrimitive)
+                          pendingDeleteKey
+                            ? 'bg-rose-500/40 hover:bg-rose-500/50 text-white border-rose-400 animate-pulse'
+                            : selectedFolder || (selectedItem && !isSelectedPrimitive)
                             ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border-rose-500/40 hover:border-rose-400'
                             : 'bg-slate-900/40 text-slate-600 border-slate-800 cursor-not-allowed'
                         }`}
-                        title="Delete selected asset or folder"
+                        title={pendingDeleteKey ? 'Click again to permanently delete' : 'Delete selected asset or folder (requires two clicks)'}
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        Delete
+                        {pendingDeleteKey ? 'Confirm Delete?' : 'Delete'}
                       </button>
                     </div>
                   </div>
@@ -1259,6 +1303,204 @@ export const DashMenu: React.FC<DashMenuProps> = ({
                     </div>
                   </div>
                 )}
+
+              </div>
+            )}
+
+            {/* DEDICATED VIDEO & SUBTITLES TAB */}
+            {activeTab === 'video' && (
+              <div className="space-y-6 animate-in fade-in duration-150">
+                <div className="pb-4 border-b border-slate-800 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="font-bold text-white text-base flex items-center gap-2">
+                      <Tv className="w-5 h-5 text-indigo-400" /> Video & Subtitle Preferences
+                    </h3>
+                    <p className="text-xs text-slate-400">Configure caption styles, text outline vs background box, color, and default behavior.</p>
+                  </div>
+                </div>
+
+                {/* Auto-display CC toggle */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-indigo-500/30 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-white">Display Subtitles by Default</h4>
+                      <p className="text-xs text-slate-400">Automatically display captions when importing a video with a subtitle file</p>
+                    </div>
+                    <button
+                      onClick={() => onUpdateSubtitleSettings?.({ showByDefault: !(subtitleSettings?.showByDefault ?? true) })}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold transition shadow-lg ${
+                        subtitleSettings?.showByDefault !== false
+                          ? 'bg-indigo-500 text-slate-950 hover:bg-indigo-400'
+                          : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                      }`}
+                    >
+                      {subtitleSettings?.showByDefault !== false ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Style Mode: Outline vs Background Box */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/80 space-y-4">
+                  <div>
+                    <h4 className="text-sm font-bold text-white">Caption Style Mode</h4>
+                    <p className="text-xs text-slate-400">Choose between a crisp text stroke outline or a solid background box</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => onUpdateSubtitleSettings?.({ styleMode: 'outline' })}
+                      className={`p-3.5 rounded-xl text-xs font-bold border transition flex items-center justify-center gap-2 ${
+                        subtitleSettings?.styleMode === 'outline' || !subtitleSettings?.styleMode
+                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/60 shadow-lg'
+                          : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      ✨ Black Text Outline
+                    </button>
+                    <button
+                      onClick={() => onUpdateSubtitleSettings?.({ styleMode: 'background' })}
+                      className={`p-3.5 rounded-xl text-xs font-bold border transition flex items-center justify-center gap-2 ${
+                        subtitleSettings?.styleMode === 'background'
+                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/60 shadow-lg'
+                          : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      ⬛ Background Box
+                    </button>
+                  </div>
+
+                  {/* Outline Thickness (Visible when Outline mode is selected) */}
+                  {(subtitleSettings?.styleMode === 'outline' || !subtitleSettings?.styleMode) && (
+                    <div className="space-y-3 pt-2 border-t border-slate-800/80 animate-in fade-in duration-150">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                          Outline Stroke Thickness
+                        </label>
+                        <div className="grid grid-cols-3 gap-2">
+                          {[
+                            { label: 'Thin (12%)', value: 'thin' },
+                            { label: 'Medium (22%)', value: 'medium' },
+                            { label: 'Thick (36%)', value: 'thick' },
+                          ].map((opt) => (
+                            <button
+                              key={opt.value}
+                              onClick={() => onUpdateSubtitleSettings?.({ outlineThickness: opt.value as 'thin' | 'medium' | 'thick' })}
+                              className={`py-2 px-3 rounded-xl text-xs font-bold border transition ${
+                                (subtitleSettings?.outlineThickness ?? 'medium') === opt.value
+                                  ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/60 shadow-md'
+                                  : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:border-slate-700'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Background Color & Opacity (Visible when Background Box mode is selected) */}
+                  {subtitleSettings?.styleMode === 'background' && (
+                    <div className="space-y-4 pt-2 border-t border-slate-800/80 animate-in fade-in duration-150">
+                      <div className="space-y-2">
+                        <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                          Background Pill Color
+                        </label>
+                        <div className="flex items-center gap-3">
+                          {['#000000', '#0f172a', '#1e1b4b', '#1e293b', '#022c22'].map((hex) => (
+                            <button
+                              key={hex}
+                              onClick={() => onUpdateSubtitleSettings?.({ bgColor: hex })}
+                              className={`w-8 h-8 rounded-xl border flex items-center justify-center transition ${
+                                subtitleSettings?.bgColor === hex ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:scale-105'
+                              }`}
+                              style={{ backgroundColor: hex }}
+                            >
+                              {subtitleSettings?.bgColor === hex && <Check className="w-4 h-4 text-white" />}
+                            </button>
+                          ))}
+                          <input
+                            type="color"
+                            value={subtitleSettings?.bgColor || '#000000'}
+                            onChange={(e) => onUpdateSubtitleSettings?.({ bgColor: e.target.value })}
+                            className="w-9 h-8 bg-transparent cursor-pointer rounded-lg overflow-hidden border border-slate-700"
+                            title="Custom background color"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-2 pt-1">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="font-semibold text-slate-300 uppercase tracking-wider">Background Opacity</span>
+                          <span className="font-mono text-indigo-300 font-bold text-sm">{Math.round((subtitleSettings?.bgOpacity ?? 0.84) * 100)}%</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.1"
+                          max="1.0"
+                          step="0.05"
+                          value={subtitleSettings?.bgOpacity ?? 0.84}
+                          onChange={(e) => onUpdateSubtitleSettings?.({ bgOpacity: parseFloat(e.target.value) })}
+                          className="w-full h-2 bg-slate-900 rounded-lg appearance-none cursor-pointer accent-indigo-500"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Font Size Selector */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/80 space-y-3">
+                  <div>
+                    <h4 className="text-sm font-bold text-white">Subtitle Font Size</h4>
+                    <p className="text-xs text-slate-400">Scale caption text size relative to screen height</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { label: 'Small (80%)', value: 0.8 },
+                      { label: 'Normal (100%)', value: 1.0 },
+                      { label: 'Large (120%)', value: 1.2 },
+                    ].map((opt) => (
+                      <button
+                        key={opt.value}
+                        onClick={() => onUpdateSubtitleSettings?.({ fontScale: opt.value })}
+                        className={`py-3 px-4 rounded-xl text-xs font-bold border transition ${
+                          (subtitleSettings?.fontScale ?? 1.0) === opt.value
+                            ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/60 shadow-lg'
+                            : 'bg-slate-900/80 text-slate-400 border-slate-800 hover:border-slate-700'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Live Interactive Style Preview Box */}
+                <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/80 space-y-3">
+                  <h4 className="text-sm font-bold text-white">Live Caption Style Preview</h4>
+                  <div className="w-full h-32 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center p-4 overflow-hidden relative shadow-inner">
+                    <div className="absolute inset-0 bg-gradient-to-tr from-slate-900 via-indigo-950/40 to-slate-900 opacity-60" />
+                    <div
+                      className="relative z-10 text-center font-bold font-sans transition-all duration-150"
+                      style={{
+                        fontSize: `${16 * (subtitleSettings?.fontScale ?? 1.0)}px`,
+                        lineHeight: 1.3,
+                        padding: subtitleSettings?.styleMode === 'background' ? '8px 18px' : '0px',
+                        borderRadius: '8px',
+                        backgroundColor: subtitleSettings?.styleMode === 'background'
+                          ? `rgba(${parseInt((subtitleSettings?.bgColor || '#000000').slice(1, 3) || '0', 16)}, ${parseInt((subtitleSettings?.bgColor || '#000000').slice(3, 5) || '0', 16)}, ${parseInt((subtitleSettings?.bgColor || '#000000').slice(5, 7) || '0', 16)}, ${subtitleSettings?.bgOpacity ?? 0.84})`
+                          : 'transparent',
+                        color: '#ffffff',
+                        WebkitTextStroke: subtitleSettings?.styleMode === 'outline' || !subtitleSettings?.styleMode
+                          ? `${Math.max(1, (subtitleSettings?.outlineThickness === 'thin' ? 1.5 : subtitleSettings?.outlineThickness === 'thick' ? 4.5 : 2.8) * (subtitleSettings?.fontScale ?? 1.0))}px ${subtitleSettings?.outlineColor || '#000000'}`
+                          : '0px transparent',
+                        paintOrder: 'stroke fill',
+                        textShadow: subtitleSettings?.styleMode === 'background' ? '0 1px 4px rgba(0,0,0,0.8)' : 'none',
+                      }}
+                    >
+                      Sample Subtitle Text Preview
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 

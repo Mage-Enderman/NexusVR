@@ -153,6 +153,11 @@ export class SceneEngine {
   public collisionManager!: CollisionManager;
 
   public isVRHandGrabbing?: (side: 'left' | 'right') => boolean;
+  // Injected by App.tsx from ManipulationManager.isERotateMouseActive. When
+  // this returns true, mouse movement is consumed by E-rotate (E + RMB-grab,
+  // or E + LMB-drag on a selection) and onMouseMoveForLook must NOT rotate
+  // the camera — otherwise the view spins while the user rotates an object.
+  public isERotateActive?: (buttons: number) => boolean;
   private updateCallbacks: Set<SceneUpdateCallback> = new Set();
   // Callbacks fired after `renderer.render()` completes each frame.
   // Used for operations that must run after the camera/HMD pose has
@@ -185,7 +190,7 @@ export class SceneEngine {
 
   // ── Respawn safety net ──────────────────────────────────────────────
   /** World-space position the player returns to on respawn. */
-  public respawnPoint = new THREE.Vector3(0, 1.6, 3);
+  public respawnPoint = new THREE.Vector3(0, 1.6, 3); // Updated to use standingEyeHeight on first use
   /** If the player's eye drops below this Y, auto-respawn triggers. */
   public respawnThreshold = -50;
   /** Callback fired after auto or manual respawn (for VR HUD notification etc). */
@@ -196,13 +201,21 @@ export class SceneEngine {
   public slowMovement = false;
   // ── Crouch ────────────────────────────────────────────────────────
   // Press C in walk mode to toggle crouch. Smoothly interpolates eye
-  // height between standing (1.6m) and crouched (1.0m). The grounding
-  // check uses currentEyeHeight so the player stands at the correct
-  // height on platforms while crouched.
+  // height between standing and crouched. The grounding check uses
+  // currentEyeHeight so the player stands at the correct height on
+  // platforms while crouched.
   private isCrouching = false;
-  private readonly STANDING_EYE_HEIGHT = 1.6;
-  private readonly CROUCH_EYE_HEIGHT = 1.0;
+  // Base heights at scale 1.0 — multiplied by userScale at runtime so
+  // self-scaling (Ctrl+Wheel) also changes crouch/standing heights.
+  private readonly BASE_STANDING_HEIGHT = 1.6;
+  private readonly CROUCH_RATIO = 0.625; // crouch = 62.5% of standing height
   private currentEyeHeight = 1.6;
+  /** User scale factor — starts at 1.0, updated by Ctrl+Wheel self-scale. */
+  public userScale = 1.0;
+  /** Derived standing eye height accounting for user scale. */
+  public get standingEyeHeight(): number { return this.BASE_STANDING_HEIGHT * this.userScale; }
+  /** Derived crouched eye height accounting for user scale. */
+  public get crouchEyeHeight(): number { return this.standingEyeHeight * this.CROUCH_RATIO; }
   private keysPressed: Record<string, boolean> = {};
   private fpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private isPointerLocked = false;
@@ -227,9 +240,9 @@ export class SceneEngine {
     const aspect = width / height;
     this.camera = new THREE.PerspectiveCamera(65, aspect, 0.1, 1000);
     this.camera.name = 'Main Camera';
-    // Start at average eye height (1.6m) so the user begins in a natural
+    // Start at average eye height so the user begins in a natural
     // standing position rather than floating at 2m looking down.
-    this.camera.position.set(0, 1.6, 3);
+    this.camera.position.set(0, this.standingEyeHeight, 3);
 
     // Reparent the camera under `cameraRig` so VR locomotion can later
     // translate/rotate the rig without the HMD-tracked camera matrices
@@ -289,7 +302,7 @@ export class SceneEngine {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
     this.controls.maxPolarAngle = Math.PI / 2 + 0.1; // Don't go far below floor
-    this.controls.target.set(0, 1.6, 0);
+    this.controls.target.set(0, this.standingEyeHeight, 0);
     this.controls.update();
 
     // First-person is the default mode. `setCameraMode` is a no-op when the
@@ -368,7 +381,11 @@ export class SceneEngine {
     window.addEventListener('resize', this.onWindowResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('blur', this.onWindowBlur);
+    window.addEventListener('focus', this.onWindowFocus);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.renderer.domElement.addEventListener('click', this.onCanvasClickForLock);
+    this.renderer.domElement.addEventListener('pointerdown', this.onCanvasClickForLock);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
     document.addEventListener('mousemove', this.onMouseMoveForLook);
 
@@ -378,18 +395,21 @@ export class SceneEngine {
     const floorCollider: import('../components/collider/ColliderComponent.ts').BoxColliderComponent = {
       type: 'box',
       enabled: true,
-      offset: { x: 0, y: 0, z: 0 },
       colliderType: 'Static',
       mass: 1,
       characterCollider: true,
       ignoreRaycasts: false,
-      // Size is in the mesh's LOCAL space. The floor mesh is rotated
-      // -90° around X (PlaneGeometry lies in XY, rotation flips it to XZ).
-      // After rotation: local X→world X, local Y→world -Z, local Z→world Y.
-      // So the thin dimension must be local Z (maps to world Y = height).
-      size: { x: 100, y: 100, z: 0.1 },
+      offset: { x: 0, y: 0, z: -0.95 },
+      size: { x: 100, y: 100, z: 2.0 },
     };
     (this.floorMesh.userData as Record<string, unknown>).collider = floorCollider;
+    // Force matrixWorld computation for ALL scene objects BEFORE building
+    // the collision cache. Three.js only computes matrixWorld during
+    // renderer.render(), so at init time every object's matrixWorld is
+    // still identity. If rebuildRegistry() runs first, the cache stores
+    // wrong transforms and getGroundedFloorY misses the floor on frame 1,
+    // causing the player to fall through.
+    this.scene.updateMatrixWorld(true);
     this.collisionManager.rebuildRegistry();
 
     // 10. Start Loop
@@ -798,8 +818,11 @@ export class SceneEngine {
   };
 
   private animate = (time: number): void => {
-    const delta = (time - this.lastTime) / 1000;
+    const rawDelta = (time - this.lastTime) / 1000;
     this.lastTime = time;
+    // Cap delta at 0.1s (100ms) to prevent physics explosions / floor tunneling
+    // during window-focus switches, taskbar clicks, or browser frame stalls.
+    const delta = Math.min(Math.max(rawDelta, 0), 0.1);
 
     // FPS calculation
     this.frameCount++;
@@ -850,12 +873,24 @@ export class SceneEngine {
       // bypasses rig parenting during an active XR session so writing
       // to it would have no effect on what the user sees.
       if (this.locomotionMode === 'walk') {
-        this.verticalVelocity -= 18.0 * delta;
-        this.worldRoot.position.y -= this.verticalVelocity * delta;
-        if (this.worldRoot.position.y > 0) {
-          this.worldRoot.position.y = 0;
+        this.camera.getWorldPosition(this._vrUserPosTmp);
+        const groundY = this.collisionManager.getGroundedFloorY(
+          this._vrUserPosTmp.y,
+          this._vrUserPosTmp.x,
+          this._vrUserPosTmp.z,
+          this.verticalVelocity,
+          delta,
+          this.standingEyeHeight,
+        );
+
+        if (groundY > -Infinity) {
+          this.worldRoot.position.y = -groundY;
           this.verticalVelocity = 0;
           this.isGrounded = true;
+        } else {
+          this.verticalVelocity -= 18.0 * delta;
+          this.worldRoot.position.y -= this.verticalVelocity * delta;
+          this.isGrounded = false;
         }
       }
     } else {
@@ -913,9 +948,23 @@ export class SceneEngine {
 
     if (this.cameraMode === 'first-person') {
       this.keysPressed[e.code] = true;
-      // C key — toggle crouch in walk mode
+      // C key — toggle crouch in walk mode (checks headroom before uncrouching)
       if ((e.code === 'KeyC' || e.key === 'c' || e.key === 'C') && this.locomotionMode === 'walk') {
-        this.isCrouching = !this.isCrouching;
+        if (this.isCrouching) {
+          const feetY = this.camera.position.y - this.currentEyeHeight;
+          const isClear = this.collisionManager.checkHeadroom(
+            this.camera.position.x,
+            this.camera.position.z,
+            feetY,
+            this.currentEyeHeight * 1.0625,
+            this.standingEyeHeight * 1.0625,
+          );
+          if (isClear) {
+            this.isCrouching = false;
+          }
+        } else {
+          this.isCrouching = true;
+        }
       }
     } else if (this.cameraMode === 'orbit') {
       if (e.code === 'KeyC' || e.key === 'c' || e.key === 'C') {
@@ -934,7 +983,17 @@ export class SceneEngine {
     this.keysPressed[e.code] = false;
   };
 
-  private onCanvasClickForLock = (): void => {
+  public canAcquirePointerLock?: () => boolean;
+
+  private onCanvasClickForLock = (e?: MouseEvent): void => {
+    if (this.canAcquirePointerLock && !this.canAcquirePointerLock()) {
+      return;
+    }
+    if (e && e.target && e.target instanceof HTMLElement) {
+      if (e.target.closest('button, input, textarea, select, a, [role="dialog"], .modal-overlay')) {
+        return;
+      }
+    }
     if (this.cameraMode === 'first-person' && !this.isVRMode && !this.isPointerLocked) {
       this.renderer.domElement.requestPointerLock();
     }
@@ -947,6 +1006,19 @@ export class SceneEngine {
     if (wasLocked && !this.isPointerLocked) {
       this.spatialPanelManager?.clearLockedHover();
     }
+  };
+
+  private onWindowBlur = (): void => {
+    this.keysPressed = {};
+    this.lastTime = performance.now();
+  };
+
+  private onWindowFocus = (): void => {
+    this.lastTime = performance.now();
+  };
+
+  private onVisibilityChange = (): void => {
+    this.lastTime = performance.now();
   };
 
   private onMouseMoveForLook = (e: MouseEvent): void => {
@@ -962,7 +1034,13 @@ export class SceneEngine {
     // checking tagName is sufficient.
     const focusedTag = (document.activeElement as HTMLElement)?.tagName ?? '';
     const focusInPanel = ['INPUT', 'TEXTAREA', 'SELECT'].includes(focusedTag);
-    if (this.cameraMode === 'first-person' && !this.isVRMode && this.isPointerLocked && !(window as any).__isRadialMenuOpen && !focusInPanel) {
+    const isDraggingLook = !this.isPointerLocked && (e.buttons === 1 || e.buttons === 2);
+    // E-rotate (E + RMB-grab, or E + LMB on a selection) consumes mouse
+    // movement for rotating the OBJECT — the camera must stay still while
+    // that is happening. The hook is wired from App.tsx to
+    // ManipulationManager.isERotateMouseActive.
+    if (this.isERotateActive?.(e.buttons)) return;
+    if (this.cameraMode === 'first-person' && !this.isVRMode && (this.isPointerLocked || isDraggingLook) && !(window as any).__isRadialMenuOpen && !focusInPanel) {
       const movementX = e.movementX || 0;
       const movementY = e.movementY || 0;
       this.fpEuler.setFromQuaternion(this.camera.quaternion);
@@ -1017,25 +1095,29 @@ export class SceneEngine {
       this.camera.position.addScaledVector(moveDir, speed);
     }
 
-    // Full collision resolution for walk/flight modes.
-    // resolvePosition uses sphere-vs-OBB which naturally handles both
-    // horizontal (walking into walls) and vertical (landing on platforms)
-    // via the contact normal — no separate floor check needed.
+    // Full collision resolution for walk/flight modes using capsule collider.
     if (this.locomotionMode === 'walk' || this.locomotionMode === 'flight') {
-      const resolved = this.collisionManager.resolvePosition(this.camera.position, this.currentEyeHeight);
+      const capsuleHeight = this.currentEyeHeight * 1.0625;
+      const resolved = this.collisionManager.resolvePosition(
+        this.camera.position,
+        this.currentEyeHeight,
+        capsuleHeight,
+      );
       this.camera.position.copy(resolved);
     }
 
     // ── Crouch: smooth eye-height transition ────────────────────────
-    const targetHeight = this.isCrouching ? this.CROUCH_EYE_HEIGHT : this.STANDING_EYE_HEIGHT;
-    this.currentEyeHeight += (targetHeight - this.currentEyeHeight) * Math.min(1, delta * 30);
-    if (Math.abs(this.currentEyeHeight - targetHeight) < 0.01) {
-      this.currentEyeHeight = targetHeight;
-    }
+    // IMPORTANT: Grounding runs FIRST (below), using the PRE-LERP eye
+    // height. Only after grounding is resolved do we lerp toward the
+    // target. This prevents the feet sphere from jumping during the
+    // transition and losing grounded state.
+    const targetHeight = this.isCrouching ? this.crouchEyeHeight : this.standingEyeHeight;
 
     // Grounding check for walk mode — used to allow/disallow jumping.
     // getGroundedFloorY finds the highest collider surface near the player's
     // feet and returns it if the feet are close enough (within GROUND_TOLERANCE).
+    // Uses the CURRENT (pre-lerp) eye height so the feet position is stable
+    // during crouch transitions.
     if (this.locomotionMode === 'walk') {
       const groundY = this.collisionManager.getGroundedFloorY(
         this.camera.position.y,
@@ -1062,6 +1144,12 @@ export class SceneEngine {
         // objects with collider components (e.g. the floor mesh's BoxCollider).
         this.isGrounded = false;
       }
+    }
+
+    // Now apply the crouch lerp AFTER grounding is resolved.
+    this.currentEyeHeight += (targetHeight - this.currentEyeHeight) * Math.min(1, delta * 30);
+    if (Math.abs(this.currentEyeHeight - targetHeight) < 0.01) {
+      this.currentEyeHeight = targetHeight;
     }
 
     // Flight-mode floor height boundary
@@ -1218,7 +1306,7 @@ export class SceneEngine {
       if (area?.enabled) {
         spawnPos = computeSpawnPosition(this.spawnPointObj);
         // Ensure the player spawns above the floor (eye height)
-        spawnPos.y = Math.max(spawnPos.y, 1.6);
+        spawnPos.y = Math.max(spawnPos.y, this.standingEyeHeight);
       }
     }
     if (this.isVRMode) {
@@ -1266,7 +1354,7 @@ export class SceneEngine {
     if (mode === 'first-person') {
       this.controls.enabled = false;
       this.fpEuler.setFromQuaternion(this.camera.quaternion);
-      this.camera.position.y = 1.6; // Average eye height
+      this.camera.position.y = this.standingEyeHeight;
       this.keysPressed = {};
     } else {
       if (document.pointerLockElement === this.renderer.domElement) {
@@ -1310,6 +1398,9 @@ export class SceneEngine {
     window.removeEventListener('resize', this.onWindowResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onWindowBlur);
+    window.removeEventListener('focus', this.onWindowFocus);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
     this.renderer.domElement.removeEventListener('click', this.onCanvasClickForLock);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
     document.removeEventListener('mousemove', this.onMouseMoveForLook);

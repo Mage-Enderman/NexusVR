@@ -1,4 +1,4 @@
-﻿import * as THREE from 'three';
+import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
@@ -14,6 +14,9 @@ import {
   shouldAlwaysDownscaleVideo,
 } from '../utils/deviceTier.ts';
 import { SplatMesh, SplatFileType, PagedSplats } from '@sparkjsdev/spark';
+
+import { parseSubtitles, type SubtitleCue } from '../utils/subtitleParser.ts';
+import { loadSubtitleSettings, type SubtitleSettings } from '../utils/subtitleSettings.ts';
 
 export type AssetType = '3d-model' | 'image' | 'video' | 'vrm' | 'misc' | 'primitive' | 'splat';
 
@@ -55,6 +58,12 @@ export interface VideoPlaybackState {
   muted: boolean;
   /** Video synchronization mode */
   syncMode?: 'persistent' | 'watch-party';
+  subtitlesEnabled?: boolean;
+  subtitlesData?: string;
+  /** Screen-mesh Y flip. true = scale.y -1 (the default that corrects
+   *  the browser's compositing flip); synced so peers and late joiners
+   *  match a manually-toggled orientation. */
+  flipped?: boolean;
 }
 
 import type { ContextMenuItemDef } from './ContextMenuManager.ts';
@@ -68,6 +77,8 @@ export interface LoadedAsset {
   fileData?: ArrayBuffer;
   isCollidable: boolean;
   videoElement?: HTMLVideoElement;
+  subtitleCues?: SubtitleCue[];
+  subtitlesData?: string;
   contextMenuItems?: ContextMenuItemDef[];
   metadata?: {
     fileSize?: number;
@@ -78,17 +89,6 @@ export interface LoadedAsset {
 }
 
 export class AssetManager {
-  /**
-   * Maximum bytes we'll hoist into a heap-resident ArrayBuffer for a
-   * video import so we can attach it to LoadedAsset.fileData and ship
-   * it through the spawn / syncresp broadcast envelope. MUST be ≤
-   * NetworkService.MAX_INLINED_FILE_BYTES (15 MB) — anything larger
-   * would be stripped at buildEnvelope time anyway, so re-allocating
-   * a doomed ArrayBuffer would just re-create the multi-GB OOM the
-   * Phase 2 video-bytes fix was preventing.
-   */
-  private static readonly SMALL_VIDEO_BYTES = 15 * 1024 * 1024; // 15 MB
-
   private scene: THREE.Scene;
   /**
    * Parent for spawned objects. In the SceneEngine VR-locomotion
@@ -137,6 +137,15 @@ export class AssetManager {
   }
 
   public assets: Map<string, LoadedAsset> = new Map();
+  public subtitleSettings: SubtitleSettings = loadSubtitleSettings();
+
+  public setSubtitleSettings(settings: SubtitleSettings): void {
+    this.subtitleSettings = settings;
+  }
+
+  public setCamera(camera: THREE.Camera): void {
+    this.camera = camera;
+  }
   private pendingLiveStreams: Map<string, MediaStream> = new Map();
   private videoTickCallbacks: Map<string, () => void> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
@@ -192,9 +201,12 @@ export class AssetManager {
    */
   private static readonly LOCAL_MSE_BYTES = 50 * 1024 * 1024; // 50 MB
 
-  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D, rawFilesStore?: RawFilesStore, videoStreamingService?: VideoStreamingService) {
+  private camera: THREE.Camera | null = null;
+
+  constructor(scene: THREE.Scene, worldRoot: THREE.Object3D, rawFilesStore?: RawFilesStore, videoStreamingService?: VideoStreamingService, camera?: THREE.Camera) {
     this.scene = scene;
     this.worldRoot = worldRoot;
+    if (camera) this.camera = camera;
     this.gltfLoader = new GLTFLoader();
     const dracoLoader = new DRACOLoader();
     dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
@@ -411,7 +423,6 @@ export class AssetManager {
     // a large video will pin a large ArrayBuffer; we trade that
     // for the ability to ship the bytes intact through the spawn
     // envelope. Quest 8GB RAM still applies.
-    const isSmallVideo = isVideoExt && file.size <= AssetManager.SMALL_VIDEO_BYTES;
     // Bytes-phase progress (simplified). We deliberately DON'T stream
     // through FileReader.readAsArrayBuffer.onprogress here even though it
     // would give a more granular 0..50% readout, because:
@@ -427,7 +438,7 @@ export class AssetManager {
     // Therefore: one 50% tick after the bytes resolve, then the loader
     // resolves at 100%. The placeholder shows a smooth 0 -> 50 -> 100
     // sweep with no visible percentage jitter.
-    const arrayBuffer = (isVideoExt && !isSmallVideo && !config?.importAsRawFile)
+    const arrayBuffer = (isVideoExt && !config?.importAsRawFile)
       ? null
       : await file.arrayBuffer();
     if (onProgress) {
@@ -1066,6 +1077,15 @@ export class AssetManager {
         imgMesh.position.z = 0.028;
         group.add(imgMesh);
 
+        if (this.camera) {
+          const camPos = this.camera.position;
+          const dx = camPos.x - pos.x;
+          const dz = camPos.z - pos.z;
+          if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+            group.rotation.y = Math.atan2(dx, dz);
+          }
+        }
+
         resolve({
           id,
           name,
@@ -1137,6 +1157,7 @@ export class AssetManager {
     // when the user hits Play inside a Three.js panel.
     video.preload = 'auto';
     video.playsInline = true;
+    try { video.load(); } catch { /* ignore */ }
 
     // Phase 2 + tier-aware VRAM cap. Default VideoTexture ships a
     // full-resolution RGBA frame every rAF tick — a 4K video source
@@ -1147,109 +1168,111 @@ export class AssetManager {
     // device here. The CanvasTexture path skips mipmap generation,
     // so VRAM cost is exactly (w×h×4) bytes regardless of source
     // resolution.
-    const downscalePlan = await this.shouldDownscaleVideoForVRAM(video, name);
+    const group = new THREE.Group();
+    group.position.copy(pos);
+
+    // Subtitle processing
+    let subtitlesText = config?.subtitleText;
+    if (!subtitlesText && config?.subtitleFile) {
+      try {
+        subtitlesText = await config.subtitleFile.text();
+      } catch (e) {
+        console.warn('[AssetManager] Failed to read config.subtitleFile:', e);
+      }
+    }
+
+    let subtitleCues: SubtitleCue[] = [];
+    if (subtitlesText) {
+      subtitleCues = parseSubtitles(subtitlesText);
+    }
+
+    const downscalePlan = this.shouldDownscaleVideoForVRAM(video, name);
+    // NOTE: subtitles no longer force the composited-canvas path. They
+    // render on a lightweight transparent overlay plane instead, so the
+    // video itself stays on the GPU-native VideoTexture path — captions
+    // used to cost ~30 fps because every frame was CPU-copied into a
+    // canvas and re-uploaded as a texture.
+
     let texture: THREE.VideoTexture | THREE.CanvasTexture;
     let canvasEl: HTMLCanvasElement | null = null;
     let canvasCtx: CanvasRenderingContext2D | null = null;
-    let rVfcHandle: number | null = null;
 
-    if (downscalePlan.downscale) {
+    if (downscalePlan.downscale || subtitleCues.length > 0) {
       canvasEl = document.createElement('canvas');
+      canvasEl.width = downscalePlan.width || 1280;
+      canvasEl.height = downscalePlan.height || 720;
       canvasCtx = canvasEl.getContext('2d');
-      if (canvasCtx) {
-        canvasEl.width = downscalePlan.width;
-        canvasEl.height = downscalePlan.height;
-        texture = new THREE.CanvasTexture(canvasEl);
-        (texture as THREE.CanvasTexture).colorSpace = THREE.SRGBColorSpace;
-        (texture as THREE.CanvasTexture).minFilter = THREE.LinearFilter;
-        (texture as THREE.CanvasTexture).magFilter = THREE.LinearFilter;
-        (texture as THREE.CanvasTexture).generateMipmaps = false;
-        // Pump frames to the canvas via requestVideoFrameCallback when
-        // available. Falls back to rAF if rVFC isn't supported (desktop
-        // Quest browser supports both).
-        const drawFrame = () => {
-          if (!canvasCtx || !canvasEl) return;
-          if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-            // Aspect-fit into the 1280x720 canvas.
-            const vw = video.videoWidth, vh = video.videoHeight;
-            const canvasAspect = canvasEl.width / canvasEl.height;
-            const videoAspect = vw / vh;
-            let dw: number, dh: number;
-            if (videoAspect > canvasAspect) {
-              dw = canvasEl.width;
-              dh = Math.round(canvasEl.width / videoAspect);
-            } else {
-              dh = canvasEl.height;
-              dw = Math.round(canvasEl.height * videoAspect);
-            }
-            try {
-              canvasCtx.drawImage(video, 0, 0, dw, dh);
-              (texture as THREE.CanvasTexture).needsUpdate = true;
-            } catch {
-              // drawImage can throw on certain tainted frames; ignore to
-              // avoid an unhandled error spamming the console.
-            }
-          }
-        };
-        if ('requestVideoFrameCallback' in video) {
-          const tick = (_now: number, _meta: object) => {
-            drawFrame();
-            rVfcHandle = (video as HTMLVideoElement & { requestVideoFrameCallback: (cb: (n: number, m: object) => void) => number }).requestVideoFrameCallback(tick);
-          };
-          rVfcHandle = (video as HTMLVideoElement & { requestVideoFrameCallback: (cb: (n: number, m: object) => void) => number }).requestVideoFrameCallback(tick);
-        } else {
-          // rAF fallback for browsers without rVFC.
-          const raf = () => {
-            drawFrame();
-            if (canvasCtx) requestAnimationFrame(raf);
-          };
-          requestAnimationFrame(raf);
+      const canvasTexture = new THREE.CanvasTexture(canvasEl);
+      canvasTexture.colorSpace = THREE.SRGBColorSpace;
+      canvasTexture.minFilter = THREE.LinearFilter;
+      canvasTexture.magFilter = THREE.LinearFilter;
+      canvasTexture.generateMipmaps = false;
+      texture = canvasTexture;
+
+      // PERF: per-tick dirty tracking. The composited output only
+      // changes when the video advances a frame OR the active cue
+      // changes — while paused with the same cue showing there is no
+      // reason to re-copy the frame and re-upload a full 1280x720
+      // texture to the GPU 60 times per second.
+      let lastDrawnTime = -1;
+      let lastDrawnCue: SubtitleCue | null | undefined = undefined; // undefined = never drawn
+
+      this.videoTickCallbacks.set(id, () => {
+        if (!(video.readyState >= 1 && video.videoWidth > 0 && video.videoHeight > 0)) return;
+        const curTime = video.currentTime;
+        const vs = group.userData?.videoState as VideoPlaybackState | undefined;
+        const cues = (group.userData?.subtitleCues || subtitleCues) as SubtitleCue[] | undefined;
+        const subEnabled = vs ? vs.subtitlesEnabled !== false : true;
+        let activeCue: SubtitleCue | null = null;
+        if (subEnabled && cues && cues.length > 0) {
+          activeCue = cues.find((c) => c.start <= curTime && curTime <= c.end) ?? null;
         }
-      } else {
-        // Canvas creation failed (rare; e.g. context lost). Fall
-        // through to plain VideoTexture.
-        texture = new THREE.VideoTexture(video);
-        texture.colorSpace = THREE.SRGBColorSpace;
-      }
+        const frameChanged = !video.paused || curTime !== lastDrawnTime;
+        if (!frameChanged && lastDrawnCue !== undefined && activeCue === lastDrawnCue) return;
+
+        const vw = video.videoWidth, vh = video.videoHeight;
+        if (!downscalePlan.downscale && (canvasEl!.width !== vw || canvasEl!.height !== vh)) {
+          canvasEl!.width = vw;
+          canvasEl!.height = vh;
+        }
+        let dw = canvasEl!.width;
+        let dh = canvasEl!.height;
+        if (downscalePlan.downscale) {
+          const canvasAspect = canvasEl!.width / canvasEl!.height;
+          const videoAspect = vw / vh;
+          if (videoAspect > canvasAspect) {
+            dw = canvasEl!.width;
+            dh = Math.round(canvasEl!.width / videoAspect);
+          } else {
+            dh = canvasEl!.height;
+            dw = Math.round(canvasEl!.height * videoAspect);
+          }
+        }
+        try {
+          canvasCtx?.drawImage(video, 0, 0, dw, dh);
+          // NOTE: captions are NOT composited here — they live on the
+          // separate SubtitleOverlay plane (see attachSubtitleOverlay).
+          // Drawing them here too would render every cue twice.
+          canvasTexture.needsUpdate = true;
+          lastDrawnTime = curTime;
+          lastDrawnCue = activeCue;
+        } catch {
+          /* ignore */
+        }
+      });
     } else {
       texture = new THREE.VideoTexture(video);
       texture.colorSpace = THREE.SRGBColorSpace;
-      // Even on the HW decode path, skip mipmaps to halve VRAM cost
-      // (no halving of GPU bandwidth — but a one-time save).
       texture.minFilter = THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = false;
-    }
 
-    this.videoTickCallbacks.set(id, () => {
-      if (downscalePlan.downscale && canvasCtx && canvasEl) {
-        if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-          const vw = video.videoWidth, vh = video.videoHeight;
-          const canvasAspect = canvasEl.width / canvasEl.height;
-          const videoAspect = vw / vh;
-          let dw: number, dh: number;
-          if (videoAspect > canvasAspect) {
-            dw = canvasEl.width;
-            dh = Math.round(canvasEl.width / videoAspect);
-          } else {
-            dh = canvasEl.height;
-            dw = Math.round(canvasEl.height * videoAspect);
-          }
-          try {
-            canvasCtx.drawImage(video, 0, 0, dw, dh);
-            (texture as THREE.CanvasTexture).needsUpdate = true;
-          } catch {
-            /* ignore */
-          }
+      this.videoTickCallbacks.set(id, () => {
+        if (video.readyState >= 1) {
+          texture.needsUpdate = true;
         }
-      } else if (video.readyState >= 2) {
-        texture.needsUpdate = true;
-      }
-    });
-    // Stash the rVfcHandle + canvas element on userData so removeAsset
-    // can cancel the callback and dispose the canvas. See dispose
-    // path at the bottom of the file for the consumer.
-    // (The handle + canvas are also captured in the closure below.)
+      });
+    }
 
     let width = 3.0;
     let height = 1.6875; // 16:9
@@ -1260,9 +1283,6 @@ export class AssetManager {
       width = 2.2;
       height = 2.2;
     }
-
-    const group = new THREE.Group();
-    group.position.copy(pos);
 
     const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.08);
     const frameMat = new THREE.MeshStandardMaterial({ color: '#07090e', roughness: 0.2, metalness: 0.8 });
@@ -1276,24 +1296,33 @@ export class AssetManager {
     screenMesh.scale.y = -1; // Flip video — Three.js reads raw unrotated frames
     group.add(screenMesh);
 
-    // Source-of-truth playback state lives on userData. UI components
-    // read from it directly (no events), so the React inspector /
-    // VR HUD both see consistent values without us needing a
-    // subscribe/notify bridge that fires on every play / timeupdate.
-    // Mirrors the `isPersistent` userData pattern used elsewhere in
-    // this codebase — keeps networked + local state colocated on the
-    // same Three.js node.
+    // Captions ride a separate transparent overlay plane so the video
+    // texture itself stays GPU-native. The overlay only redraws when
+    // the active cue changes (~once every few seconds) instead of
+    // compositing text into the video frame 60 times per second.
+    let subtitleOverlay: THREE.Mesh | null = null;
+    if (subtitleCues.length > 0) {
+      subtitleOverlay = this.attachSubtitleOverlay(id, group, video, width, height);
+    }
+
     const videoState: VideoPlaybackState = {
       playing: false,
       currentTime: 0,
       duration: 0,
       globalVolume: 0.8,
       localVolume: 0.8,
-      volumeMode: 'global',
+      // Default to LOCAL volume so adjusting the slider is a personal
+      // preference by default; 'global' mode is the explicit opt-in for
+      // room-wide audio control.
+      volumeMode: 'local',
       muted: true,
       syncMode: config?.videoSyncMode ?? 'persistent',
+      subtitlesEnabled: this.subtitleSettings.showByDefault && (subtitleCues.length > 0),
+      subtitlesData: subtitlesText,
+      flipped: true,
     };
     group.userData.videoState = videoState;
+    group.userData.subtitleCues = subtitleCues;
     group.userData.videoAspectRatio = config?.videoAspectRatio || 'auto';
 
     video.addEventListener('loadedmetadata', () => {
@@ -1320,6 +1349,11 @@ export class AssetManager {
         frame.geometry = new THREE.BoxGeometry(newWidth + 0.1, newHeight + 0.1, 0.08);
         screenMesh.geometry.dispose();
         screenMesh.geometry = new THREE.PlaneGeometry(newWidth, newHeight);
+        // Keep the caption overlay matched to the resized screen.
+        if (subtitleOverlay) {
+          subtitleOverlay.geometry.dispose();
+          subtitleOverlay.geometry = new THREE.PlaneGeometry(newWidth, newHeight);
+        }
       }
     });
     video.addEventListener('timeupdate', () => {
@@ -1354,13 +1388,6 @@ export class AssetManager {
       try { video.pause(); } catch { /* noop */ }
       video.removeAttribute('src');
       video.load();
-      if (typeof rVfcHandle === 'number' && (video as unknown as { cancelVideoFrameCallback?: (h: number) => void }).cancelVideoFrameCallback) {
-        try { (video as unknown as { cancelVideoFrameCallback: (h: number) => void }).cancelVideoFrameCallback(rVfcHandle); }
-        catch { /* noop */ }
-      }
-      // The CanvasTexture we created in the downscaled path is
-      // disposed by texture.dispose() (Three tracks its bound canvas),
-      // and the canvas element itself is GC'd when references drop.
       if (texture && (texture as THREE.Texture).dispose) (texture as THREE.Texture).dispose();
     };
     group.userData.dispose = disposeVideoTexture;
@@ -1411,28 +1438,13 @@ export class AssetManager {
    * missing API never breaks playback; the user just gets a
    * (potentially over-budget) native frame rate.
    */
-  private async shouldDownscaleVideoForVRAM(_video: HTMLVideoElement, name: string): Promise<{ downscale: boolean; width: number; height: number }> {
+  private shouldDownscaleVideoForVRAM(_video: HTMLVideoElement, _name: string): { downscale: boolean; width: number; height: number } {
     const tier = classifyDevice();
     const cap = getMaxCanvasResolution(tier);
     if (shouldAlwaysDownscaleVideo(tier)) {
       return { downscale: true, width: cap.width, height: cap.height };
     }
-    try {
-      const mc = (navigator as Navigator & { mediaCapabilities?: { decodingInfo?: (cfg: object) => Promise<{ supported?: boolean; powerEfficient?: boolean }> } }).mediaCapabilities;
-      if (!mc?.decodingInfo) return { downscale: false, width: 0, height: 0 };
-      // Probe with `probably` instead of `maybe` — `maybe` lets the
-      // browser return supported:false on codecs it can't decode at all,
-      // which would over-trigger our downscale path. `probably` matches
-      // the codec strings we actually ship (avc1.*, vp9, opus for audio).
-      const ext = name.split('.').pop()?.toLowerCase() || 'mp4';
-      const mime = ext === 'webm' ? 'video/webm; codecs="vp9,opus"' : 'video/mp4; codecs="avc1.42E01E,mp4a.40.2"';
-      const info = await mc.decodingInfo({ type: 'video', mime });
-      if (!info.supported) return { downscale: true, width: cap.width, height: cap.height }; // can't decode -> downscale
-      if (info.powerEfficient === false) return { downscale: true, width: cap.width, height: cap.height }; // SW decode -> downscale
-      return { downscale: false, width: 0, height: 0 };
-    } catch {
-      return { downscale: false, width: 0, height: 0 };
-    }
+    return { downscale: false, width: 0, height: 0 };
   }
 
   /**
@@ -1486,7 +1498,7 @@ export class AssetManager {
 
     
 
-    const downscalePlan = await this.shouldDownscaleVideoForVRAM(videoElement, name);
+    const downscalePlan = this.shouldDownscaleVideoForVRAM(videoElement, name);
     let texture: THREE.VideoTexture | THREE.CanvasTexture;
     let rVfcHandle: number | null = null;
     let canvasEl: HTMLCanvasElement | null = null;
@@ -1531,7 +1543,7 @@ export class AssetManager {
     group.add(screenMesh);
     const videoState: VideoPlaybackState = {
       playing: false, currentTime: 0, duration: 0,
-      globalVolume: 0.8, localVolume: 0.8, volumeMode: 'global', muted: true,
+      globalVolume: 0.8, localVolume: 0.8, volumeMode: 'local', muted: true,
       syncMode: config?.videoSyncMode ?? 'persistent',
     };
     group.userData.videoState = videoState;
@@ -1789,7 +1801,281 @@ export class AssetManager {
       if (asset.metadata) asset.metadata.videoSyncMode = partial.syncMode;
       changed = true;
     }
+    if (partial.flipped !== undefined) {
+      // Synced Y-orientation of the screen mesh; captions mirror it so
+      // they stay glued to the picture.
+      //
+      // IMPORTANT: compare against the MESH, not `state.flipped`.
+      // Callers that pre-merge a network payload into userData.videoState
+      // (e.g. App.tsx finishIfDone) write partial.flipped into state
+      // BEFORE invoking this handler — a state-based comparison would
+      // then always see "already applied", skip the transform, and leave
+      // remote/rejoining clients stuck on the default orientation while
+      // the original importer sees their manual flip.
+      const desired = partial.flipped ? -1 : 1;
+      state.flipped = partial.flipped;
+      const screenMesh = asset.object3d.children.find(
+        (c): c is THREE.Mesh =>
+          c.type === 'Mesh' &&
+          c.name !== 'SubtitleOverlay' &&
+          ((c as THREE.Mesh).geometry as THREE.BufferGeometry)?.type === 'PlaneGeometry'
+      );
+      if (screenMesh && screenMesh.scale.y !== desired) {
+        screenMesh.scale.y = desired;
+        changed = true;
+      }
+      // Captions mirror the screen's orientation so they stay glued to
+      // the picture (matching the old baked-in-canvas behavior).
+      const overlay = asset.object3d.children.find((c) => c.name === 'SubtitleOverlay');
+      if (overlay && overlay.scale.y !== desired) {
+        overlay.scale.y = desired;
+        changed = true;
+      }
+    }
+    if (partial.subtitlesEnabled !== undefined) {
+      state.subtitlesEnabled = partial.subtitlesEnabled;
+      if (state.subtitlesEnabled && ((asset.subtitleCues && asset.subtitleCues.length > 0) || state.subtitlesData)) {
+        this.enableSubtitleCanvasForVideo(assetId);
+      }
+      changed = true;
+    }
+    if (partial.subtitlesData !== undefined) {
+      state.subtitlesData = partial.subtitlesData;
+      const cues = parseSubtitles(partial.subtitlesData);
+      asset.subtitleCues = cues;
+      asset.subtitlesData = partial.subtitlesData;
+      asset.object3d.userData.subtitleCues = cues;
+      state.subtitlesEnabled = cues.length > 0;
+      if (cues.length > 0) {
+        this.enableSubtitleCanvasForVideo(assetId);
+      }
+      changed = true;
+    }
     return changed;
+  }
+
+  private renderSubtitleToCanvas(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    cue: SubtitleCue
+  ): void {
+    ctx.save();
+    // 2D Canvas is drawn in standard orientation; 3D screenMesh.scale.y = -1 handles the frame flip cleanly.
+    const fontSize = Math.max(18, Math.round(height * 0.048 * this.subtitleSettings.fontScale));
+    ctx.font = `bold ${fontSize}px system-ui, -apple-system, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+
+    // Auto-wrap lines to fit within 86% of the video canvas width (leaves 7% margin on left and right)
+    const maxLineWidth = width * 0.86;
+
+    // PERF: the wrap layout is identical for every frame a given cue is
+    // on screen, but `measureText` is one of the most expensive 2D-canvas
+    // calls — re-running the word-wrap loop at 60 fps for each subtitled
+    // video was costing multiple milliseconds per frame per video and
+    // visibly tanking the render FPS. Cache the wrapped lines ON the cue
+    // object; invalidated whenever font size or wrap width changes.
+    let wrappedLines = cue._wrappedLines;
+    if (!wrappedLines || cue._wrappedWidth !== maxLineWidth || cue._wrapFontPx !== fontSize) {
+      wrappedLines = [];
+      const rawLines = cue.text.split('\n');
+
+      for (const rawLine of rawLines) {
+        const words = rawLine.trim().split(/\s+/);
+        if (words.length === 0 || !words[0]) continue;
+
+        let currentLine = words[0];
+        for (let i = 1; i < words.length; i++) {
+          const word = words[i];
+          const testLine = `${currentLine} ${word}`;
+          if (ctx.measureText(testLine).width <= maxLineWidth) {
+            currentLine = testLine;
+          } else {
+            wrappedLines.push(currentLine);
+            currentLine = word;
+          }
+        }
+        wrappedLines.push(currentLine);
+      }
+
+      cue._wrappedLines = wrappedLines;
+      cue._wrappedWidth = maxLineWidth;
+      cue._wrapFontPx = fontSize;
+    }
+
+    if (wrappedLines.length === 0) {
+      ctx.restore();
+      return;
+    }
+
+    const lineHeight = fontSize * 1.28;
+    const totalHeight = wrappedLines.length * lineHeight;
+    const paddingX = fontSize * 0.6;
+    const paddingY = fontSize * 0.3;
+    const bottomMargin = Math.max(20, Math.round(height * 0.07));
+
+    const y = height - bottomMargin - totalHeight + lineHeight;
+
+    wrappedLines.forEach((lineText, idx) => {
+      const lineY = y + idx * lineHeight;
+      const metrics = ctx.measureText(lineText);
+      const textWidth = metrics.width;
+
+      if (this.subtitleSettings.styleMode === 'background') {
+        const bgWidth = textWidth + paddingX * 2;
+        const bgHeight = lineHeight + paddingY;
+        const bgX = (width - bgWidth) / 2;
+        const bgY = lineY - fontSize - paddingY / 2;
+        ctx.fillStyle = this.subtitleSettings.bgColor || '#000000';
+        ctx.globalAlpha = this.subtitleSettings.bgOpacity ?? 0.84;
+        ctx.fillRect(bgX, bgY, bgWidth, bgHeight);
+        ctx.globalAlpha = 1.0;
+      } else {
+        const strokeWidth = this.subtitleSettings.outlineThickness === 'thick' ? 6 : this.subtitleSettings.outlineThickness === 'thin' ? 2 : 4;
+        ctx.strokeStyle = this.subtitleSettings.outlineColor || '#000000';
+        ctx.lineWidth = strokeWidth;
+        ctx.strokeText(lineText, width / 2, lineY);
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(lineText, width / 2, lineY);
+    });
+
+    ctx.restore();
+  }
+
+  /**
+   * Create (or return the existing) transparent caption overlay plane
+   * for a video asset and register its cheap cue-change tick. The
+   * overlay canvas only redraws when the active cue or the enabled
+   * flag changes — orders of magnitude cheaper than the old approach
+   * of compositing captions into the video frame every rAF.
+   */
+  private attachSubtitleOverlay(
+    id: string,
+    group: THREE.Group,
+    video: HTMLVideoElement,
+    planeW: number,
+    planeH: number
+  ): THREE.Mesh {
+    const existing = group.children.find((c) => c.name === 'SubtitleOverlay');
+    if (existing) return existing as THREE.Mesh;
+
+    const canvasEl = document.createElement('canvas');
+    const overlayW = Math.max(256, Math.round(planeW * 340)); // ~340 px per world unit, plenty for text
+    const aspect = planeH / planeW;
+    canvasEl.width = overlayW;
+    canvasEl.height = Math.max(64, Math.round(overlayW * aspect));
+    const ctx = canvasEl.getContext('2d');
+
+    const texture = new THREE.CanvasTexture(canvasEl);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+    });
+    const overlay = new THREE.Mesh(new THREE.PlaneGeometry(planeW, planeH), material);
+    overlay.name = 'SubtitleOverlay';
+    // Just in front of the screen mesh (z=0.042). The y-flip must MATCH
+    // the screen mesh's CURRENT orientation (scale.y=-1 is this app's
+    // default "flipped" convention for video content). Mirroring the live
+    // screen scale — instead of hardcoding -1 — keeps captions upright
+    // when subtitles are attached to a video that was already unflipped
+    // (scale.y=1). The old hardcode rendered captions upside down on any
+    // such video: the importer after a manual unflip, and every remote
+    // user who received subtitlesData via vidstate while their synced
+    // screen sat at scale.y=1. Later flips are handled together by
+    // applyVideoState, so only the initial value matters here.
+    overlay.position.z = 0.047;
+    const screenProbe = group.children.find(
+      (c): c is THREE.Mesh =>
+        c.type === 'Mesh' &&
+        c.name !== 'SubtitleOverlay' &&
+        ((c as THREE.Mesh).geometry as THREE.BufferGeometry)?.type === 'PlaneGeometry'
+    );
+    overlay.scale.y = screenProbe ? screenProbe.scale.y : -1;
+    overlay.renderOrder = 1;
+    group.add(overlay);
+
+    let lastDrawnCue: SubtitleCue | null | undefined = undefined;
+    let lastEnabled: boolean | undefined = undefined;
+
+    // CHAIN, don't replace: videoTickCallbacks is keyed by asset id and
+    // already holds the video-texture update tick at attach time.
+    // Overwriting it used to stop texture updates entirely -> black
+    // screen on every subtitled import.
+    const prevTick = this.videoTickCallbacks.get(id);
+    this.videoTickCallbacks.set(id, () => {
+      prevTick?.();
+      if (!ctx || video.readyState < 1) return;
+      const vs = group.userData.videoState as VideoPlaybackState | undefined;
+      const cues = (group.userData.subtitleCues || []) as SubtitleCue[];
+      const enabled = vs ? vs.subtitlesEnabled !== false : true;
+      let activeCue: SubtitleCue | null = null;
+      if (enabled && cues.length > 0) {
+        const curTime = video.currentTime;
+        activeCue = cues.find((c) => c.start <= curTime && curTime <= c.end) ?? null;
+      }
+      if (activeCue === lastDrawnCue && enabled === lastEnabled && lastDrawnCue !== undefined) return;
+
+      if (!enabled || !activeCue) {
+        ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+        texture.needsUpdate = true;
+        lastDrawnCue = activeCue;
+        lastEnabled = enabled;
+        return;
+      }
+      try {
+        ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+        this.renderSubtitleToCanvas(ctx, canvasEl.width, canvasEl.height, activeCue);
+        texture.needsUpdate = true;
+      } catch {
+        /* ignore */
+      }
+      lastDrawnCue = activeCue;
+      lastEnabled = enabled;
+    });
+
+    return overlay;
+  }
+
+  public enableSubtitleCanvasForVideo(assetId: string): void {
+    const asset = this.assets.get(assetId);
+    if (!asset || asset.type !== 'video' || !asset.videoElement) return;
+    // Video assets are always built as a Group wrapper around the screen
+    // plane, so this cast is safe and lets us reuse attachSubtitleOverlay.
+    const group = asset.object3d as THREE.Group;
+
+    // Already has an overlay (imported with subtitles): the tick handles
+    // visibility/cue changes on its own.
+    if (group.children.some((c) => c.name === 'SubtitleOverlay')) return;
+
+    // Find the first Mesh child with a PlaneGeometry that isn't the overlay
+    // itself. (Object3D has no Array.prototype.find — traverse manually.)
+    let screenHit: THREE.Object3D | null = null;
+    group.traverse((c) => {
+      if (screenHit) return;
+      if (
+        c.type === 'Mesh' &&
+        c.name !== 'SubtitleOverlay' &&
+        ((c as THREE.Mesh).geometry as THREE.BufferGeometry)?.type === 'PlaneGeometry'
+      ) {
+        screenHit = c;
+      }
+    });
+    // Alias defeats TS's closure-blind narrowing (it can't see assignments
+    // made inside the traverse callback).
+    const screenMesh = screenHit ? (screenHit as THREE.Mesh) : null;
+    if (!screenMesh) return;
+
+    const params = (screenMesh.geometry as THREE.PlaneGeometry).parameters;
+    this.attachSubtitleOverlay(assetId, group, asset.videoElement, params?.width ?? 3, params?.height ?? 1.6875);
   }
 
 
