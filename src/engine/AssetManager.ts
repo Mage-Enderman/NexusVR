@@ -2304,6 +2304,15 @@ export class AssetManager {
     planeMesh.position.z = 0.012;
     group.add(planeMesh);
 
+    if (this.camera) {
+      const camPos = this.camera.position;
+      const dx = camPos.x - pos.x;
+      const dz = camPos.z - pos.z;
+      if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+        group.rotation.y = Math.atan2(dx, dz);
+      }
+    }
+
     // CRITICAL: the CanvasTexture is NOT disposed by Three's
     // material.dispose() path. Stash a dispose() callback in
     // userData so removeAsset can call it; without this, every

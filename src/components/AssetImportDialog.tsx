@@ -877,10 +877,10 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
               {category === 'misc' && (
                 <>
                   <ResoniteOptionButton
-                    title="Import File Document / Asset"
-                    subtitle="Load into scene inventory as downloadable asset"
+                    title="File Document / Asset"
+                    subtitle="Load into scene as 3D document panel"
                     onClick={() => {
-                      setImportAsRawFile(true);
+                      setImportAsRawFile(false);
                       goToPage('all-set');
                     }}
                   />
@@ -888,6 +888,14 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                     title="Advanced Settings"
                     subtitle="Customize placement & inventory options"
                     onClick={() => goToPage('advanced-settings')}
+                  />
+                  <ResoniteOptionButton
+                    title="Raw File"
+                    subtitle="Import as raw binary file"
+                    onClick={() => {
+                      setImportAsRawFile(true);
+                      goToPage('all-set');
+                    }}
                   />
                 </>
               )}
