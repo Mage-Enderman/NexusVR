@@ -6,6 +6,14 @@ import type { AssetType, LoadedAsset } from '../engine/AssetManager.ts';
 import type { UserRole, ModerationActionPayload, RoleUpdatePayload } from '../types/permissions.ts';
 import type { ResoniteLightConfig } from '../engine/ResoniteLightSync.ts';
 
+// BasisVR-inspired modules
+import { CompressionService } from './CompressionService.ts';
+import { NetworkProfiler } from './NetworkProfiler.ts';
+import { ChannelRegistry } from './ChannelRegistry.ts';
+import { IdentityService } from './IdentityService.ts';
+import { OwnershipService } from './OwnershipService.ts';
+import { AudioProfileService } from './AudioProfileService.ts';
+
 export type ConnectionMode = 'offline' | 'online' | 'paired';
 
 export interface ChatMessage {
@@ -565,6 +573,13 @@ export class NetworkService {
     } else {
       return;
     }
+
+    // Initialize BasisVR-inspired services
+    IdentityService.init();
+    OwnershipService.init(this.localPeerId);
+    AudioProfileService.init();
+    NetworkProfiler.reset();
+    CompressionService.resetStats();
 
     this.createPeer();
     this.registerUnloadHandlers();
@@ -1525,12 +1540,43 @@ export class NetworkService {
       return;
     }
 
+    // Handle compressed envelopes (from CompressionService)
+    if (raw && typeof raw === 'object' && (raw as any).type === '__compressed') {
+      const cp = (raw as any).payload as { type: string; data: number[] };
+      if (cp && cp.type && cp.data) {
+        const decompressed = CompressionService.decompress(new Uint8Array(cp.data), true);
+        try {
+          const parsed = JSON.parse(decompressed);
+          const env2 = this.parseEnvelope(parsed);
+          if (env2) {
+            this.lastSeenPeers.set(fromPeerId, Date.now());
+            NetworkProfiler.recordReceive(env2.type, cp.data.length);
+            try {
+              this.dispatchEnvelope(env2, fromPeerId);
+            } catch (err) {
+              console.warn(`[NetworkService] handler threw for '${env2.type}' from ${fromPeerId}:`, err);
+            }
+          }
+        } catch (err) {
+          console.warn('[PeerJS] Failed to decompress envelope from', fromPeerId, err);
+        }
+      }
+      return;
+    }
+
     const env = this.parseEnvelope(raw);
     if (!env) {
       console.warn('[PeerJS] Ignoring invalid envelope from', fromPeerId, raw);
       return;
     }
     this.lastSeenPeers.set(fromPeerId, Date.now());
+
+    // Record network profiling stats
+    const rawSize = typeof raw === 'string' ? raw.length * 2 : JSON.stringify(raw).length;
+    NetworkProfiler.recordReceive(env.type, rawSize);
+
+    // Dispatch via ChannelRegistry (BasisVR-inspired channel system)
+    ChannelRegistry.dispatch(env.type, fromPeerId, env.payload, true);
 
     // ISOLATION: a throwing subscriber callback (e.g. an app-level
     // 'vidstate' handler hitting a runtime error) used to propagate
@@ -1722,16 +1768,25 @@ export class NetworkService {
     // conn.on('open') body).
     if (conn.open) {
       try {
+        // Record network profiling stats
+        const jsonStr = JSON.stringify(env);
+        NetworkProfiler.recordSend(env.type, jsonStr.length);
+
+        // Compress large payloads (spawn, syncresp) using fflate
+        // Inspired by BasisVR's LZ4 compression for data channels.
+        const needsCompression = env.type === 'spawn' || env.type === 'syncresp';
+        if (needsCompression) {
+          const { data, compressed } = CompressionService.compress(jsonStr);
+          if (compressed) {
+            // Send as compressed envelope
+            conn.send({ type: '__compressed', payload: { type: env.type, data: Array.from(data as Uint8Array) } });
+            return;
+          }
+        }
+
         // Serialize the envelope ourselves so we can measure its size
         // and split it into 64KB chunks when it exceeds WebRTC's
-        // single-message comfort zone. PeerJS's conn.send() internally
-        // JSON.stringifies too, but by then we've already lost the
-        // chance to chunk. The 64KB threshold is conservative — Quest
-        // browser crashes on >~1MB single envelopes, but 64KB keeps
-        // each chunk well under any reasonable SCTP/DCEP ceiling and
-        // the per-chunk setTimeout(4) yields to the WebRTC process
-        // layer so the DataChannel's bufferedAmount can drain.
-        const jsonStr = JSON.stringify(env);
+        // single-message comfort zone.
         if (jsonStr.length > 64 * 1024) {
           this.sendChunked(conn, jsonStr);
         } else {
@@ -1971,6 +2026,11 @@ export class NetworkService {
   public broadcastAvatarVRM(fileData: ArrayBuffer): void {
     if (this.mode === 'offline') return;
     this.broadcastEnvelope(this.buildEnvelope('av_vrm', { peerId: this.localPeerId, fileData }));
+  }
+
+  public sendAvatarVRMToPeer(peerId: string, fileData: ArrayBuffer): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('av_vrm', { peerId: this.localPeerId, fileData }), peerId);
   }
 
   public broadcastAvatar(update: AvatarTransform): void {
@@ -2322,6 +2382,11 @@ export class NetworkService {
     }
     this.brokerRetryAttempts = 0;
     this.brokerDownNotified = false;
+
+    // Reset BasisVR-inspired services
+    OwnershipService.reset();
+    AudioProfileService.reset();
+    ChannelRegistry.reset();
 
     // Drop our media connections BEFORE we destroy the peer so callers
     // get a clean 'close' event rather than an abrupt drop.

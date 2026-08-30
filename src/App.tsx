@@ -32,6 +32,7 @@ import type { EnvironmentSettings } from './engine/EnvironmentManager.ts';
 import { WorldEnvironmentModal } from './components/WorldEnvironmentModal.tsx';
 import { AssetImportDialog } from './components/AssetImportDialog.tsx';
 import type { UserRole, DefaultPermissionsConfig } from './types/permissions.ts';
+import { NetworkStatsOverlay } from './components/NetworkStatsOverlay.tsx';
 import { DashMenu } from './components/DashMenu.tsx';
 import { loadSubtitleSettings, saveSubtitleSettings, type SubtitleSettings } from './utils/subtitleSettings.ts';
 import { VRHUDManager } from './engine/VRHUDManager.ts';
@@ -147,6 +148,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     }, 6000);
   }, []);
   const [cameraMode, setCameraMode] = useState<'orbit' | 'first-person'>('first-person');
+  const [showNetworkStats, setShowNetworkStats] = useState(false);
   const [subtitleSettings, setSubtitleSettings] = useState<SubtitleSettings>(loadSubtitleSettings());
 
   const handleUpdateSubtitleSettings = (partial: Partial<SubtitleSettings>) => {
@@ -646,6 +648,11 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     const avatarManager = new AvatarManager(sceneEngine.scene, sceneEngine.camera, sceneEngine.worldRoot);
     avatarManager.onLocalVrmLoaded = (_vrm, dims) => {
       sceneEngine.setAvatarEyeHeight(dims.eyeHeight);
+    };
+    avatarManager.onLocalVrmBufferLoaded = (buffer) => {
+      if (networkServiceRef.current && networkServiceRef.current.mode !== 'offline') {
+        networkServiceRef.current.broadcastAvatarVRM(buffer);
+      }
     };
     avatarManagerRef.current = avatarManager;
 
@@ -1579,10 +1586,7 @@ const vrHud = new VRHUDManager(
     disposers.push(net.onPeerJoin((peerId) => {
       setPeerCount(net.peers.size);
       if (avatarManagerRef.current?.localVrmBuffer) {
-        net.sendEnvelope(peerId, net.buildEnvelope('av_vrm', {
-          peerId: net.localPeerId,
-          fileData: avatarManagerRef.current.localVrmBuffer
-        }));
+        net.sendAvatarVRMToPeer(peerId, avatarManagerRef.current.localVrmBuffer);
       }
     }));
     disposers.push(net.onPeerLeave((peerId) => {
@@ -4763,6 +4767,14 @@ const vrHud = new VRHUDManager(
 
       {/* Global toast notifications (import results, errors, etc.) */}
       <ToastHost />
+
+      {/* Network stats debug overlay (Ctrl+Shift+N to toggle) */}
+      <NetworkStatsOverlay
+        visible={showNetworkStats}
+        onToggle={() => setShowNetworkStats(v => !v)}
+        peerCount={peerCount}
+        isHost={isHost}
+      />
 
    </div>
   );

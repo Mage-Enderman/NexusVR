@@ -55,13 +55,13 @@ export function detectVRMDimensions(vrm: VRM): { height: number; eyeHeight: numb
     const span = Math.abs(headPos.y - hipsPos.y);
     if (span > 0.05) {
       const height = span / 0.38;
-      let eyeHeight = headPos.y * 0.95;
+      let eyeHeight = headPos.y + 0.06;
       if (leftFoot) {
         leftFoot.getWorldPosition(footPos);
-        eyeHeight = headPos.y - footPos.y;
+        eyeHeight = (headPos.y - footPos.y) + 0.06;
       } else if (rightFoot) {
         rightFoot.getWorldPosition(footPos);
-        eyeHeight = headPos.y - footPos.y;
+        eyeHeight = (headPos.y - footPos.y) + 0.06;
       }
       return {
         height: Math.max(height, 0.5),
@@ -70,7 +70,7 @@ export function detectVRMDimensions(vrm: VRM): { height: number; eyeHeight: numb
     }
   }
 
-  return { height: 1.6, eyeHeight: 1.5 };
+  return { height: 1.6, eyeHeight: 1.55 };
 }
 
 export class VRMAnimator {
@@ -210,16 +210,14 @@ export class VRMAnimator {
     // 4. Idle motion for body when not walking
     if (!hasVRArms) {
       this.applyIdle();
-    }
-
-    // 5. Walk legs/hips
+    }    // 5. Walk legs/hips
     this.applyWalkLegs(state);
 
     // 6. Crouch (lowered hips, bent knees, forward lean)
-    this.applyCrouch();
+    this.applyCrouch(hasVRArms);
 
     // 7. Jump & Airborne
-    this.applyJumpLand(state);
+    this.applyJumpLand(state, hasVRArms);
 
     // 8. Auto-blinking
     this.applyBlink(dt);
@@ -241,15 +239,15 @@ export class VRMAnimator {
 
     // Left Arm IK
     if (leftHandTarget && lua && lla) {
-      this.solveArmIK(lua, lla, lh, leftHandTarget, true, armL);
+      this.solveTwoBoneIK(lua, lla, lh, leftHandTarget, true, armL);
     }
     // Right Arm IK
     if (rightHandTarget && rua && rla) {
-      this.solveArmIK(rua, rla, rh, rightHandTarget, false, armL);
+      this.solveTwoBoneIK(rua, rla, rh, rightHandTarget, false, armL);
     }
   }
 
-  private solveArmIK(
+  private solveTwoBoneIK(
     upperArm: THREE.Object3D,
     lowerArm: THREE.Object3D,
     hand: THREE.Object3D | undefined,
@@ -257,37 +255,79 @@ export class VRMAnimator {
     isLeft: boolean,
     armSegmentLen: number
   ): void {
-    // Transform target world pos to vrm.scene local coordinate space
-    const localTarget = target.position.clone();
-    this.vrm.scene.worldToLocal(localTarget);
+    // 1. Transform target position and quaternion from worldRoot space into vrm.scene local coordinate space
+    const deltaPos = target.position.clone().sub(this.vrm.scene.position);
+    const sceneInvQuat = this.vrm.scene.quaternion.clone().invert();
+    const localTarget = deltaPos.applyQuaternion(sceneInvQuat);
+    const localHandQuat = sceneInvQuat.clone().multiply(target.quaternion);
 
-    const shoulderPos = upperArm.position.clone();
+    // Get shoulder position in vrm.scene local space
+    upperArm.updateWorldMatrix(true, false);
+    const shoulderPos = new THREE.Vector3();
+    upperArm.getWorldPosition(shoulderPos);
+    this.vrm.scene.worldToLocal(shoulderPos);
+
     const reachVec = localTarget.clone().sub(shoulderPos);
     const dist = reachVec.length();
+    if (dist < 0.001) return;
 
-    // Law of cosines for 2-bone arm
+    const D = reachVec.clone().normalize();
+
+    // 2. Law of cosines for upper arm angle (alpha)
     const L1 = armSegmentLen;
     const L2 = armSegmentLen;
-    const clampedDist = THREE.MathUtils.clamp(dist, 0.05, (L1 + L2) * 0.98);
-    const cosElbow = THREE.MathUtils.clamp((L1 * L1 + L2 * L2 - clampedDist * clampedDist) / (2 * L1 * L2), -1, 1);
-    const elbowBend = Math.PI - Math.acos(cosElbow);
+    const clampedDist = THREE.MathUtils.clamp(dist, 0.05, (L1 + L2) * 0.995);
 
-    // Direction from shoulder to target
-    reachVec.normalize();
+    const cosAlpha = THREE.MathUtils.clamp((L1 * L1 + clampedDist * clampedDist - L2 * L2) / (2 * L1 * clampedDist), -1, 1);
+    const alpha = Math.acos(cosAlpha);
 
-    // Yaw and pitch toward target
-    const pitch = -Math.asin(THREE.MathUtils.clamp(reachVec.y, -0.99, 0.99));
-    const yaw = Math.atan2(reachVec.x, reachVec.z);
+    // 3. Anatomical bend axis (elbows flare downward and backward towards +Z)
+    const poleVec = isLeft
+      ? new THREE.Vector3(0.3, -0.6, 0.7).normalize()
+      : new THREE.Vector3(-0.3, -0.6, 0.7).normalize();
 
-    upperArm.rotation.reorder("YXZ");
-    upperArm.rotation.y = yaw;
-    upperArm.rotation.x = pitch;
-    upperArm.rotation.z = isLeft ? (1.25 * (1 - dist / (L1 + L2))) : (-1.25 * (1 - dist / (L1 + L2)));
+    let bendNormal = new THREE.Vector3().crossVectors(D, poleVec).normalize();
+    if (bendNormal.lengthSq() < 0.01) {
+      bendNormal = isLeft ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, -1, 0);
+    }
 
-    lowerArm.rotation.x = elbowBend;
+    // Direction of upper arm (shoulder to elbow) in vrm.scene space
+    const upperArmDir = D.clone().applyAxisAngle(bendNormal, isLeft ? alpha : -alpha);
 
+    // Elbow position in vrm.scene space
+    const elbowPos = shoulderPos.clone().addScaledVector(upperArmDir, L1);
+
+    // Direction of lower arm (elbow to hand) in vrm.scene space
+    const lowerArmDir = localTarget.clone().sub(elbowPos).normalize();
+
+    // 4. VRM normalized humanoid bone rest axes:
+    // Left arm extends along +X (1, 0, 0)
+    // Right arm extends along -X (-1, 0, 0)
+    const restAxis = isLeft ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(-1, 0, 0);
+
+    const qUpperScene = new THREE.Quaternion().setFromUnitVectors(restAxis, upperArmDir);
+    const qLowerScene = new THREE.Quaternion().setFromUnitVectors(restAxis, lowerArmDir);
+
+    // Account for upperArm's parent bone (chest) rotation in vrm.scene space
+    if (upperArm.parent) {
+      const parentWorldQuat = new THREE.Quaternion();
+      const sceneWorldQuat = new THREE.Quaternion();
+      upperArm.parent.getWorldQuaternion(parentWorldQuat);
+      this.vrm.scene.getWorldQuaternion(sceneWorldQuat);
+      const qParentScene = sceneWorldQuat.clone().invert().multiply(parentWorldQuat);
+      upperArm.quaternion.copy(qParentScene.invert().multiply(qUpperScene));
+    } else {
+      upperArm.quaternion.copy(qUpperScene);
+    }
+
+    // Lower arm local rotation relative to upperArm
+    const qUpperInv = qUpperScene.clone().invert();
+    lowerArm.quaternion.copy(qUpperInv.multiply(qLowerScene));
+
+    // 5. Hand local rotation relative to lowerArm
     if (hand) {
-      hand.quaternion.copy(target.quaternion);
+      const qLowerSceneInv = qLowerScene.clone().invert();
+      hand.quaternion.copy(qLowerSceneInv.multiply(localHandQuat));
     }
   }
 
@@ -325,6 +365,108 @@ export class VRMAnimator {
     if (rf) rf.rotation.x -= Math.sin(phase + 0.3) * 0.15 * w;
   }
 
+  private applyCrouch(hasVRArms = false): void {
+    const c = this.blendToCrouch;
+    if (c < 0.001) return;
+
+    const hip = this.bone("hips");
+    const spine = this.bone("spine");
+    const chest = this.bone("chest");
+
+    if (hip) hip.position.y = this.restHipsPosition.y - this.estimatedHeight * 0.16 * c;
+    if (spine) spine.rotation.x += 0.32 * c;
+    if (chest) chest.rotation.x += 0.15 * c;
+
+    const lul = this.bone("leftUpperLeg");
+    const lll = this.bone("leftLowerLeg");
+    const rul = this.bone("rightUpperLeg");
+    const rll = this.bone("rightLowerLeg");
+    const lf = this.bone("leftFoot");
+    const rf = this.bone("rightFoot");
+
+    if (lul) lul.rotation.x += 1.15 * c;
+    if (lll) lll.rotation.x -= 2.10 * c;
+    if (lf) lf.rotation.x += 0.95 * c;
+
+    if (rul) rul.rotation.x += 1.15 * c;
+    if (rll) rll.rotation.x -= 2.10 * c;
+    if (rf) rf.rotation.x += 0.95 * c;
+
+    if (!hasVRArms) {
+      const lua = this.bone("leftUpperArm");
+      const rua = this.bone("rightUpperArm");
+      const lla = this.bone("leftLowerArm");
+      const rla = this.bone("rightLowerArm");
+
+      if (lua) {
+        lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.95, c);
+        lua.rotation.x = 0.08 + 0.35 * c;
+        lua.rotation.y = 0.15 * c;
+      }
+      if (rua) {
+        rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.95, c);
+        rua.rotation.x = 0.08 + 0.35 * c;
+        rua.rotation.y = -0.15 * c;
+      }
+      if (lla) lla.rotation.x = 0.15 + 0.50 * c;
+      if (rla) rla.rotation.x = 0.15 + 0.50 * c;
+    }
+  }
+
+  private applyJumpLand(state: LocomotionState, hasVRArms = false): void {
+    const j = this.jumpBlend;
+    if (j < 0.001) return;
+
+    const v = state.verticalVelocity;
+    const lul = this.bone("leftUpperLeg");
+    const rul = this.bone("rightUpperLeg");
+    const lll = this.bone("leftLowerLeg");
+    const rll = this.bone("rightLowerLeg");
+
+    if (v > 0.5) {
+      const ascentFactor = Math.min(1, (v - 0.5) / 5) * j;
+      if (lul) lul.rotation.x += 0.45 * ascentFactor;
+      if (rul) rul.rotation.x += 0.45 * ascentFactor;
+      if (lll) lll.rotation.x -= 0.75 * ascentFactor;
+      if (rll) rll.rotation.x -= 0.75 * ascentFactor;
+
+      if (!hasVRArms) {
+        const lua = this.bone("leftUpperArm");
+        const rua = this.bones.rightUpperArm;
+        const lla = this.bone("leftLowerArm");
+        const rla = this.bone("rightLowerArm");
+        if (lua) {
+          lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.95, ascentFactor);
+          lua.rotation.x = 0.08 + 0.25 * ascentFactor;
+        }
+        if (rua) {
+          rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.95, ascentFactor);
+          rua.rotation.x = 0.08 + 0.25 * ascentFactor;
+        }
+        if (lla) lla.rotation.x = 0.15 + 0.30 * ascentFactor;
+        if (rla) rla.rotation.x = 0.15 + 0.30 * ascentFactor;
+      }
+    } else if (v < -1.5) {
+      const fallFactor = Math.min(1, Math.abs(v + 1.5) / 10) * j;
+      if (!hasVRArms) {
+        const lua = this.bone("leftUpperArm");
+        const rua = this.bones.rightUpperArm;
+        if (lua) {
+          lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.60, fallFactor);
+          lua.rotation.x = 0.08 + 0.20 * fallFactor;
+        }
+        if (rua) {
+          rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.60, fallFactor);
+          rua.rotation.x = 0.08 + 0.20 * fallFactor;
+        }
+      }
+      if (lul) lul.rotation.x -= 0.15 * fallFactor;
+      if (rul) rul.rotation.x -= 0.15 * fallFactor;
+      if (lll) lll.rotation.x -= 0.15 * fallFactor;
+      if (rll) rll.rotation.x -= 0.15 * fallFactor;
+    }
+  }
+
   private applyHeadFirstTurning(
     delta: number,
     _state: LocomotionState,
@@ -347,13 +489,14 @@ export class VRMAnimator {
 
     // Rotate VRM root scene so body faces bodyYaw directly
     this.vrm.scene.rotation.y = this.bodyYaw;
+    this.vrm.scene.updateMatrixWorld(true);
 
     const clampedPitch = THREE.MathUtils.clamp(targetPitch, -1.1, 1.1);
 
     const neck = this.bone("neck");
     const head = this.bone("head");
 
-    // Clean, direct gaze tracking: neck (30%) + head (70%) = 100% exact alignment with camera crosshair
+    // Clean, direct gaze tracking: neck (30%) + head (70%) = 100% exact alignment with camera view
     if (neck) {
       neck.rotation.reorder("YXZ");
       neck.rotation.y = diffYaw * 0.30;
@@ -453,105 +596,6 @@ export class VRMAnimator {
     }
     if (rla) {
       rla.rotation.x = 0.15 + Math.max(0, Math.sin(phase)) * 0.30 * w;
-    }
-  }
-
-  private applyCrouch(): void {
-    const c = this.blendToCrouch;
-    if (c < 0.001) return;
-
-    const hip = this.bone("hips");
-    const spine = this.bone("spine");
-    const chest = this.bone("chest");
-
-    // Lower hips precisely to match leg kinematics so feet remain firmly on the floor surface
-    if (hip) hip.position.y = this.restHipsPosition.y - this.estimatedHeight * 0.16 * c;
-    if (spine) spine.rotation.x += 0.32 * c;
-    if (chest) chest.rotation.x += 0.15 * c;
-
-    const lul = this.bone("leftUpperLeg");
-    const lll = this.bone("leftLowerLeg");
-    const rul = this.bone("rightUpperLeg");
-    const rll = this.bone("rightLowerLeg");
-    const lf = this.bone("leftFoot");
-    const rf = this.bone("rightFoot");
-
-    // Deep knee bend with proper ankle flexion so soles stay flat on the ground
-    if (lul) lul.rotation.x += 1.15 * c;
-    if (lll) lll.rotation.x -= 2.10 * c;
-    if (lf) lf.rotation.x += 0.95 * c;
-
-    if (rul) rul.rotation.x += 1.15 * c;
-    if (rll) rll.rotation.x -= 2.10 * c;
-    if (rf) rf.rotation.x += 0.95 * c;
-
-    // Natural crouch arm placement: hands resting forward near knees for balance
-    const lua = this.bone("leftUpperArm");
-    const rua = this.bone("rightUpperArm");
-    const lla = this.bone("leftLowerArm");
-    const rla = this.bone("rightLowerArm");
-
-    if (lua) {
-      lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.95, c);
-      lua.rotation.x = 0.08 + 0.35 * c;
-      lua.rotation.y = 0.15 * c;
-    }
-    if (rua) {
-      rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.95, c);
-      rua.rotation.x = 0.08 + 0.35 * c;
-      rua.rotation.y = -0.15 * c;
-    }
-    if (lla) lla.rotation.x = 0.15 + 0.50 * c;
-    if (rla) rla.rotation.x = 0.15 + 0.50 * c;
-  }
-
-  private applyJumpLand(state: LocomotionState): void {
-    const j = this.jumpBlend;
-    if (j < 0.001) return;
-
-    const v = state.verticalVelocity;
-    const lul = this.bone("leftUpperLeg");
-    const rul = this.bone("rightUpperLeg");
-    const lll = this.bone("leftLowerLeg");
-    const rll = this.bone("rightLowerLeg");
-    const lua = this.bone("leftUpperArm");
-    const rua = this.bones.rightUpperArm;
-    const lla = this.bone("leftLowerArm");
-    const rla = this.bone("rightLowerArm");
-
-    if (v > 0.5) {
-      // Ascent: Leg tuck, arms brace
-      const ascentFactor = Math.min(1, (v - 0.5) / 5) * j;
-      if (lul) lul.rotation.x += 0.45 * ascentFactor;
-      if (rul) rul.rotation.x += 0.45 * ascentFactor;
-      if (lll) lll.rotation.x -= 0.75 * ascentFactor;
-      if (rll) rll.rotation.x -= 0.75 * ascentFactor;
-
-      if (lua) {
-        lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.95, ascentFactor);
-        lua.rotation.x = 0.08 + 0.25 * ascentFactor;
-      }
-      if (rua) {
-        rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.95, ascentFactor);
-        rua.rotation.x = 0.08 + 0.25 * ascentFactor;
-      }
-      if (lla) lla.rotation.x = 0.15 + 0.30 * ascentFactor;
-      if (rla) rla.rotation.x = 0.15 + 0.30 * ascentFactor;
-    } else if (v < -1.5) {
-      // Fast fall: Arms raise up for balance/wind resistance, legs extend slightly down
-      const fallFactor = Math.min(1, Math.abs(v + 1.5) / 10) * j;
-      if (lua) {
-        lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.60, fallFactor);
-        lua.rotation.x = 0.08 + 0.20 * fallFactor;
-      }
-      if (rua) {
-        rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.60, fallFactor);
-        rua.rotation.x = 0.08 + 0.20 * fallFactor;
-      }
-      if (lul) lul.rotation.x -= 0.15 * fallFactor;
-      if (rul) rul.rotation.x -= 0.15 * fallFactor;
-      if (lll) lll.rotation.x -= 0.15 * fallFactor;
-      if (rll) rll.rotation.x -= 0.15 * fallFactor;
     }
   }
 

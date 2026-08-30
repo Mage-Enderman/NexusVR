@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Reference Projects
+BasisVR/
+*BasisVR
+BasisVR
+.freebuff
+.freebuff/

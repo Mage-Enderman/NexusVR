@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
 import { VRMAnimator, detectVRMDimensions, type LocomotionState } from './VRMAnimator.ts';
+import { VRMValidator } from '../services/VRMValidator.ts';
 
 export interface AvatarTransform {
   peerId: string;
@@ -156,6 +157,16 @@ export class PeerAvatar {
       const gltf = await loader.loadAsync(url);
       const vrm = gltf.userData.vrm as VRM;
       if (vrm) {
+        // Validate VRM content (BasisVR-inspired performance limits)
+        const validation = VRMValidator.validate(vrm);
+        if (validation.warnings.length > 0) {
+          console.warn(`[VRMValidator] Warnings for ${this.peerId}:`, validation.warnings.join(', '));
+        }
+        if (validation.errors.length > 0) {
+          console.error(`[VRMValidator] Errors for ${this.peerId}:`, validation.errors.join(', '));
+          // Still load but log the errors — in production you might reject
+        }
+
         // Remove default stylized meshes
         if (this.headMesh) this.group.remove(this.headMesh);
         if (this.leftHandMesh) this.group.remove(this.leftHandMesh);
@@ -278,17 +289,32 @@ export class PeerAvatar {
       const crouchDrop = eyeH * 0.375;
       const currentEyeH = eyeH - crouchDrop * crouchBlend;
 
-      // Position the avatar so feet remain grounded on the floor (never plunging below 0)
-      this.vrm.scene.position.x = this.targetHeadPos.x;
-      this.vrm.scene.position.y = Math.max(0, this.targetHeadPos.y - currentEyeH);
-      this.vrm.scene.position.z = this.targetHeadPos.z;
-
-      // Scale VRM mesh according to user scale factor
-      this.vrm.scene.scale.setScalar(scale);
-
       // Check if VR controllers are tracked for hand IK
       const hasLeftTarget = this.targetLeftPos.lengthSq() > 0.01;
       const hasRightTarget = this.targetRightPos.lengthSq() > 0.01;
+
+      // Position the avatar so feet remain grounded on the floor (never plunging below 0)
+      let posX = this.targetHeadPos.x;
+      let posZ = this.targetHeadPos.z;
+
+      // In desktop 1st-person, apply natural neck-pivot offset so looking down
+      // views the outside front of the chest, arms, and legs rather than looking
+      // straight down inside the hollow neck collar.
+      if (this.peerId === 'local' && !hasLeftTarget && !hasRightTarget) {
+        const bodyYaw = this.animator ? this.animator.bodyYaw : this.targetHeadEuler.y;
+        const downPitch = Math.max(0, -this.targetHeadEuler.x); // Pitch downward (looking at feet)
+        // Offset avatar body slightly backward from eyes (+ forward arc on down-pitch)
+        const backDist = 0.12 + 0.08 * Math.sin(downPitch);
+        posX += Math.sin(bodyYaw) * backDist;
+        posZ += Math.cos(bodyYaw) * backDist;
+      }
+
+      this.vrm.scene.position.x = posX;
+      this.vrm.scene.position.y = Math.max(0, this.targetHeadPos.y - currentEyeH);
+      this.vrm.scene.position.z = posZ;
+
+      // Scale VRM mesh according to user scale factor
+      this.vrm.scene.scale.setScalar(scale);
 
       const leftHandTarget = hasLeftTarget ? { position: this.targetLeftPos, quaternion: this.targetLeftQuat } : undefined;
       const rightHandTarget = hasRightTarget ? { position: this.targetRightPos, quaternion: this.targetRightQuat } : undefined;
@@ -417,6 +443,7 @@ export class AvatarManager {
 
   public localVrmBuffer: ArrayBuffer | null = null;
   public onLocalVrmLoaded?: (vrm: VRM, dims: { height: number; eyeHeight: number }) => void;
+  public onLocalVrmBufferLoaded?: (buffer: ArrayBuffer) => void;
 
   public async loadLocalVRM(file: File): Promise<VRM | null> {
     try {
@@ -424,6 +451,9 @@ export class AvatarManager {
       this.localVrmUrl = url;
       try {
         this.localVrmBuffer = await file.arrayBuffer();
+        if (this.localVrmBuffer) {
+          this.onLocalVrmBufferLoaded?.(this.localVrmBuffer);
+        }
       } catch (e) {
         console.warn('Failed to read VRM array buffer:', e);
       }
