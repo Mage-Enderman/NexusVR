@@ -409,6 +409,33 @@ export class SpatialPanelManager {
   }
 
   /**
+   * Re-syncs and refreshes all registered spatial panels.
+   * Called on F9 keybind / window.refreshUI().
+   */
+  public refreshPanels(): void {
+    console.log(`[SpatialUI] Refreshing all spatial panels (${this.panels.size} active):`, Array.from(this.panels.keys()));
+    this.clearLockedHover();
+    const overlay = this.css3dRenderer.domElement;
+    overlay.style.pointerEvents = 'none';
+    const viewEl = overlay.firstElementChild as HTMLElement | null;
+    const cameraEl = viewEl?.firstElementChild as HTMLElement | null;
+    if (viewEl) viewEl.style.pointerEvents = 'none';
+    if (cameraEl) cameraEl.style.pointerEvents = '';
+
+    for (const [id, entry] of this.panels) {
+      entry.domContainer.style.pointerEvents = 'auto';
+      if (cameraEl && entry.domContainer.parentNode !== cameraEl) {
+        console.log(`[SpatialUI] Re-attaching panel "${id}" domContainer to cameraElement`);
+        cameraEl.appendChild(entry.domContainer);
+      }
+    }
+  }
+
+  public getPanelCount(): number {
+    return this.panels.size;
+  }
+
+  /**
    * Call each frame while the pointer is locked. Temporarily enables
    * pointer-events on the CSS3D overlay so `elementFromPoint` can find the
    * element under (cx, cy) through the 3D CSS perspective transform, then
@@ -423,24 +450,34 @@ export class SpatialPanelManager {
     if (this.isVRMode) return false;
 
     const overlay = this.css3dRenderer.domElement;
-    // Temporarily enable hit-testing through 3D CSS transforms
+    // Temporarily enable hit-testing through 3D CSS transforms across the overlay hierarchy
+    const prevOverlayPE = overlay.style.pointerEvents;
     overlay.style.pointerEvents = 'auto';
-    const childrenToRestore: { el: HTMLElement; prev: string }[] = [];
-    overlay.childNodes.forEach((node) => {
-      if (node instanceof HTMLElement) {
-        childrenToRestore.push({ el: node, prev: node.style.pointerEvents });
-        node.style.pointerEvents = 'auto';
+
+    const viewEl = overlay.firstElementChild as HTMLElement | null;
+    const cameraEl = viewEl?.firstElementChild as HTMLElement | null;
+    const prevViewPE = viewEl?.style.pointerEvents ?? '';
+    const prevCameraPE = cameraEl?.style.pointerEvents ?? '';
+
+    if (viewEl) viewEl.style.pointerEvents = 'auto';
+    if (cameraEl) cameraEl.style.pointerEvents = 'auto';
+
+    // Use elementsFromPoint to pierce through any overlay/canvas layers
+    const hitElements = typeof document.elementsFromPoint === 'function'
+      ? document.elementsFromPoint(cx, cy)
+      : [document.elementFromPoint(cx, cy)].filter(Boolean) as Element[];
+
+    overlay.style.pointerEvents = prevOverlayPE;
+    if (viewEl) viewEl.style.pointerEvents = prevViewPE;
+    if (cameraEl) cameraEl.style.pointerEvents = prevCameraPE;
+
+    let found: Element | null = null;
+    for (const hit of hitElements) {
+      if (this._isInAnyPanel(hit)) {
+        found = hit;
+        break;
       }
-    });
-
-    const el = document.elementFromPoint(cx, cy);
-
-    overlay.style.pointerEvents = 'none';
-    childrenToRestore.forEach(({ el, prev }) => {
-      el.style.pointerEvents = prev;
-    });
-
-    const found: Element | null = (el && this._isInAnyPanel(el)) ? el : null;
+    }
     const wasOver = this.hoveredElement !== null;
     const isNowOver = found !== null;
 
@@ -461,6 +498,10 @@ export class SpatialPanelManager {
         found.dispatchEvent(
           new PointerEvent('pointerenter', { bubbles: false, cancelable: false })
         );
+        const panelId = this._getPanelIdForElement(found);
+        console.log(`[SpatialUI] Hover ENTER panel="${panelId}" target=<${found.tagName.toLowerCase()}${found.className ? ' class="' + found.className + '"' : ''}> text="${(found.textContent || '').trim().slice(0, 30)}"`);
+      } else if (this.hoveredElement) {
+        console.log('[SpatialUI] Hover LEAVE panel');
       }
       this.hoveredElement = found;
 
@@ -485,26 +526,39 @@ export class SpatialPanelManager {
    * Call from App.tsx when the user left-clicks while pointer-locked and
    * `isOverPanel` is true.
    */
-  public handleLockedClick(): boolean {
+  public handleLockedClick(clickX?: number, clickY?: number): boolean {
     const rawEl = this.hoveredElement;
-    if (!rawEl) return false;
-    const el = rawEl.closest('button, a, input, select, textarea, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [onclick], [tabindex]') || rawEl;
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
-    const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
-    const isButtonOrInput = el.tagName === 'BUTTON' || el.tagName === 'A' || el.tagName === 'INPUT';
+    if (!rawEl) {
+      console.warn('[SpatialUI] handleLockedClick called but hoveredElement is null.');
+      return false;
+    }
+    const el = (rawEl.closest('button, a, input, select, textarea, label, [role="button"], [role="checkbox"], [role="switch"], [role="tab"], [role="menuitem"], [role="option"], [onclick], [tabindex]') || rawEl) as HTMLElement;
+    const cx = clickX ?? window.innerWidth / 2;
+    const cy = clickY ?? window.innerHeight / 2;
     const isTextInputOrSelect = (el.tagName === 'INPUT' && (el as HTMLInputElement).type !== 'file') || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
+
+    console.log(`[SpatialUI] handleLockedClick at (${Math.round(cx)}, ${Math.round(cy)}):`, {
+      target: el,
+      tag: el.tagName,
+      className: el.className,
+      text: (el.textContent || '').trim().slice(0, 40),
+      rawTarget: rawEl.tagName,
+      pointerLocked: document.pointerLockElement !== null,
+    });
+
+    const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
 
     el.dispatchEvent(new PointerEvent('pointerdown', opts));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
     el.dispatchEvent(new PointerEvent('pointerup', opts));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
 
-    if (isButtonOrInput && el instanceof HTMLElement && typeof el.click === 'function') {
+    if (typeof el.click === 'function') {
       try {
         el.click();
-      } catch {
-        /* noop */
+      } catch (err) {
+        console.warn('[SpatialUI] el.click() threw error, falling back to dispatchEvent:', err);
+        el.dispatchEvent(new MouseEvent('click', opts));
       }
     } else {
       el.dispatchEvent(new MouseEvent('click', opts));
@@ -512,7 +566,7 @@ export class SpatialPanelManager {
 
     // ONLY focus text inputs / textareas / selects so keyboard text typing flows into them,
     // without shifting focus off the canvas for buttons/links (which drops pointer lock and freezes movement).
-    if (isTextInputOrSelect && el instanceof HTMLElement && typeof el.focus === 'function') {
+    if (isTextInputOrSelect && typeof el.focus === 'function') {
       try {
         el.focus();
       } catch {
@@ -1067,5 +1121,13 @@ export class SpatialPanelManager {
       if (entry.domContainer.contains(el)) return true;
     }
     return false;
+  }
+
+  /** Returns the panel id if `el` is a descendant of any registered panel's domContainer, or null. */
+  private _getPanelIdForElement(el: Element): string | null {
+    for (const [id, entry] of this.panels) {
+      if (entry.domContainer.contains(el)) return id;
+    }
+    return null;
   }
 }

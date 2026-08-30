@@ -135,7 +135,14 @@ export class VRMAnimator {
     return this.bones[name] ?? null;
   }
 
-  update(delta: number, state: LocomotionState, targetHeadEuler?: THREE.Euler): void {
+  update(
+    delta: number,
+    state: LocomotionState,
+    targetHeadEuler?: THREE.Euler,
+    leftHandTarget?: { position: THREE.Vector3; quaternion: THREE.Quaternion },
+    rightHandTarget?: { position: THREE.Vector3; quaternion: THREE.Quaternion },
+    physicalCrouchBlend = 0
+  ): void {
     const dt = Math.min(delta, 0.1);
     this.time += dt;
 
@@ -143,8 +150,9 @@ export class VRMAnimator {
       && state.locomotionMode === "walk"
       && state.isGrounded;
 
+    const targetCrouch = Math.max(state.isCrouching ? 1 : 0, physicalCrouchBlend);
     this.blendToWalk += ((isWalking ? 1 : 0) - this.blendToWalk) * Math.min(1, dt * BLEND_SPEED);
-    this.blendToCrouch += ((state.isCrouching ? 1 : 0) - this.blendToCrouch) * Math.min(1, dt * CROUCH_LERP_SPEED);
+    this.blendToCrouch += (targetCrouch - this.blendToCrouch) * Math.min(1, dt * CROUCH_LERP_SPEED);
     this.jumpBlend += (((!state.isGrounded && state.locomotionMode === "walk") ? 1 : 0) - this.jumpBlend) * Math.min(1, dt * 10);
 
     if (isWalking) {
@@ -161,49 +169,160 @@ export class VRMAnimator {
     if (hips) {
       hips.position.copy(this.restHipsPosition);
     }
-    // 2. Apply natural resting A-pose to upper and lower arms (replaces stiff T-pose)
-    // In three-vrm normalized rig:
-    // +Z rotation on leftUpperArm lowers it down to the left side (+1.25 rad ~ 72°).
-    // -Z rotation on rightUpperArm lowers it down to the right side (-1.25 rad ~ 72°).
-    // Subtle +X rotation on both upper arms tilts them slightly forward in front of torso.
-    const lua = this.bones.leftUpperArm;
-    const rua = this.bones.rightUpperArm;
-    const lla = this.bones.leftLowerArm;
-    const rla = this.bones.rightLowerArm;
-    if (lua) {
-      lua.rotation.z = 1.25;  // Lower left arm down to side
-      lua.rotation.x = 0.08;  // Angle slightly forward
-      lua.rotation.y = 0.0;
-    }
-    if (rua) {
-      rua.rotation.z = -1.25; // Lower right arm down to side
-      rua.rotation.x = 0.08;  // Angle slightly forward
-      rua.rotation.y = 0.0;
-    }
-    if (lla) {
-      lla.rotation.x = 0.15;  // Natural slight elbow bend forward
-    }
-    if (rla) {
-      rla.rotation.x = 0.15;  // Natural slight elbow bend forward
-    }
 
-    // 3. Head-First Turning & Look Tracking
+    // 2. Head-First Turning & Look Tracking
     this.applyHeadFirstTurning(dt, state, targetHeadEuler, isWalking);
 
-    // 4. Idle Motion (breathing, weight shift, subtle sway)
-    this.applyIdle();
+    // 3. Apply arm posing: either VR controller IK or procedural A-pose & locomotion
+    const hasVRArms = !!(leftHandTarget || rightHandTarget);
+    if (hasVRArms) {
+      this.applyVRArmIK(leftHandTarget, rightHandTarget);
+    } else {
+      // Natural resting A-pose
+      const lua = this.bones.leftUpperArm;
+      const rua = this.bones.rightUpperArm;
+      const lla = this.bones.leftLowerArm;
+      const rla = this.bones.rightLowerArm;
+      if (lua) {
+        lua.rotation.z = 1.25;
+        lua.rotation.x = 0.08;
+        lua.rotation.y = 0.0;
+      }
+      if (rua) {
+        rua.rotation.z = -1.25;
+        rua.rotation.x = 0.08;
+        rua.rotation.y = 0.0;
+      }
+      if (lla) {
+        lla.rotation.x = 0.15;
+      }
+      if (rla) {
+        rla.rotation.x = 0.15;
+      }
 
-    // 5. Walk Cycle (hip bob, leg stride with knee bend, counter-swinging arms, spine lean)
-    this.applyWalk(state);
+      // Idle Motion (breathing, sway)
+      this.applyIdle();
 
-    // 6. Crouch (lowered hips, bent knees, forward lean, raised arms)
+      // Walk Cycle arm swings
+      this.applyWalk(state);
+    }
+
+    // 4. Idle motion for body when not walking
+    if (!hasVRArms) {
+      this.applyIdle();
+    }
+
+    // 5. Walk legs/hips
+    this.applyWalkLegs(state);
+
+    // 6. Crouch (lowered hips, bent knees, forward lean)
     this.applyCrouch();
 
-    // 7. Jump & Airborne (leg tuck on ascent, arm raise on fast fall)
+    // 7. Jump & Airborne
     this.applyJumpLand(state);
 
-    // 8. Auto-blinking via VRM expressions
+    // 8. Auto-blinking
     this.applyBlink(dt);
+  }
+
+  private applyVRArmIK(
+    leftHandTarget?: { position: THREE.Vector3; quaternion: THREE.Quaternion },
+    rightHandTarget?: { position: THREE.Vector3; quaternion: THREE.Quaternion }
+  ): void {
+    const lua = this.bones.leftUpperArm;
+    const lla = this.bones.leftLowerArm;
+    const lh = this.bones.leftHand;
+
+    const rua = this.bones.rightUpperArm;
+    const rla = this.bones.rightLowerArm;
+    const rh = this.bones.rightHand;
+
+    const armL = this.estimatedHeight * 0.18;
+
+    // Left Arm IK
+    if (leftHandTarget && lua && lla) {
+      this.solveArmIK(lua, lla, lh, leftHandTarget, true, armL);
+    }
+    // Right Arm IK
+    if (rightHandTarget && rua && rla) {
+      this.solveArmIK(rua, rla, rh, rightHandTarget, false, armL);
+    }
+  }
+
+  private solveArmIK(
+    upperArm: THREE.Object3D,
+    lowerArm: THREE.Object3D,
+    hand: THREE.Object3D | undefined,
+    target: { position: THREE.Vector3; quaternion: THREE.Quaternion },
+    isLeft: boolean,
+    armSegmentLen: number
+  ): void {
+    // Transform target world pos to vrm.scene local coordinate space
+    const localTarget = target.position.clone();
+    this.vrm.scene.worldToLocal(localTarget);
+
+    const shoulderPos = upperArm.position.clone();
+    const reachVec = localTarget.clone().sub(shoulderPos);
+    const dist = reachVec.length();
+
+    // Law of cosines for 2-bone arm
+    const L1 = armSegmentLen;
+    const L2 = armSegmentLen;
+    const clampedDist = THREE.MathUtils.clamp(dist, 0.05, (L1 + L2) * 0.98);
+    const cosElbow = THREE.MathUtils.clamp((L1 * L1 + L2 * L2 - clampedDist * clampedDist) / (2 * L1 * L2), -1, 1);
+    const elbowBend = Math.PI - Math.acos(cosElbow);
+
+    // Direction from shoulder to target
+    reachVec.normalize();
+
+    // Yaw and pitch toward target
+    const pitch = -Math.asin(THREE.MathUtils.clamp(reachVec.y, -0.99, 0.99));
+    const yaw = Math.atan2(reachVec.x, reachVec.z);
+
+    upperArm.rotation.reorder("YXZ");
+    upperArm.rotation.y = yaw;
+    upperArm.rotation.x = pitch;
+    upperArm.rotation.z = isLeft ? (1.25 * (1 - dist / (L1 + L2))) : (-1.25 * (1 - dist / (L1 + L2)));
+
+    lowerArm.rotation.x = elbowBend;
+
+    if (hand) {
+      hand.quaternion.copy(target.quaternion);
+    }
+  }
+
+  private applyWalkLegs(state: LocomotionState): void {
+    const w = this.blendToWalk * (1 - this.blendToCrouch * 0.5) * (1 - this.jumpBlend);
+    if (w < 0.001) return;
+
+    const phase = this.walkPhase;
+    const hip = this.bone("hips");
+    const spine = this.bone("spine");
+
+    if (hip) {
+      hip.position.y += Math.abs(Math.sin(phase)) * 0.035 * this.estimatedHeight * w;
+      hip.rotation.z += Math.sin(phase) * 0.04 * w;
+      hip.rotation.y += Math.sin(phase) * 0.05 * w;
+    }
+    if (spine) {
+      spine.rotation.x += 0.06 * state.moveSpeed * w;
+      spine.rotation.z -= Math.sin(phase) * 0.03 * w;
+    }
+
+    const lul = this.bone("leftUpperLeg");
+    const lll = this.bone("leftLowerLeg");
+    const rul = this.bone("rightUpperLeg");
+    const rll = this.bone("rightLowerLeg");
+    const lf = this.bone("leftFoot");
+    const rf = this.bone("rightFoot");
+
+    if (lul) lul.rotation.x += Math.sin(phase) * 0.55 * state.moveSpeed * w;
+    if (lll) lll.rotation.x -= Math.max(0, -Math.sin(phase - 0.2)) * 0.75 * state.moveSpeed * w;
+    if (lf) lf.rotation.x += Math.sin(phase + 0.3) * 0.15 * w;
+
+    if (rul) rul.rotation.x -= Math.sin(phase) * 0.55 * state.moveSpeed * w;
+    if (rll) rll.rotation.x -= Math.max(0, Math.sin(phase - 0.2)) * 0.75 * state.moveSpeed * w;
+    if (rf) rf.rotation.x -= Math.sin(phase + 0.3) * 0.15 * w;
   }
 
   private applyHeadFirstTurning(
@@ -345,8 +464,9 @@ export class VRMAnimator {
     const spine = this.bone("spine");
     const chest = this.bone("chest");
 
-    if (hip) hip.position.y -= this.estimatedHeight * 0.35 * c;
-    if (spine) spine.rotation.x += 0.28 * c;
+    // Lower hips precisely to match leg kinematics so feet remain firmly on the floor surface
+    if (hip) hip.position.y = this.restHipsPosition.y - this.estimatedHeight * 0.16 * c;
+    if (spine) spine.rotation.x += 0.32 * c;
     if (chest) chest.rotation.x += 0.15 * c;
 
     const lul = this.bone("leftUpperLeg");
@@ -356,30 +476,33 @@ export class VRMAnimator {
     const lf = this.bone("leftFoot");
     const rf = this.bone("rightFoot");
 
-    if (lul) lul.rotation.x += 0.85 * c;
-    if (lll) lll.rotation.x -= 1.45 * c;
-    if (lf) lf.rotation.x += 0.60 * c;
+    // Deep knee bend with proper ankle flexion so soles stay flat on the ground
+    if (lul) lul.rotation.x += 1.15 * c;
+    if (lll) lll.rotation.x -= 2.10 * c;
+    if (lf) lf.rotation.x += 0.95 * c;
 
-    if (rul) rul.rotation.x += 0.85 * c;
-    if (rll) rll.rotation.x -= 1.45 * c;
-    if (rf) rf.rotation.x += 0.60 * c;
+    if (rul) rul.rotation.x += 1.15 * c;
+    if (rll) rll.rotation.x -= 2.10 * c;
+    if (rf) rf.rotation.x += 0.95 * c;
 
-    // Raised arms during crouch
+    // Natural crouch arm placement: hands resting forward near knees for balance
     const lua = this.bone("leftUpperArm");
     const rua = this.bone("rightUpperArm");
     const lla = this.bone("leftLowerArm");
     const rla = this.bone("rightLowerArm");
 
     if (lua) {
-      lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.85, c);
+      lua.rotation.z = THREE.MathUtils.lerp(1.25, 0.95, c);
       lua.rotation.x = 0.08 + 0.35 * c;
+      lua.rotation.y = 0.15 * c;
     }
     if (rua) {
-      rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.85, c);
+      rua.rotation.z = THREE.MathUtils.lerp(-1.25, -0.95, c);
       rua.rotation.x = 0.08 + 0.35 * c;
+      rua.rotation.y = -0.15 * c;
     }
-    if (lla) lla.rotation.x = 0.15 + 0.45 * c;
-    if (rla) rla.rotation.x = 0.15 + 0.45 * c;
+    if (lla) lla.rotation.x = 0.15 + 0.50 * c;
+    if (rla) rla.rotation.x = 0.15 + 0.50 * c;
   }
 
   private applyJumpLand(state: LocomotionState): void {

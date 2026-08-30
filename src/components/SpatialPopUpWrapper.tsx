@@ -144,13 +144,21 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
       }
       spatialPanelManager.destroyPanel(id);
     };
-    // NB: parentObject is intentionally NOT a dep — re-creating the
-    // panel on parent-object identity changes is the heavy recovery
-    // path (see `useEffect` target asset change flow). When the parent
-    // prop changes App.tsx is expected to remount the wrapper (key=
-    // selectedAsset?.id) so we only pay the recreate cost once per
-    // asset, not on every render.
-  }, [isOpen, isPinned, scene, camera, spatialPanelManager, id, title, assetManager, defaultWidth, defaultHeight]);
+    // NB: parentObject and title are intentionally NOT deps — re-creating the
+    // panel on dynamic title updates or parent-object identity changes resets
+    // the panel transform and detaches hover/clicks.
+  }, [isOpen, isPinned, scene, camera, spatialPanelManager, id, assetManager, defaultWidth, defaultHeight, dockToParent]);
+
+  // Sync title updates to assetManager without destroying the 3D panel
+  useEffect(() => {
+    if (!dockToParent && assetManager) {
+      const assetIdKey = `spatial_window_${id}`;
+      const existing = assetManager.assets.get(assetIdKey);
+      if (existing && existing.name !== title) {
+        existing.name = title;
+      }
+    }
+  }, [title, id, dockToParent, assetManager]);
 
   // ---- Scale sync (scale buttons → 3D group) ------------------------------
 
@@ -231,7 +239,7 @@ export const SpatialPopUpWrapper: React.FC<SpatialPopUpWrapperProps> = ({
   ) : (
     <div
       className={`flex flex-col rounded-2xl overflow-hidden bg-[#0a0f18] border border-cyan-500/40 shadow-[0_0_30px_rgba(0,240,255,0.2)]`}
-      style={{ width: defaultWidth, height: defaultHeight, userSelect: 'none' }}
+      style={{ width: defaultWidth, height: defaultHeight, userSelect: 'none', pointerEvents: 'auto' }}
     >
       {/* Header */}
       <div

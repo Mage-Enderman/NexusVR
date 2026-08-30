@@ -18,6 +18,7 @@ import { InventoryService } from './services/InventoryService.ts';
 import type { InventoryItem } from './services/InventoryService.ts';
 import { UndoRedoManager } from './services/UndoRedoManager.ts';
 import type { TransformSnapshot, AssetSnapshot } from './services/UndoRedoManager.ts';
+import { toast } from './services/ToastService.ts';
 
 import { Navbar } from './components/Navbar.tsx';
 import { Toolbar } from './components/Toolbar.tsx';
@@ -342,6 +343,23 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   const [showToolsPanel, setShowToolsPanel] = useState<boolean>(false);
   const [activeTool, setActiveTool] = useState<ToolType | null>(null);
   const [brushWidth, setBrushWidth] = useState<number>(0.05);
+  const [uiRefreshKey, setUiRefreshKey] = useState<number>(0);
+
+  const handleRefreshUI = useCallback(() => {
+    console.log(`[SpatialUI] Manual UI refresh triggered (F9 / window.refreshUI()) - activePanels=${sceneEngineRef.current?.spatialPanelManager?.getPanelCount() ?? 0}`);
+    sceneEngineRef.current?.spatialPanelManager?.refreshPanels();
+    setUiRefreshKey((prev) => prev + 1);
+    toast.info('UI Panels Refreshed (F9)');
+  }, []);
+
+  useEffect(() => {
+    (window as any).refreshUI = handleRefreshUI;
+    (window as any).__nexus_spm = sceneEngineRef.current?.spatialPanelManager;
+    return () => {
+      delete (window as any).refreshUI;
+      delete (window as any).__nexus_spm;
+    };
+  }, [handleRefreshUI]);
 
   // Stats & Settings state triggers for reactive UI
   const [stats, setStats] = useState({ fps: 60, drawCalls: 0, triangles: 0 });
@@ -626,6 +644,9 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     sceneEngine.isERotateActive = (buttons) => manipulationManager.isERotateMouseActive(buttons);
 
     const avatarManager = new AvatarManager(sceneEngine.scene, sceneEngine.camera, sceneEngine.worldRoot);
+    avatarManager.onLocalVrmLoaded = (_vrm, dims) => {
+      sceneEngine.setAvatarEyeHeight(dims.eyeHeight);
+    };
     avatarManagerRef.current = avatarManager;
 
     const environmentManager = new EnvironmentManager(
@@ -1555,13 +1576,26 @@ const vrHud = new VRHUDManager(
     }));
 
     // Network listeners
-    disposers.push(net.onPeerJoin(() => setPeerCount(net.peers.size)));
+    disposers.push(net.onPeerJoin((peerId) => {
+      setPeerCount(net.peers.size);
+      if (avatarManagerRef.current?.localVrmBuffer) {
+        net.sendEnvelope(peerId, net.buildEnvelope('av_vrm', {
+          peerId: net.localPeerId,
+          fileData: avatarManagerRef.current.localVrmBuffer
+        }));
+      }
+    }));
     disposers.push(net.onPeerLeave((peerId) => {
       setPeerCount(net.peers.size);
       avatarManager.removePeerAvatar(peerId);
     }));
     disposers.push(net.onHostChange((_newHostId, selfHost) => {
       setIsHost(selfHost);
+    }));
+
+    disposers.push(net.onAvatarVRM((peerId, fileData) => {
+      const blobUrl = URL.createObjectURL(new Blob([fileData], { type: 'model/gltf-binary' }));
+      avatarManager.updatePeerVrmUrl(peerId, blobUrl);
     }));
 
     disposers.push(net.onTransform((update) => {
@@ -2304,7 +2338,26 @@ const vrHud = new VRHUDManager(
     const unbindLoop = sceneEngine.registerUpdateCallback((_delta, elapsed) => {
       manipulationManager.update(_delta);
       assetManager.update(_delta, elapsed);
-      avatarManager.update(_delta);
+
+      const transform = avatarManager.getLocalTransform(
+        sceneEngine.camera,
+        sceneEngine.controller1,
+        sceneEngine.controller2,
+        false,
+        net.isCompanion,
+        sceneEngine.userScale
+      );
+      transform.locomotion = {
+        moveSpeed: sceneEngine.getMoveSpeed(),
+        moveDirection: sceneEngine.getMoveDirection(),
+        isCrouching: sceneEngine.isCrouched(),
+        isGrounded: sceneEngine.getGrounded(),
+        verticalVelocity: sceneEngine.getVerticalVelocity(),
+        yawVelocity: sceneEngine.yawVelocity,
+        locomotionMode: sceneEngine.locomotionMode,
+      };
+
+      avatarManager.update(_delta, transform);
 
       // Pulse in-flight import placeholders so they read as "loading"
       // at a glance. Cheap: a few sin / multiplies per pending place,
@@ -2333,23 +2386,6 @@ const vrHud = new VRHUDManager(
       // Broadcast avatar every ~33ms (approx 30 FPS network sync)
       if (elapsed - lastBroadcast > 0.033 && net.mode !== 'offline') {
         lastBroadcast = elapsed;
-        const transform = avatarManager.getLocalTransform(
-          sceneEngine.camera,
-          sceneEngine.controller1,
-          sceneEngine.controller2,
-          false,
-          net.isCompanion
-        );
-        // Attach locomotion state so remote peers can animate the avatar.
-        transform.locomotion = {
-          moveSpeed: sceneEngine.getMoveSpeed(),
-          moveDirection: sceneEngine.getMoveDirection(),
-          isCrouching: sceneEngine.isCrouched(),
-          isGrounded: sceneEngine.getGrounded(),
-          verticalVelocity: sceneEngine.getVerticalVelocity(),
-          yawVelocity: sceneEngine.yawVelocity,
-          locomotionMode: sceneEngine.locomotionMode,
-        };
         net.broadcastAvatar(transform);
       }
 
@@ -2439,21 +2475,22 @@ const vrHud = new VRHUDManager(
     const onCanvasClick = (e: MouseEvent) => {
       if (e.button !== 0) return;
 
-      // While locked or in first-person mode, if the crosshair is over a panel route the click there
-      // instead of doing world raycasting.
+      // Check if click hits a spatial panel (crosshair center if locked, mouse coords if unlocked)
       const spm = sceneEngine.spatialPanelManager;
-      const isLockedOrFp = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
-      if (isLockedOrFp && spm) {
-        spm.updateLockedHover(window.innerWidth / 2, window.innerHeight / 2);
+      const isPointerLocked = document.pointerLockElement !== null;
+      if (spm) {
+        const clickX = isPointerLocked ? window.innerWidth / 2 : e.clientX;
+        const clickY = isPointerLocked ? window.innerHeight / 2 : e.clientY;
+        spm.updateLockedHover(clickX, clickY);
         if (spm.isOverPanel) {
-          spm.handleLockedClick();
+          spm.handleLockedClick(clickX, clickY);
           return;
         }
       }
 
       const rect = sceneEngine.renderer.domElement.getBoundingClientRect();
-      const isLocked = document.pointerLockElement === sceneEngine.renderer.domElement || cameraModeRef.current === 'first-person';
-      const ndc = isLocked ? new THREE.Vector2(0, 0) : new THREE.Vector2(
+      const isLockedCanvas = document.pointerLockElement === sceneEngine.renderer.domElement || cameraModeRef.current === 'first-person';
+      const ndc = isLockedCanvas ? new THREE.Vector2(0, 0) : new THREE.Vector2(
         ((e.clientX - rect.left) / rect.width) * 2 - 1,
         -((e.clientY - rect.top) / rect.height) * 2 + 1
       );
@@ -2523,8 +2560,17 @@ const vrHud = new VRHUDManager(
       const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       lastMouseNdcRef.current.set(x, y);
     };
-    // Scroll wheel: when locked/crosshair + pointing at a panel, scroll the panel directly.
+    // Scroll wheel: when Ctrl is held, self-scale the player up/down.
+    // When locked/crosshair + pointing at a panel, scroll the panel directly.
     const onCanvasWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const factor = e.deltaY < 0 ? 1.05 : 0.95;
+        const newScale = Math.min(5.0, Math.max(0.2, sceneEngine.userScale * factor));
+        sceneEngine.setUserScale(newScale);
+        return;
+      }
       const spm = sceneEngine.spatialPanelManager;
       const isLocked = document.pointerLockElement !== null || cameraModeRef.current === 'first-person';
       if (isLocked && spm) {
@@ -3879,6 +3925,7 @@ const vrHud = new VRHUDManager(
     onCenterRaySelect: handleCenterRaySelect,
     onOpenInspector: openInspectorForAsset,
     onRecordSpawnUndo: recordSpawnUndo,
+    onRefreshUI: handleRefreshUI,
   });
 
   // ─── Asset import / spawn handlers (extracted to reduce App.tsx size) ─
@@ -4536,6 +4583,7 @@ const vrHud = new VRHUDManager(
       {/* Interactive Asset Customization Dialog */}
       {showImportDialog && (
       <AssetImportDialog
+          key={`import-dialog-${uiRefreshKey}`}
           initialFile={importInitialFile}
           onImport={handleImportAssetFromConfig}
           onClose={() => setShowImportDialog(false)}

@@ -209,16 +209,40 @@ export class SceneEngine {
   public yawVelocity = 0;
   private _prevYawTime = 0;
   // Base heights at scale 1.0 — multiplied by userScale at runtime so
-  // self-scaling (Ctrl+Wheel) also changes crouch/standing heights.
-  private readonly BASE_STANDING_HEIGHT = 1.6;
+  // self-scaling (Ctrl+Wheel) and equipped avatar height update eye heights.
+  private baseEyeHeight = 1.6;
   private readonly CROUCH_RATIO = 0.625; // crouch = 62.5% of standing height
   private currentEyeHeight = 1.6;
   /** User scale factor — starts at 1.0, updated by Ctrl+Wheel self-scale. */
   public userScale = 1.0;
-  /** Derived standing eye height accounting for user scale. */
-  public get standingEyeHeight(): number { return this.BASE_STANDING_HEIGHT * this.userScale; }
-  /** Derived crouched eye height accounting for user scale. */
+  /** Derived standing eye height accounting for user scale and avatar height. */
+  public get standingEyeHeight(): number { return this.baseEyeHeight * this.userScale; }
+  /** Derived crouched eye height accounting for user scale and avatar height. */
   public get crouchEyeHeight(): number { return this.standingEyeHeight * this.CROUCH_RATIO; }
+
+  public setAvatarEyeHeight(height: number): void {
+    const prevStanding = this.standingEyeHeight;
+    this.baseEyeHeight = Math.max(0.2, height);
+    const newStanding = this.standingEyeHeight;
+    const diff = newStanding - prevStanding;
+
+    this.currentEyeHeight = this.isCrouching ? this.crouchEyeHeight : this.standingEyeHeight;
+    if (this.isGrounded && this.locomotionMode === 'walk') {
+      this.camera.position.y += diff;
+    }
+  }
+
+  public setUserScale(scale: number): void {
+    const prevStanding = this.standingEyeHeight;
+    this.userScale = Math.min(5.0, Math.max(0.2, scale));
+    const newStanding = this.standingEyeHeight;
+    const diff = newStanding - prevStanding;
+
+    this.currentEyeHeight = this.isCrouching ? this.crouchEyeHeight : this.standingEyeHeight;
+    if (this.isGrounded && this.locomotionMode === 'walk') {
+      this.camera.position.y += diff;
+    }
+  }
   private keysPressed: Record<string, boolean> = {};
   private fpEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private isPointerLocked = false;
@@ -876,24 +900,21 @@ export class SceneEngine {
       // bypasses rig parenting during an active XR session so writing
       // to it would have no effect on what the user sees.
       if (this.locomotionMode === 'walk') {
-        this.camera.getWorldPosition(this._vrUserPosTmp);
-        const groundY = this.collisionManager.getGroundedFloorY(
-          this._vrUserPosTmp.y,
-          this._vrUserPosTmp.x,
-          this._vrUserPosTmp.z,
-          this.verticalVelocity,
-          delta,
-          this.standingEyeHeight,
-        );
-
-        if (groundY > -Infinity) {
-          this.worldRoot.position.y = -groundY;
-          this.verticalVelocity = 0;
-          this.isGrounded = true;
-        } else {
+        // In WebXR local-floor space, the headset tracks physical height above floor directly.
+        // Jump physics only adjusts worldRoot when verticalVelocity != 0.
+        if (this.verticalVelocity !== 0) {
           this.verticalVelocity -= 18.0 * delta;
           this.worldRoot.position.y -= this.verticalVelocity * delta;
-          this.isGrounded = false;
+          if (this.worldRoot.position.y >= 0) {
+            this.worldRoot.position.y = 0;
+            this.verticalVelocity = 0;
+            this.isGrounded = true;
+          } else {
+            this.isGrounded = false;
+          }
+        } else {
+          this.worldRoot.position.y = 0;
+          this.isGrounded = true;
         }
       }
     } else {
@@ -993,6 +1014,9 @@ export class SceneEngine {
 
   private onCanvasClickForLock = (e?: MouseEvent): void => {
     if (this.canAcquirePointerLock && !this.canAcquirePointerLock()) {
+      return;
+    }
+    if (this.spatialPanelManager?.isOverPanel) {
       return;
     }
     if (e && e.target && e.target instanceof HTMLElement) {

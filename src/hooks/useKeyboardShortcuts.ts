@@ -66,6 +66,7 @@ interface UseKeyboardShortcutsParams {
   onCenterRaySelect: () => void;
   onOpenInspector: (asset: LoadedAsset | null) => void;
   onRecordSpawnUndo: (asset: LoadedAsset) => void;
+  onRefreshUI?: () => void;
 }
 
 export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
@@ -73,6 +74,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
     selectedAsset,
     cameraMode,
     activeTool,
+    onRefreshUI,
     setShowDashMenu,
     setShowChatPanel,
     setUnreadChatCount,
@@ -484,6 +486,10 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D') && !e.shiftKey) {
         e.preventDefault();
         handleDuplicateSelected();
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        onRefreshUI?.();
+        return;
       } else if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V') && e.shiftKey) {
         // Ctrl+Shift+V — "paste as plain text". Do NOT preventDefault:
         // the focused <input> (if any) still needs to receive the text from
@@ -515,6 +521,7 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
     onFocusSelected,
     onDeleteSelected,
     onOpenInspector,
+    onRefreshUI,
   ]);
 
   // No return value — plainPasteModeRef is owned by App.tsx and shared

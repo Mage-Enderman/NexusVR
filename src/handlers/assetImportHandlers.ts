@@ -267,8 +267,12 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     if (file.name.toLowerCase().endsWith('.vrm') && equipVrm) {
       const vrm = await avatarManagerRef.current?.loadLocalVRM(file);
       if (vrm) {
+        const net = networkServiceRef.current;
+        if (avatarManagerRef.current?.localVrmBuffer && net && net.mode !== 'offline') {
+          net.broadcastAvatarVRM(avatarManagerRef.current.localVrmBuffer);
+        }
         if (saveToInventory) {
-          const buffer = await file.arrayBuffer();
+          const buffer = avatarManagerRef.current?.localVrmBuffer || (await file.arrayBuffer());
           const item: InventoryItem = {
             id: `vrm-${Date.now()}`,
             name: file.name,

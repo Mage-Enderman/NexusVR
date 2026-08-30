@@ -16,6 +16,7 @@ export interface AvatarTransform {
   vrmUrl?: string;
   isCompanion?: boolean; // If true, do not render duplicate avatar
   controllerType?: 'quest2' | 'quest3';
+  userScale?: number;
   locomotion?: {
     moveSpeed: number;
     moveDirection: [number, number];
@@ -56,6 +57,7 @@ export class PeerAvatar {
   /** Avatar natural eye height (from root to eyes, unscaled). */
   private _vrmEyeHeight = 1.4;
   public get vrmEyeHeight(): number { return this._vrmEyeHeight; }
+  private userScale = 1.0;
   private targetHeadEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
   private hasReceivedFirstUpdate = false;
@@ -225,6 +227,11 @@ export class PeerAvatar {
       if (ring) ring.visible = transform.controllerType !== 'quest3';
     }
 
+    // Store userScale if transmitted
+    if (transform.userScale !== undefined) {
+      this.userScale = transform.userScale;
+    }
+
     // Store locomotion state for VRMAnimator.
     if (transform.locomotion) {
       Object.assign(this.locomotionState, transform.locomotion);
@@ -258,23 +265,55 @@ export class PeerAvatar {
       this.rightHandMesh.quaternion.slerp(this.targetRightQuat, alpha);
     }
     if (this.vrm) {
-      const eyeH = this._vrmEyeHeight;
-      const crouchBlend = this.animator ? this.animator.getBlendToCrouch() : (this.locomotionState.isCrouching ? 1 : 0);
-      const crouchDrop = eyeH * 0.375; // 37.5% drop during crouch
+      const scale = this.userScale;
+      const eyeH = this._vrmEyeHeight * scale;
+
+      // Detect physical VR squatting if head is below standing eye height
+      const squatOffset = Math.max(0, eyeH - this.targetHeadPos.y);
+      const physicalSquatBlend = Math.min(1.0, squatOffset / (eyeH * 0.375));
+
+      const crouchBlend = this.animator
+        ? Math.max(this.animator.getBlendToCrouch(), physicalSquatBlend)
+        : (this.locomotionState.isCrouching ? 1 : physicalSquatBlend);
+      const crouchDrop = eyeH * 0.375;
       const currentEyeH = eyeH - crouchDrop * crouchBlend;
 
-      // Position the avatar so feet remain grounded at floor level
+      // Position the avatar so feet remain grounded on the floor (never plunging below 0)
       this.vrm.scene.position.x = this.targetHeadPos.x;
-      this.vrm.scene.position.y = this.targetHeadPos.y - currentEyeH;
+      this.vrm.scene.position.y = Math.max(0, this.targetHeadPos.y - currentEyeH);
       this.vrm.scene.position.z = this.targetHeadPos.z;
 
-      // Reset scale to 1.0 (unscaled VRM)
-      this.vrm.scene.scale.setScalar(1.0);
+      // Scale VRM mesh according to user scale factor
+      this.vrm.scene.scale.setScalar(scale);
 
-      // Drive procedural animation with locomotion state and target head orientation
+      // Check if VR controllers are tracked for hand IK
+      const hasLeftTarget = this.targetLeftPos.lengthSq() > 0.01;
+      const hasRightTarget = this.targetRightPos.lengthSq() > 0.01;
+
+      const leftHandTarget = hasLeftTarget ? { position: this.targetLeftPos, quaternion: this.targetLeftQuat } : undefined;
+      const rightHandTarget = hasRightTarget ? { position: this.targetRightPos, quaternion: this.targetRightQuat } : undefined;
+
+      // Drive animation with locomotion state, target head orientation, hand IK, and physical squat
       if (this.animator) {
-        this.animator.update(delta, this.locomotionState, this.targetHeadEuler);
+        this.animator.update(
+          delta,
+          this.locomotionState,
+          this.targetHeadEuler,
+          leftHandTarget,
+          rightHandTarget,
+          physicalSquatBlend
+        );
       }
+
+      // For local avatar in 1st-person / VR, shrink the head bone so head/hair/face
+      // mesh does not clip through the local camera view while torso, arms, and legs stay visible.
+      if (this.peerId === 'local') {
+        const headBone = this.vrm.humanoid?.getNormalizedBoneNode('head');
+        if (headBone) {
+          headBone.scale.setScalar(0.001);
+        }
+      }
+
       // Update spring bones, materials, etc.
       this.vrm.update(delta);
     }
@@ -353,6 +392,7 @@ export class AvatarManager {
   public peers: Map<string, PeerAvatar> = new Map();
   public localVrmUrl: string | null = null;
   public localVrm: VRM | null = null;
+  public localAvatar: PeerAvatar | null = null;
   private _scratchPos = new THREE.Vector3();
   private _scratchQuat = new THREE.Quaternion();
   private _scratchRootInvQuat = new THREE.Quaternion();
@@ -375,17 +415,48 @@ export class AvatarManager {
     return this.audioListener;
   }
 
+  public localVrmBuffer: ArrayBuffer | null = null;
+  public onLocalVrmLoaded?: (vrm: VRM, dims: { height: number; eyeHeight: number }) => void;
+
   public async loadLocalVRM(file: File): Promise<VRM | null> {
     try {
       const url = URL.createObjectURL(file);
       this.localVrmUrl = url;
+      try {
+        this.localVrmBuffer = await file.arrayBuffer();
+      } catch (e) {
+        console.warn('Failed to read VRM array buffer:', e);
+      }
       const gltf = await this.gltfLoader.loadAsync(url);
       this.localVrm = gltf.userData.vrm as VRM;
+      if (this.localVrm) {
+        const dims = detectVRMDimensions(this.localVrm);
+        this.onLocalVrmLoaded?.(this.localVrm, dims);
+
+        // Initialize local avatar presence so the user can see their own body
+        if (!this.localAvatar) {
+          this.localAvatar = new PeerAvatar('local', this.scene, this.worldRoot);
+        }
+        if (this.localAvatar.headMesh) this.localAvatar.headMesh.visible = false;
+        if (this.localAvatar.leftHandMesh) this.localAvatar.leftHandMesh.visible = false;
+        if (this.localAvatar.rightHandMesh) this.localAvatar.rightHandMesh.visible = false;
+
+        this.localAvatar.loadVRM(url, this.gltfLoader);
+      }
       return this.localVrm;
     } catch (err) {
       console.error('Failed to load local VRM:', err);
       return null;
     }
+  }
+
+  public updatePeerVrmUrl(peerId: string, url: string): void {
+    let peer = this.peers.get(peerId);
+    if (!peer) {
+      peer = new PeerAvatar(peerId, this.scene, this.worldRoot);
+      this.peers.set(peerId, peer);
+    }
+    peer.loadVRM(url, this.gltfLoader);
   }
 
   public updatePeerAvatar(transform: AvatarTransform): void {
@@ -395,14 +466,19 @@ export class AvatarManager {
       this.peers.set(transform.peerId, peer);
     }
 
-    if (transform.vrmUrl && transform.vrmUrl !== peer.vrmUrl) {
+    if (transform.vrmUrl && transform.vrmUrl !== peer.vrmUrl && !transform.vrmUrl.startsWith('blob:')) {
       peer.loadVRM(transform.vrmUrl, this.gltfLoader);
     }
 
     peer.updateTransform(transform);
   }
 
-  public update(delta: number): void {
+  public update(delta: number, localTransform?: AvatarTransform): void {
+    if (this.localAvatar && localTransform) {
+      this.localAvatar.updateTransform(localTransform);
+      this.localAvatar.update(delta);
+    }
+
     for (const peer of this.peers.values()) {
       peer.update(delta);
     }
@@ -454,7 +530,14 @@ export class AvatarManager {
     };
   }
 
-  public getLocalTransform(camera: THREE.Camera, controller1?: THREE.Object3D, controller2?: THREE.Object3D, isSpeaking = false, isCompanion = false): AvatarTransform {
+  public getLocalTransform(
+    camera: THREE.Camera,
+    controller1?: THREE.Object3D,
+    controller2?: THREE.Object3D,
+    isSpeaking = false,
+    isCompanion = false,
+    userScale = 1.0
+  ): AvatarTransform {
     // VR joystick movement & smooth turn rotate and translate `worldRoot`.
     // Remote peer avatars live parented to `worldRoot`, so broadcasting
     // raw scene subtraction (camera.position - worldRoot.position) without
@@ -484,7 +567,8 @@ export class AvatarManager {
       isSpeaking,
       vrmUrl: this.localVrmUrl || undefined,
       isCompanion,
-      controllerType
+      controllerType,
+      userScale
     };
   }
 }

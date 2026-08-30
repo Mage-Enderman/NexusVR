@@ -298,7 +298,7 @@ type EnvelopeType =
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
   | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'audiostate' | 'panelstate' | 'mat' | 'p2preq' | 'p2pchunk' | 'inspector'
-  | 'leave' | 'ping';
+  | 'leave' | 'ping' | 'av_vrm';
 
 interface Envelope {
   type: EnvelopeType;
@@ -1576,6 +1576,14 @@ export class NetworkService {
         for (const cb of this.onAvatarCallbacks) cb(av);
         break;
       }
+      case 'av_vrm': {
+        const payload = env.payload as { peerId?: string; fileData?: ArrayBuffer };
+        if (payload && payload.fileData) {
+          const peerId = payload.peerId || fromPeerId;
+          for (const cb of this.onAvatarVrmCallbacks) cb(peerId, payload.fileData);
+        }
+        break;
+      }
       case 'spawn': {
         const data = env.payload as AssetSpawnData;
         data.senderPeerId = fromPeerId;
@@ -1951,6 +1959,18 @@ export class NetworkService {
       isCollidable: asset.isCollidable,
       isPersistent
     }));
+  }
+
+  private onAvatarVrmCallbacks: Set<(peerId: string, data: ArrayBuffer) => void> = new Set();
+
+  public onAvatarVRM(cb: (peerId: string, data: ArrayBuffer) => void): () => void {
+    this.onAvatarVrmCallbacks.add(cb);
+    return () => this.onAvatarVrmCallbacks.delete(cb);
+  }
+
+  public broadcastAvatarVRM(fileData: ArrayBuffer): void {
+    if (this.mode === 'offline') return;
+    this.broadcastEnvelope(this.buildEnvelope('av_vrm', { peerId: this.localPeerId, fileData }));
   }
 
   public broadcastAvatar(update: AvatarTransform): void {
