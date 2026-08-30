@@ -73,6 +73,9 @@ export interface AssetSpawnData {
   senderPeerId?: string;
   fileSize?: number;
   importerPeerId?: string;
+  // Audio-specific
+  audioLoop?: boolean;
+  audioPlaybackRate?: number;
 }
 
 export interface MaterialUpdate {
@@ -219,6 +222,16 @@ export interface VideoStateData {
   flipped?: boolean;
 }
 
+export interface AudioStateData {
+  assetId: string;
+  playing?: boolean;
+  currentTime?: number;
+  globalVolume?: number;
+  muted?: boolean;
+  loop?: boolean;
+  playbackRate?: number;
+}
+
 export interface SceneStateSnapshot {
   assets: AssetSpawnData[];
   hostId: string;
@@ -284,7 +297,7 @@ type EnvelopeType =
   //                      also broadcast but ONLY by the originator —
   //                      peers opting out of their mirror view do not
   //                      accidentally close the originator's panel.
-  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'panelstate' | 'mat' | 'p2preq' | 'p2pchunk' | 'inspector'
+  | 'pending' | 'pendingcancel' | 'chunk' | 'vidstate' | 'audiostate' | 'panelstate' | 'mat' | 'p2preq' | 'p2pchunk' | 'inspector'
   | 'leave' | 'ping';
 
 interface Envelope {
@@ -510,6 +523,7 @@ export class NetworkService {
   private onPendingSpawnCallbacks: Set<(data: PendingSpawnData) => void> = new Set();
   private onPendingCancelCallbacks: Set<(id: string) => void> = new Set();
   private onVideoStateCallbacks: Set<(data: VideoStateData) => void> = new Set();
+  private onAudioStateCallbacks: Set<(data: AudioStateData) => void> = new Set();
   private onPanelStateCallbacks: Set<(data: PanelStateData) => void> = new Set();
   private onMaterialCallbacks: Set<(update: MaterialUpdate) => void> = new Set();
   private onInspectorUpdateCallbacks: Set<(data: InspectorUpdateData) => void> = new Set();
@@ -1666,6 +1680,11 @@ export class NetworkService {
         // echo-suppression happens on landing in the App.tsx callback.
         for (const cb of this.onVideoStateCallbacks) cb(env.payload as VideoStateData);
         break;
+      case 'audiostate':
+        // Audio playback update. Routes through onAudioStateCallbacks
+        // so App.tsx can apply it via AssetManager.applyAudioState.
+        for (const cb of this.onAudioStateCallbacks) cb(env.payload as AudioStateData);
+        break;
       case 'panelstate':
         // Shared panel visibility update. Routes through
         // onPanelStateCallbacks so App.tsx can mirror the panel-open
@@ -2014,6 +2033,15 @@ export class NetworkService {
   public onVideoState(cb: (data: VideoStateData) => void): () => void {
     this.onVideoStateCallbacks.add(cb);
     return () => this.onVideoStateCallbacks.delete(cb);
+  }
+
+  public onAudioState(cb: (data: AudioStateData) => void): () => void {
+    this.onAudioStateCallbacks.add(cb);
+    return () => this.onAudioStateCallbacks.delete(cb);
+  }
+
+  public broadcastAudioState(data: AudioStateData): void {
+    this.broadcastEnvelope(this.buildEnvelope('audiostate', data as unknown));
   }
 
   /**

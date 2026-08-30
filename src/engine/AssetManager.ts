@@ -19,7 +19,10 @@ import { SplatMesh, SplatFileType, PagedSplats } from '@sparkjsdev/spark';
 import { parseSubtitles, type SubtitleCue } from '../utils/subtitleParser.ts';
 import { loadSubtitleSettings, type SubtitleSettings } from '../utils/subtitleSettings.ts';
 
-export type AssetType = '3d-model' | 'image' | 'video' | 'vrm' | 'misc' | 'primitive' | 'splat';
+export type AssetType = '3d-model' | 'image' | 'video' | 'audio' | 'vrm' | 'misc' | 'primitive' | 'splat';
+
+/** Supported audio file extensions. */
+export const AUDIO_EXTENSIONS = ['mp3', 'ogg', 'wav'];
 
 /**
  * Per-video playback state. Stored on `asset.object3d.userData.videoState`
@@ -67,6 +70,32 @@ export interface VideoPlaybackState {
   flipped?: boolean;
 }
 
+/**
+ * Per-audio playback state. Stored on `asset.object3d.userData.audioState`
+ * so it's intrinsically tied to the Three.js node (mirroring how
+ * `VideoPlaybackState` lives on `userData.videoState`).
+ */
+export interface AudioPlaybackState {
+  /** Is the audio currently playing. */
+  playing: boolean;
+  /** Current playback position in seconds. */
+  currentTime: number;
+  /** Total duration in seconds. Mirrored from `audio.duration` after metadata loads. */
+  duration: number;
+  /** Volume level applied to all users when in 'global' mode (0..1). */
+  globalVolume: number;
+  /** Per-user volume override (0..1). Never broadcast. */
+  localVolume: number;
+  /** Which volume slider is "active". */
+  volumeMode: 'global' | 'local';
+  /** Local-only mute toggle. */
+  muted: boolean;
+  /** Whether to loop playback. */
+  loop: boolean;
+  /** Playback speed (0.5 – 2.0). */
+  playbackRate: number;
+}
+
 import type { ContextMenuItemDef } from './ContextMenuManager.ts';
 
 export interface LoadedAsset {
@@ -78,6 +107,7 @@ export interface LoadedAsset {
   fileData?: ArrayBuffer;
   isCollidable: boolean;
   videoElement?: HTMLVideoElement;
+  audioElement?: HTMLAudioElement;
   subtitleCues?: SubtitleCue[];
   subtitlesData?: string;
   contextMenuItems?: ContextMenuItemDef[];
@@ -149,9 +179,11 @@ export class AssetManager {
   }
   private pendingLiveStreams: Map<string, MediaStream> = new Map();
   private videoTickCallbacks: Map<string, () => void> = new Map();
+  private audioTickCallbacks: Map<string, () => void> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
   private onAssetRemovedCallbacks: Set<(id: string) => void> = new Set();
   private onVideoPlaybackChangedCallbacks: Set<(id: string) => void> = new Set();
+  private onAudioPlaybackChangedCallbacks: Set<(id: string) => void> = new Set();
   // In-progress import dedup. Concurrent calls to `importFile` /
   // `importFromUrl` with the same customId return the same Promise
   // instead of each starting their own async work, so we never end up
@@ -345,6 +377,14 @@ export class AssetManager {
   public registerOnVideoPlaybackChanged(cb: (id: string) => void): () => void {
     this.onVideoPlaybackChangedCallbacks.add(cb);
     return () => this.onVideoPlaybackChangedCallbacks.delete(cb);
+  }
+
+  /**
+   * Subscribe to audio playback state changes. Mirrors video pattern.
+   */
+  public registerOnAudioPlaybackChanged(cb: (id: string) => void): () => void {
+    this.onAudioPlaybackChangedCallbacks.add(cb);
+    return () => this.onAudioPlaybackChangedCallbacks.delete(cb);
   }
 
   /**
@@ -559,6 +599,15 @@ export class AssetManager {
     } else if (ext === 'vrm') {
       asset = await this.loadGLB(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
       if (asset) asset.type = 'vrm';
+    } else if (AUDIO_EXTENSIONS.includes(ext)) {
+      if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
+      asset = await this.loadAudio(id, file.name, file, position, config);
+      if (asset) {
+        if (arrayBuffer) {
+          asset.fileData = arrayBuffer;
+        }
+        asset.url = blobUrl;
+      }
     } else {
       // Misc file objects draw a canvas icon synchronously. No bytes-
       // post-decode phase to report — fire 50% (bytes phase complete)
@@ -705,6 +754,15 @@ export class AssetManager {
         // before the THREE texture attaches.
         if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
         asset = await this.loadVideo(id, name, blob, position, config);
+        if (asset) {
+          if (arrayBuffer) {
+            asset.fileData = arrayBuffer;
+          }
+          asset.url = url;
+        }
+      } else if (AUDIO_EXTENSIONS.includes(ext)) {
+        if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
+        asset = await this.loadAudio(id, name, blob, position, config);
         if (asset) {
           if (arrayBuffer) {
             asset.fileData = arrayBuffer;
@@ -1437,6 +1495,298 @@ export class AssetManager {
     };
   }
 
+  private async loadAudio(id: string, name: string, source: string | File | Blob | ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>): Promise<LoadedAsset> {
+    const audio = document.createElement('audio');
+    audio.src = typeof source === 'string'
+      ? source
+      : source instanceof ArrayBuffer
+      ? URL.createObjectURL(new Blob([source], { type: 'audio/mpeg' }))
+      : URL.createObjectURL(source);
+    if (typeof source === 'string' && /^https?:/i.test(source)) {
+      audio.crossOrigin = 'anonymous';
+    }
+    audio.loop = config?.audioLoop ?? true;
+    audio.muted = true;
+    audio.volume = 0.8;
+    audio.preload = 'auto';
+    audio.playbackRate = config?.audioPlaybackRate ?? 1.0;
+    try { audio.load(); } catch { /* ignore */ }
+
+    // ── Canvas for waveform visualization ──
+    const canvasW = 512;
+    const canvasH = 192;
+    const canvasEl = document.createElement('canvas');
+    canvasEl.width = canvasW;
+    canvasEl.height = canvasH;
+    const ctx = canvasEl.getContext('2d')!;
+    const canvasTexture = new THREE.CanvasTexture(canvasEl);
+    canvasTexture.colorSpace = THREE.SRGBColorSpace;
+
+    // Pre-computed static waveform from decoded audio buffer
+    let staticWaveform: number[] | null = null;
+    try {
+      const rawSource = source instanceof ArrayBuffer ? source : null;
+      if (rawSource) {
+        const actx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const audioBuf = await actx.decodeAudioData(rawSource.slice(0));
+        const rawData = audioBuf.getChannelData(0);
+        const samples = canvasW;
+        const blockSize = Math.floor(rawData.length / samples);
+        staticWaveform = [];
+        for (let i = 0; i < samples; i++) {
+          let sum = 0;
+          for (let j = 0; j < blockSize; j++) {
+            sum += Math.abs(rawData[i * blockSize + j]);
+          }
+          staticWaveform.push(sum / blockSize);
+        }
+        // Normalize
+        const maxVal = Math.max(...staticWaveform, 0.001);
+        staticWaveform = staticWaveform.map(v => v / maxVal);
+        await actx.close();
+      }
+    } catch {
+      // If decode fails, staticWaveform stays null — we just show empty bars
+    }
+
+    // ── Web Audio API for real-time analyser ──
+    let analyserNode: AnalyserNode | null = null;
+    let audioCtx: AudioContext | null = null;
+    let sourceNode: MediaElementAudioSourceNode | null = null;
+    const setupAnalyser = () => {
+      try {
+        audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        analyserNode = audioCtx.createAnalyser();
+        analyserNode.fftSize = 256;
+        sourceNode = audioCtx.createMediaElementSource(audio);
+        sourceNode.connect(analyserNode);
+        analyserNode.connect(audioCtx.destination);
+      } catch {
+        // CORS or other restriction — waveform stays static
+      }
+    };
+    setupAnalyser();
+
+    // ── Three.js group: compact 2.0m × 0.8m panel ──
+    const width = 2.0;
+    const height = 0.8;
+    const group = new THREE.Group();
+    group.position.copy(pos);
+
+    // Frame
+    const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.06);
+    const frameMat = new THREE.MeshStandardMaterial({ color: '#07090e', roughness: 0.2, metalness: 0.8 });
+    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+    group.add(frameMesh);
+
+    // Screen with canvas texture
+    const screenGeo = new THREE.PlaneGeometry(width, height);
+    const screenMat = new THREE.MeshBasicMaterial({ map: canvasTexture });
+    const screenMesh = new THREE.Mesh(screenGeo, screenMat);
+    screenMesh.position.z = 0.032;
+    group.add(screenMesh);
+
+    // ── Audio playback state ──
+    const audioState: AudioPlaybackState = {
+      playing: false,
+      currentTime: 0,
+      duration: 0,
+      globalVolume: 0.8,
+      localVolume: 0.8,
+      volumeMode: 'local',
+      muted: true,
+      loop: config?.audioLoop ?? true,
+      playbackRate: config?.audioPlaybackRate ?? 1.0,
+    };
+    group.userData.audioState = audioState;
+
+    // ── Waveform render loop ──
+    const aNode = analyserNode as AnalyserNode | null;
+    const freqData = new Uint8Array(aNode ? aNode.frequencyBinCount : 128);
+    const drawFrame = () => {
+      const w = canvasW, h = canvasH;
+      // Background
+      ctx.fillStyle = '#0a0e17';
+      ctx.fillRect(0, 0, w, h);
+
+      // Subtle top/bottom gradient
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, 'rgba(99,102,241,0.06)');
+      grad.addColorStop(0.5, 'rgba(0,0,0,0)');
+      grad.addColorStop(1, 'rgba(168,85,247,0.04)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+
+      const centerY = h * 0.45;
+      const barMaxH = h * 0.35;
+
+      if (staticWaveform) {
+        // Draw static waveform as filled area
+        ctx.beginPath();
+        ctx.moveTo(0, centerY);
+        for (let i = 0; i < staticWaveform.length; i++) {
+          const x = (i / staticWaveform.length) * w;
+          const barH = staticWaveform[i] * barMaxH;
+          ctx.lineTo(x, centerY - barH);
+        }
+        ctx.lineTo(w, centerY);
+        for (let i = staticWaveform.length - 1; i >= 0; i--) {
+          const x = (i / staticWaveform.length) * w;
+          const barH = staticWaveform[i] * barMaxH;
+          ctx.lineTo(x, centerY + barH);
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(99,102,241,0.18)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(129,140,248,0.4)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Real-time frequency bars overlay
+      if (analyserNode && audioState.playing) {
+        analyserNode.getByteFrequencyData(freqData);
+        const barCount = 64;
+        const barW = w / barCount;
+        for (let i = 0; i < barCount; i++) {
+          const idx = Math.floor((i / barCount) * freqData.length);
+          const val = freqData[idx] / 255;
+          const barH = val * barMaxH * 0.8;
+          ctx.fillStyle = `rgba(129,140,248,${0.3 + val * 0.5})`;
+          ctx.fillRect(i * barW, centerY - barH, barW - 1, barH * 2);
+        }
+      }
+
+      // Playback head line
+      if (audioState.duration > 0) {
+        const pct = audioState.currentTime / audioState.duration;
+        const headX = pct * w;
+        ctx.strokeStyle = '#f0abfc';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(headX, 4);
+        ctx.lineTo(headX, h - 4);
+        ctx.stroke();
+        // Small triangle at top
+        ctx.fillStyle = '#f0abfc';
+        ctx.beginPath();
+        ctx.moveTo(headX - 4, 2);
+        ctx.lineTo(headX + 4, 2);
+        ctx.lineTo(headX, 8);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Filename
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = 'bold 14px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const displayName = name.length > 30 ? name.slice(0, 28) + '…' : name;
+      ctx.fillText(displayName, 10, 6);
+
+      // Time display
+      const elapsed = audioState.currentTime;
+      const total = audioState.duration;
+      const fmt = (s: number) => {
+        const m = Math.floor(s / 60);
+        const sec = Math.floor(s % 60);
+        return `${m}:${sec.toString().padStart(2, '0')}`;
+      };
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`${fmt(elapsed)} / ${fmt(total)}`, w - 10, h - 20);
+
+      // Play state indicator
+      ctx.textAlign = 'left';
+      ctx.fillStyle = audioState.playing ? 'rgba(129,140,248,0.9)' : 'rgba(255,255,255,0.4)';
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.fillText(audioState.playing ? '▶' : '■', 10, h - 20);
+
+      // Loop indicator
+      ctx.fillStyle = audioState.loop ? 'rgba(168,85,247,0.8)' : 'rgba(255,255,255,0.3)';
+      ctx.fillText(audioState.loop ? '↻' : '⊘', 30, h - 20);
+
+      canvasTexture.needsUpdate = true;
+      rafHandle = requestAnimationFrame(drawFrame);
+    };
+    let rafHandle = requestAnimationFrame(drawFrame);
+    this.audioTickCallbacks.set(id, drawFrame);
+
+    // ── Audio element event listeners ──
+    audio.addEventListener('loadedmetadata', () => {
+      audioState.duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    });
+    audio.addEventListener('timeupdate', () => {
+      audioState.currentTime = audio.currentTime;
+    });
+    audio.addEventListener('play', () => {
+      audioState.playing = true;
+      for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
+    });
+    audio.addEventListener('pause', () => {
+      audioState.playing = false;
+      for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
+    });
+    audio.addEventListener('volumechange', () => {
+      audioState.muted = audio.muted;
+      for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
+    });
+    audio.addEventListener('ended', () => {
+      audioState.playing = false;
+      for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
+    });
+
+    // Cleanup handler
+    group.userData.dispose = () => {
+      try { audio.pause(); } catch { /* noop */ }
+      audio.removeAttribute('src');
+      audio.load();
+      if (rafHandle) cancelAnimationFrame(rafHandle);
+      try { audioCtx?.close(); } catch { /* noop */ }
+      if (canvasTexture) canvasTexture.dispose();
+    };
+
+    return {
+      id,
+      name,
+      type: 'audio',
+      object3d: group,
+      fileData: undefined,
+      isCollidable: true,
+      audioElement: audio,
+      url: typeof source === 'string' ? source : audio.src,
+    };
+  }
+
+  public async spawnAudio(
+    source: string | File | Blob | ArrayBuffer,
+    name: string,
+    position = new THREE.Vector3(0, 1.5, 0),
+    config?: Partial<ImportConfig>,
+    customId?: string
+  ): Promise<LoadedAsset | null> {
+    const id = customId ?? `audio-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const inFlight = this.inProgressImports.get(id);
+    if (inFlight) return inFlight;
+    const promise = (async () => {
+      const asset = await this.loadAudio(id, name, source, position, config);
+      if (asset) {
+        this.worldRoot.add(asset.object3d);
+        this.assets.set(asset.id, asset);
+        for (const cb of this.onAssetAddedCallbacks) cb(asset);
+      }
+      return asset;
+    })();
+    this.inProgressImports.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.inProgressImports.delete(id);
+    }
+  }
+
   public async spawnVideo(
     source: string | File | Blob | ArrayBuffer,
     name: string,
@@ -1512,6 +1862,12 @@ export class AssetManager {
     const asset = this.assets.get(assetId);
     if (!asset || asset.type !== 'video') return null;
     return (asset.object3d.userData as { videoState?: VideoPlaybackState }).videoState ?? null;
+  }
+
+  public getAudioState(assetId: string): AudioPlaybackState | null {
+    const asset = this.assets.get(assetId);
+    if (!asset || asset.type !== 'audio') return null;
+    return (asset.object3d.userData as { audioState?: AudioPlaybackState }).audioState ?? null;
   }
 
   /** Retrieve a loaded asset by its id */
@@ -1906,6 +2262,80 @@ export class AssetManager {
     }
     if (changed) {
       for (const cb of this.onVideoPlaybackChangedCallbacks) cb(assetId);
+    }
+    return changed;
+  }
+
+  public applyAudioState(assetId: string, partial: Partial<AudioPlaybackState>): boolean {
+    const asset = this.assets.get(assetId);
+    if (!asset || !asset.audioElement) return false;
+    const a = asset.audioElement;
+    const state = (asset.object3d.userData as { audioState?: AudioPlaybackState }).audioState;
+    if (!state) return false;
+    let changed = false;
+
+    if (partial.playing !== undefined && partial.playing !== state.playing) {
+      if (partial.playing) {
+        a.play().catch(() => { state.playing = false; });
+      } else {
+        a.pause();
+      }
+      state.playing = partial.playing;
+      changed = true;
+    }
+    if (
+      partial.currentTime !== undefined &&
+      state.duration > 0 &&
+      Math.abs(partial.currentTime - state.currentTime) > 0.25
+    ) {
+      a.currentTime = Math.max(0, Math.min(state.duration - 0.05, partial.currentTime));
+      changed = true;
+    }
+    if (partial.globalVolume !== undefined && partial.globalVolume !== state.globalVolume) {
+      state.globalVolume = Math.max(0, Math.min(1, partial.globalVolume));
+      if (state.muted) {
+        state.muted = false;
+        a.muted = false;
+      }
+      if (state.volumeMode === 'global') {
+        a.volume = state.globalVolume;
+      }
+      changed = true;
+    }
+    if (partial.localVolume !== undefined && partial.localVolume !== state.localVolume) {
+      state.localVolume = Math.max(0, Math.min(1, partial.localVolume));
+      if (state.muted) {
+        state.muted = false;
+        a.muted = false;
+      }
+      if (state.volumeMode === 'local') {
+        a.volume = state.localVolume;
+      }
+      changed = true;
+    }
+    if (partial.volumeMode !== undefined && partial.volumeMode !== state.volumeMode) {
+      state.volumeMode = partial.volumeMode;
+      a.volume = state.muted ? 0 : state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
+      changed = true;
+    }
+    if (partial.muted !== undefined && partial.muted !== state.muted) {
+      a.muted = partial.muted;
+      a.volume = partial.muted ? 0 : state.volumeMode === 'global' ? state.globalVolume : state.localVolume;
+      state.muted = partial.muted;
+      changed = true;
+    }
+    if (partial.loop !== undefined && partial.loop !== state.loop) {
+      a.loop = partial.loop;
+      state.loop = partial.loop;
+      changed = true;
+    }
+    if (partial.playbackRate !== undefined && partial.playbackRate !== state.playbackRate) {
+      a.playbackRate = Math.max(0.5, Math.min(2.0, partial.playbackRate));
+      state.playbackRate = a.playbackRate;
+      changed = true;
+    }
+    if (changed) {
+      for (const cb of this.onAudioPlaybackChangedCallbacks) cb(assetId);
     }
     return changed;
   }
@@ -2553,7 +2983,13 @@ export class AssetManager {
       asset.videoElement.src = '';
     }
 
+    if (asset.audioElement) {
+      asset.audioElement.pause();
+      asset.audioElement.src = '';
+    }
+
     this.videoTickCallbacks.delete(id);
+    this.audioTickCallbacks.delete(id);
     this.assets.delete(id);
     for (const cb of this.onAssetRemovedCallbacks) cb(id);
   }

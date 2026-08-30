@@ -732,6 +732,8 @@ const vrHud = new VRHUDManager(
             handleDeleteSelected,
             handleVideoAction,
             handleVideoClose,
+            handleAudioAction,
+            handleAudioClose,
           }),
         }
       );
@@ -1703,7 +1705,32 @@ const vrHud = new VRHUDManager(
     // button icon goes stale because the React tree isn't aware of
     // the state change. This callback bumps selectedAsset so the
     // play/pause icon refreshes to show 'Play' after the video ends.
+    disposers.push(net.onAudioState((data) => {
+      const am = assetManagerRef.current;
+      if (!am) return;
+      am.applyAudioState(data.assetId, {
+        playing: data.playing,
+        currentTime: data.currentTime,
+        globalVolume: data.globalVolume,
+        muted: data.muted,
+        loop: data.loop,
+        playbackRate: data.playbackRate,
+      });
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === data.assetId) {
+        setSelectedAsset({ ...sel });
+      }
+      vrHudRef.current?.redrawPanel();
+    }));
+
     disposers.push(assetManager.registerOnVideoPlaybackChanged((id) => {
+      const sel = selectedAssetRef.current;
+      if (sel && sel.id === id) {
+        setSelectedAsset({ ...sel });
+      }
+    }));
+
+    disposers.push(assetManager.registerOnAudioPlaybackChanged((id) => {
       const sel = selectedAssetRef.current;
       if (sel && sel.id === id) {
         setSelectedAsset({ ...sel });
@@ -1754,7 +1781,9 @@ const vrHud = new VRHUDManager(
         netUnsub();
         // Concatenate chunks in order.
         const ext = (data.name || '').split('.').pop()?.toLowerCase() || '';
-        const mime = data.type === 'video' || ['mp4', 'webm', 'mov'].includes(ext) ? 'video/mp4' : 'application/octet-stream';
+        const mime = data.type === 'video' || ['mp4', 'webm', 'mov'].includes(ext) ? 'video/mp4'
+          : data.type === 'audio' || ['mp3', 'ogg', 'wav'].includes(ext) ? 'audio/mpeg'
+          : 'application/octet-stream';
         const fullBlob = new Blob(chunks as ArrayBuffer[], { type: mime });
         const file = new File([fullBlob], data.name || 'Asset', { type: mime });
         net.registerHostedFile(data.id, file);
@@ -1810,6 +1839,15 @@ const vrHud = new VRHUDManager(
                 subtitlesData: pendingVs.subtitlesData,
                 subtitlesEnabled: pendingVs.subtitlesEnabled,
               });
+            }
+            // Apply audio-specific state for late joiners
+            if (asset.type === 'audio' && asset.audioElement) {
+              if (data.audioLoop !== undefined) {
+                assetManager.applyAudioState(data.id, { loop: data.audioLoop });
+              }
+              if (data.audioPlaybackRate !== undefined) {
+                assetManager.applyAudioState(data.id, { playbackRate: data.audioPlaybackRate });
+              }
             }
           }
         });
@@ -1887,13 +1925,14 @@ const vrHud = new VRHUDManager(
       // animation loop's `oversized` skip below keeps it static (no
       // pulse) so it reads as a permanent failure indicator rather
       // than a still-loading asset.
-      if (data.type === 'video' || data.fileDataOversized || data.p2pTransferHint) {
+      if (data.type === 'video' || data.type === 'audio' || data.fileDataOversized || data.p2pTransferHint) {
         const senderPeerId = data.senderPeerId || net.hostId;
         const hintData = data.p2pTransferHint || { id: data.id, size: data.fileSize || 10000000 };
         const dataWithHint = { ...data, senderPeerId, p2pTransferHint: hintData };
         startP2PAssetTransfer(dataWithHint, pos);
         return;
       }
+
       if (data.type === 'primitive' && data.primitiveType) {
         streamingSuppressedAssetIdsRef.current.add(data.id);
         const prim = assetManager.spawnPrimitive(data.primitiveType, pos, data.id);
@@ -2139,7 +2178,10 @@ const vrHud = new VRHUDManager(
               currentTime: typeof vsSnap.currentTime === 'number' ? vsSnap.currentTime : 0,
               globalVolume: typeof vsSnap.globalVolume === 'number' ? vsSnap.globalVolume : 0.8,
               flipped: vsSnap.flipped !== false,
-            } : undefined
+            } : undefined,
+            // Audio-specific state for late joiners
+            audioLoop: (a.object3d.userData as { audioState?: { loop?: boolean } }).audioState?.loop,
+            audioPlaybackRate: (a.object3d.userData as { audioState?: { playbackRate?: number } }).audioState?.playbackRate,
           });
           if (hint && net.isHost) {
             const syncMode = (a.object3d.userData as { videoState?: { syncMode?: string } }).videoState?.syncMode;
@@ -2162,8 +2204,8 @@ const vrHud = new VRHUDManager(
         if (!assetManager.assets.has(data.id)) {
           const pos = new THREE.Vector3(...data.position);
           
-          // For all video assets or oversized assets, pull via reliable P2P transfer channel
-          if (data.type === 'video' || data.fileDataOversized || data.p2pTransferHint) {
+          // For video/audio assets or oversized assets, pull via reliable P2P transfer channel
+          if (data.type === 'video' || data.type === 'audio' || data.fileDataOversized || data.p2pTransferHint) {
             const senderPeerId = data.senderPeerId || net.hostId;
             const hintData = data.p2pTransferHint || { id: data.id, size: data.fileSize || 10000000 };
             const dataWithHint = { ...data, senderPeerId, p2pTransferHint: hintData };
@@ -2207,6 +2249,15 @@ const vrHud = new VRHUDManager(
                 if (data.grabbable) {
                   asset.object3d.userData.grabbable = data.grabbable;
                 }
+                // Apply audio-specific state for late joiners
+                if (asset.type === 'audio') {
+                  if (data.audioLoop !== undefined) {
+                    assetManager.applyAudioState(data.id, { loop: data.audioLoop });
+                  }
+                  if (data.audioPlaybackRate !== undefined) {
+                    assetManager.applyAudioState(data.id, { playbackRate: data.audioPlaybackRate });
+                  }
+                }
               }
             });
           } else if (data.url) {
@@ -2222,6 +2273,15 @@ const vrHud = new VRHUDManager(
                 }
                 if (data.grabbable) {
                   asset.object3d.userData.grabbable = data.grabbable;
+                }
+                // Apply audio-specific state for late joiners
+                if (asset.type === 'audio') {
+                  if (data.audioLoop !== undefined) {
+                    assetManager.applyAudioState(data.id, { loop: data.audioLoop });
+                  }
+                  if (data.audioPlaybackRate !== undefined) {
+                    assetManager.applyAudioState(data.id, { playbackRate: data.audioPlaybackRate });
+                  }
                 }
               }
             });
@@ -2280,6 +2340,16 @@ const vrHud = new VRHUDManager(
           false,
           net.isCompanion
         );
+        // Attach locomotion state so remote peers can animate the avatar.
+        transform.locomotion = {
+          moveSpeed: sceneEngine.getMoveSpeed(),
+          moveDirection: sceneEngine.getMoveDirection(),
+          isCrouching: sceneEngine.isCrouched(),
+          isGrounded: sceneEngine.getGrounded(),
+          verticalVelocity: sceneEngine.getVerticalVelocity(),
+          yawVelocity: sceneEngine.yawVelocity,
+          locomotionMode: sceneEngine.locomotionMode,
+        };
         net.broadcastAvatar(transform);
       }
 
@@ -3308,6 +3378,79 @@ const vrHud = new VRHUDManager(
    * VR and desktop close paths.
    */
   const handleVideoClose = (assetId: string): void => {
+    if (selectedAssetRef.current?.id === assetId) {
+      handleDeleteSelected();
+      return;
+    }
+    const am = assetManagerRef.current;
+    if (!am) return;
+    am.removeAsset(assetId);
+    networkServiceRef.current?.broadcastRemove(assetId);
+  };
+
+  const handleAudioAction = (assetId: string, kind: 'play' | 'pause' | 'stop' | 'seek' | 'volume' | 'volumeMode' | 'mute' | 'loop' | 'speed', payload?: number | 'global' | 'local') => {
+    const am = assetManagerRef.current;
+    const net = networkServiceRef.current;
+    if (!am) return;
+    const state = am.getAudioState(assetId);
+    if (!state) return;
+
+    switch (kind) {
+      case 'play':
+        am.applyAudioState(assetId, { playing: true });
+        net?.broadcastAudioState({ assetId, playing: true, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'pause':
+      case 'stop':
+        am.applyAudioState(assetId, { playing: false });
+        net?.broadcastAudioState({ assetId, playing: false, currentTime: state.currentTime, globalVolume: state.globalVolume });
+        break;
+      case 'seek':
+        if (typeof payload === 'number') {
+          const clamped = Math.max(0, Math.min(Math.max(0, state.duration - 0.05), payload));
+          am.applyAudioState(assetId, { currentTime: clamped });
+          net?.broadcastAudioState({ assetId, playing: state.playing, currentTime: clamped, globalVolume: state.globalVolume });
+        }
+        break;
+      case 'volume':
+        if (typeof payload === 'number') {
+          if (state.volumeMode === 'global') {
+            am.applyAudioState(assetId, { globalVolume: payload, muted: false });
+            net?.broadcastAudioState({ assetId, playing: state.playing, currentTime: state.currentTime, globalVolume: payload });
+          } else {
+            am.applyAudioState(assetId, { localVolume: payload, muted: false });
+          }
+        }
+        break;
+      case 'volumeMode':
+        if (payload === 'global' || payload === 'local') {
+          am.applyAudioState(assetId, { volumeMode: payload });
+        }
+        break;
+      case 'mute':
+        am.applyAudioState(assetId, { muted: !state.muted });
+        break;
+      case 'loop':
+        {
+          const nextLoop = !state.loop;
+          am.applyAudioState(assetId, { loop: nextLoop });
+          net?.broadcastAudioState({ assetId, playing: state.playing, currentTime: state.currentTime, loop: nextLoop });
+        }
+        break;
+      case 'speed':
+        if (typeof payload === 'number') {
+          const clamped = Math.max(0.5, Math.min(2.0, Math.round(payload * 10) / 10));
+          am.applyAudioState(assetId, { playbackRate: clamped });
+          net?.broadcastAudioState({ assetId, playing: state.playing, currentTime: state.currentTime, playbackRate: clamped });
+        }
+        break;
+    }
+    const sel = selectedAssetRef.current;
+    if (sel && sel.id === assetId) setSelectedAsset({ ...sel });
+    vrHudRef.current?.redrawPanel();
+  };
+
+  const handleAudioClose = (assetId: string): void => {
     if (selectedAssetRef.current?.id === assetId) {
       handleDeleteSelected();
       return;

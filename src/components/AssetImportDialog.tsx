@@ -8,6 +8,7 @@ import {
   FileBox,
   Image as ImageIcon,
   Video,
+  Music,
   User,
   Link2,
   Sliders,
@@ -46,6 +47,11 @@ export interface ImportConfig {
   videoAutoplay: boolean;
   subtitleFile?: File;
   subtitleText?: string;
+  // Audio
+  audioSyncMode?: 'persistent';
+  audioLoop: boolean;
+  audioAutoplay: boolean;
+  audioPlaybackRate?: number;
   // VRM
   vrmAction: 'equip-avatar' | 'spawn-npc';
   /** Flip standard 3D model (GLB/GLTF/OBJ/FBX) 180° around X axis (fixes upside-down OpenCV +Y down export format). Defaults to false. */
@@ -225,6 +231,11 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
   const [subtitleText, setSubtitleText] = useState<string>('');
 
+  // Audio settings
+  const [audioLoop, setAudioLoop] = useState<boolean>(true);
+  const [audioAutoplay, setAudioAutoplay] = useState<boolean>(false);
+  const [audioPlaybackRate, setAudioPlaybackRate] = useState<number>(1.0);
+
   // VRM settings
   const [vrmAction, setVrmAction] = useState<'equip-avatar' | 'spawn-npc'>('equip-avatar');
 
@@ -253,13 +264,14 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     }
   }, [initialFile]);
 
-  const getFileCategory = (): 'model' | 'splat' | 'image' | 'video' | 'vrm' | 'misc' => {
+  const getFileCategory = (): 'model' | 'splat' | 'image' | 'video' | 'audio' | 'vrm' | 'misc' => {
     const name = selectedFile ? selectedFile.name.toLowerCase() : urlInput.toLowerCase();
     if (name.endsWith('.vrm')) return 'vrm';
     if (isSplatFilename(name)) return 'splat';
     if (name.endsWith('.glb') || name.endsWith('.gltf') || name.endsWith('.obj') || name.endsWith('.fbx')) return 'model';
     if (name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png') || name.endsWith('.webp') || name.endsWith('.gif')) return 'image';
     if (name.endsWith('.mp4') || name.endsWith('.webm') || name.endsWith('.mov')) return 'video';
+    if (name.endsWith('.mp3') || name.endsWith('.ogg') || name.endsWith('.wav')) return 'audio';
     return 'misc';
   };
 
@@ -371,6 +383,9 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       videoAutoplay,
       subtitleFile: subtitleFile || undefined,
       subtitleText: finalSubText.trim() ? finalSubText : undefined,
+      audioLoop,
+      audioAutoplay,
+      audioPlaybackRate,
       vrmAction,
       flipModel180,
       // splatFlip180 is the user-facing toggle bound to the "Flip Model
@@ -409,6 +424,7 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     if (category === 'model') return 'Import Model';
     if (category === 'splat') return 'Import 3D Gaussian Splat';
     if (category === 'video') return 'Import Video';
+    if (category === 'audio') return 'Import Audio';
     if (category === 'vrm') return 'Import Avatar';
     return 'Import Asset';
   };
@@ -452,6 +468,8 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
         return `Image • Mode: ${imageDisplayMode} • ${textureFiltering === 'smooth' ? 'Smooth (HD)' : 'Pixel Art'}`;
       case 'video':
         return `Video • Sync: ${videoSyncMode === 'persistent' ? 'Persistent Stream' : 'Watch Party'}`;
+      case 'audio':
+        return `Audio • Loop: ${audioLoop ? 'On' : 'Off'} • Speed: ${audioPlaybackRate}x`;
       case 'vrm':
         return `VRM Avatar • Action: ${vrmAction === 'equip-avatar' ? 'Equip as Custom Avatar' : 'Spawn as 3D NPC'}`;
       default:
@@ -511,6 +529,7 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                 {category === 'model' && <FileBox className="w-4 h-4" />}
                 {category === 'image' && <ImageIcon className="w-4 h-4" />}
                 {category === 'video' && <Video className="w-4 h-4" />}
+                {category === 'audio' && <Music className="w-4 h-4" />}
                 {category === 'vrm' && <User className="w-4 h-4" />}
                 {category === 'misc' && <Upload className="w-4 h-4" />}
               </div>
@@ -861,6 +880,32 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                   <ResoniteOptionButton
                     title="Advanced Settings"
                     subtitle="Customize placement & inventory options"
+                    onClick={() => goToPage('advanced-settings')}
+                  />
+                  <ResoniteOptionButton
+                    title="Raw File"
+                    subtitle="Import as raw binary file"
+                    onClick={() => {
+                      setImportAsRawFile(true);
+                      goToPage('all-set');
+                    }}
+                  />
+                </>
+              )}
+
+              {category === 'audio' && (
+                <>
+                  <ResoniteOptionButton
+                    title="Persistent Audio Stream"
+                    subtitle="Independent playback & peer sync (Recommended)"
+                    onClick={() => {
+                      setImportAsRawFile(false);
+                      goToPage('all-set');
+                    }}
+                  />
+                  <ResoniteOptionButton
+                    title="Advanced Settings"
+                    subtitle="Customize loop, autoplay & speed"
                     onClick={() => goToPage('advanced-settings')}
                   />
                   <ResoniteOptionButton
@@ -1379,6 +1424,52 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                           Remove
                         </button>
                       )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Audio Advanced Options */}
+              {category === 'audio' && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={audioLoop}
+                        onChange={(e) => setAudioLoop(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded accent-purple-400"
+                      />
+                      <span>Loop Playback</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={audioAutoplay}
+                        onChange={(e) => setAudioAutoplay(e.target.checked)}
+                        className="w-3.5 h-3.5 rounded accent-purple-400"
+                      />
+                      <span>Autoplay</span>
+                    </label>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] text-slate-300 block mb-1 font-semibold">
+                      Playback Speed
+                    </span>
+                    <div className="grid grid-cols-6 gap-1 bg-black/40 p-1 rounded-xl">
+                      {([0.5, 0.75, 1.0, 1.25, 1.5, 2.0] as const).map((rate) => (
+                        <button
+                          key={rate}
+                          type="button"
+                          onClick={() => setAudioPlaybackRate(rate)}
+                          className={`btn btn-glass text-xs py-1 ${
+                            audioPlaybackRate === rate ? 'active bg-purple-500/20 text-purple-300 font-bold' : ''
+                          }`}
+                        >
+                          {rate}x
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>

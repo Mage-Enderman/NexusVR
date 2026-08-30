@@ -205,6 +205,9 @@ export class SceneEngine {
   // currentEyeHeight so the player stands at the correct height on
   // platforms while crouched.
   private isCrouching = false;
+  /** Frame-to-frame yaw change in degrees/sec, used by VRMAnimator for head-first turning. */
+  public yawVelocity = 0;
+  private _prevYawTime = 0;
   // Base heights at scale 1.0 — multiplied by userScale at runtime so
   // self-scaling (Ctrl+Wheel) also changes crouch/standing heights.
   private readonly BASE_STANDING_HEIGHT = 1.6;
@@ -913,6 +916,9 @@ export class SceneEngine {
       this.respawn();
     }
 
+    // Decay yaw velocity when no mouse input this frame.
+    this.yawVelocity *= 0.85;
+
     // Call registered animation listeners
     for (const callback of this.updateCallbacks) {
       callback(delta, time / 1000);
@@ -1044,11 +1050,18 @@ export class SceneEngine {
       const movementX = e.movementX || 0;
       const movementY = e.movementY || 0;
       this.fpEuler.setFromQuaternion(this.camera.quaternion);
+      const prevYaw = this.fpEuler.y;
       this.fpEuler.y -= movementX * 0.003;
       this.fpEuler.x -= movementY * 0.003;
       // Clamp pitch so we don't do backflips
       this.fpEuler.x = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.fpEuler.x));
       this.camera.quaternion.setFromEuler(this.fpEuler);
+            {
+            const now = performance.now();
+            const dt = this._prevYawTime ? (now - this._prevYawTime) / 1000 : 0.016;
+            this._prevYawTime = now;
+            this.yawVelocity = (this.fpEuler.y - prevYaw) / Math.max(dt, 0.001) * (180 / Math.PI);
+          }
     }
   };
 
@@ -1389,6 +1402,37 @@ export class SceneEngine {
       this.controls.update();
     }
   }
+
+  // ── Locomotion state getters (for VRMAnimator) ───────────────────
+  /** Normalized 0-1 movement speed based on WASD input. */
+  public getMoveSpeed(): number {
+    let hasInput = false;
+    if (this.keysPressed["KeyW"] || this.keysPressed["ArrowUp"]) hasInput = true;
+    if (this.keysPressed["KeyS"] || this.keysPressed["ArrowDown"]) hasInput = true;
+    if (this.keysPressed["KeyA"] || this.keysPressed["ArrowLeft"]) hasInput = true;
+    if (this.keysPressed["KeyD"] || this.keysPressed["ArrowRight"]) hasInput = true;
+    if (!hasInput) return 0;
+    let speed = 1.0;
+    if (this.keysPressed["ShiftLeft"] || this.keysPressed["ShiftRight"]) speed = 2.0;
+    if (this.slowMovement) speed *= 0.3;
+    return Math.min(speed / 2.0, 1.0);
+  }
+
+  /** Local-space XZ movement direction from WASD input. */
+  public getMoveDirection(): [number, number] {
+    let x = 0, z = 0;
+    if (this.keysPressed["KeyW"] || this.keysPressed["ArrowUp"]) z -= 1;
+    if (this.keysPressed["KeyS"] || this.keysPressed["ArrowDown"]) z += 1;
+    if (this.keysPressed["KeyA"] || this.keysPressed["ArrowLeft"]) x -= 1;
+    if (this.keysPressed["KeyD"] || this.keysPressed["ArrowRight"]) x += 1;
+    const len = Math.sqrt(x * x + z * z);
+    if (len > 0) { x /= len; z /= len; }
+    return [x, z];
+  }
+
+  public isCrouched(): boolean { return this.isCrouching; }
+  public getGrounded(): boolean { return this.isGrounded; }
+  public getVerticalVelocity(): number { return this.verticalVelocity; }
 
   public dispose(): void {
     if (this.resizeObserver) {

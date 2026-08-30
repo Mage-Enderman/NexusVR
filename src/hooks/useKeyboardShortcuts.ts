@@ -281,6 +281,47 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
       }
     }
 
+    if (asset.type === 'audio') {
+      const net = networkServiceRef.current;
+      let hosted = net?.getHostedFile(asset.id);
+      if (!hosted && (asset.url?.startsWith('blob:') || asset.audioElement?.src?.startsWith('blob:'))) {
+        try {
+          const res = await fetch(asset.url || asset.audioElement!.src);
+          if (res.ok) {
+            hosted = await res.blob();
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      const audioSource = hosted instanceof ArrayBuffer ? new Blob([hosted]) : hosted || asset.url || asset.audioElement?.src;
+      if (audioSource) {
+        const newId = `audio-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        if (hosted) {
+          net?.registerHostedFile(newId, hosted);
+        }
+        const origAs = (asset.object3d.userData as Record<string, unknown>)?.audioState as any;
+        const config: Partial<ImportConfig> = {
+          audioLoop: origAs?.loop ?? true,
+          audioPlaybackRate: origAs?.playbackRate ?? 1.0,
+        };
+        const newAsset = await am.spawnAudio(audioSource, asset.name, pos, config, newId);
+        if (newAsset) {
+          if (origAs) {
+            am.applyAudioState(newAsset.id, {
+              currentTime: origAs.currentTime,
+              playing: origAs.playing,
+              globalVolume: origAs.globalVolume,
+              loop: origAs.loop,
+              playbackRate: origAs.playbackRate,
+            });
+          }
+          afterImport(newAsset);
+        }
+        return;
+      }
+    }
+
     if (asset.fileData && asset.name) {
       const blob = new Blob([asset.fileData], {
         type: asset.metadata?.mimeType || 'application/octet-stream',

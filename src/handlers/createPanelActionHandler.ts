@@ -54,6 +54,12 @@ export interface PanelActionHandlerDeps {
     payload?: number | 'global' | 'local' | 'persistent' | 'watch-party'
   ) => void;
   handleVideoClose: (assetId: string) => void;
+  handleAudioAction: (
+    assetId: string,
+    kind: 'play' | 'pause' | 'stop' | 'seek' | 'volume' | 'volumeMode' | 'mute' | 'loop' | 'speed',
+    payload?: number | 'global' | 'local'
+  ) => void;
+  handleAudioClose: (assetId: string) => void;
 }
 
 /**
@@ -99,6 +105,8 @@ export function createPanelActionHandler(
     handleDeleteSelected,
     handleVideoAction,
     handleVideoClose,
+    handleAudioAction,
+    handleAudioClose,
   } = deps;
 
   return (actionId: string) => {
@@ -608,6 +616,39 @@ export function createPanelActionHandler(
             handleVideoAction(sel.id, 'volumeMode', tail === 'mode:global' ? 'global' : 'local');
           }
           else if (tail === 'close') handleVideoClose(sel.id);
+          else return;
+          dirty();
+          return;
+        }
+
+        // ---- Audio controls (only valid when sel.type === 'audio') ----
+        if (actionId.startsWith('inspect.audio:')) {
+          if (sel.type !== 'audio') return;
+          const tail = actionId.substring('inspect.audio:'.length);
+          if (tail === 'play') handleAudioAction(sel.id, 'play');
+          else if (tail === 'pause') handleAudioAction(sel.id, 'pause');
+          else if (tail === 'stop') handleAudioAction(sel.id, 'pause');
+          else if (tail === 'restart') handleAudioAction(sel.id, 'seek', 0);
+          else if (tail === 'volUp' || tail === 'volDown') {
+            const aus = assetManagerRef.current?.getAudioState(sel.id);
+            if (aus) {
+              const cur = aus.volumeMode === 'global' ? aus.globalVolume : aus.localVolume;
+              handleAudioAction(sel.id, 'volume', Math.max(0, Math.min(1, cur + (tail === 'volUp' ? 0.1 : -0.1))));
+            }
+          }
+          else if (tail === 'mute') handleAudioAction(sel.id, 'mute');
+          else if (tail === 'loop') handleAudioAction(sel.id, 'loop');
+          else if (tail === 'mode:global' || tail === 'mode:local') {
+            handleAudioAction(sel.id, 'volumeMode', tail === 'mode:global' ? 'global' : 'local');
+          }
+          else if (tail === 'speedDown' || tail === 'speedUp') {
+            const aus = assetManagerRef.current?.getAudioState(sel.id);
+            if (aus) {
+              const delta = tail === 'speedUp' ? 0.1 : -0.1;
+              handleAudioAction(sel.id, 'speed', Math.round((aus.playbackRate + delta) * 10) / 10);
+            }
+          }
+          else if (tail === 'close') handleAudioClose(sel.id);
           else return;
           dirty();
           return;

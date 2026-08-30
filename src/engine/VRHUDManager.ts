@@ -1812,6 +1812,145 @@ export class VRHUDManager {
     // yShift = 0 so the bulk of the renderer can keep using literal
     // y-coords (only the BASIC card origin branches on it).
     let yShift = 0;
+    if (sel.type === 'audio') {
+      yShift = 110;
+      const acTop = 264;
+      const acBot = 264 + yShift;
+      drawCard(acTop, acBot, 'AUDIO CONTROLS', '#a855f7');
+      const aus = (sel.object3d.userData as {
+        audioState?: {
+          playing: boolean;
+          currentTime: number;
+          duration: number;
+          globalVolume: number;
+          localVolume: number;
+          volumeMode: 'global' | 'local';
+          muted: boolean;
+          loop: boolean;
+          playbackRate: number;
+        }
+      }).audioState;
+
+      const aRowY = acTop + 28;
+      const aBtnH = 32;
+      const aBtnGap = 6;
+      const aColW = (w - 80 - aBtnGap * 5) / 6;
+      drawBtn(
+        56 + 0 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        aus?.playing ? '❚❚ PAUSE' : '▶ PLAY',
+        aus?.playing ? 'inspect.audio:pause' : 'inspect.audio:play',
+        aus?.playing ? 'rgba(245,158,11,0.20)' : 'rgba(16,185,129,0.20)',
+        aus?.playing ? '#fbbf24' : '#86efac',
+        aus?.playing ? '#f59e0b' : '#10b981'
+      );
+      drawBtn(
+        56 + 1 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        '■ STOP', 'inspect.audio:stop',
+        'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444'
+      );
+      drawBtn(
+        56 + 2 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        '↺ RESTART', 'inspect.audio:restart',
+        'rgba(30,41,59,0.7)', '#cbd5e1', '#475569'
+      );
+      drawBtn(
+        56 + 3 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        aus?.muted ? '♫ UNMUTE' : '♫ MUTE',
+        'inspect.audio:mute',
+        aus?.muted ? 'rgba(244,63,94,0.20)' : 'rgba(6,182,212,0.20)',
+        aus?.muted ? '#fda4af' : '#67e8f9',
+        aus?.muted ? '#f43f5e' : '#06b6d4'
+      );
+      drawBtn(
+        56 + 4 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        aus?.loop ? '↻ LOOP ON' : '⊘ LOOP OFF',
+        'inspect.audio:loop',
+        aus?.loop ? 'rgba(168,85,247,0.20)' : 'rgba(30,41,59,0.7)',
+        aus?.loop ? '#c084fc' : '#cbd5e1',
+        aus?.loop ? '#a855f7' : '#475569'
+      );
+      drawBtn(
+        56 + 5 * (aColW + aBtnGap), aRowY, aColW, aBtnH,
+        '✕ CLOSE', 'inspect.audio:close',
+        'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444'
+      );
+
+      // Row 2: VOL -, volume readout, VOL +
+      const aRow2Y = aRowY + aBtnH + 8;
+      drawBtn(
+        56, aRow2Y, aColW, aBtnH,
+        'VOL −', 'inspect.audio:volDown',
+        'rgba(239,68,68,0.20)', '#fca5a5', '#ef4444'
+      );
+      const aCtrX = 56 + aColW + aBtnGap;
+      const aCtrW = aColW * 2 + aBtnGap;
+      ctx.fillStyle = 'rgba(30,41,59,0.7)';
+      ctx.fillRect(aCtrX, aRow2Y, aCtrW, aBtnH);
+      ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
+      ctx.strokeRect(aCtrX, aRow2Y, aCtrW, aBtnH);
+      const aActiveVol = aus
+        ? (aus.volumeMode === 'global' ? aus.globalVolume : aus.localVolume)
+        : 0;
+      const aShownPct = Math.round((aus?.muted ? 0 : aActiveVol) * 100);
+      ctx.fillStyle = aus?.volumeMode === 'global' ? '#67e8f9' : '#f0abfc';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(
+        (aus?.volumeMode === 'global' ? 'GLOBAL' : 'LOCAL') + ' ' + aShownPct + '%',
+        aCtrX + aCtrW / 2, aRow2Y + aBtnH / 2
+      );
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      drawBtn(
+        aCtrX + aCtrW + aBtnGap, aRow2Y, aColW, aBtnH,
+        'VOL +', 'inspect.audio:volUp',
+        'rgba(16,185,129,0.20)', '#86efac', '#10b981'
+      );
+
+      // Row 3: GLOBL / LOCAL mode toggle, SPEED - / + / readout
+      const aRow3Y = aRow2Y + aBtnH + 8;
+      const aCol3W = (w - 80 - aBtnGap * 4) / 5;
+      drawBtn(
+        56 + 0 * (aCol3W + aBtnGap), aRow3Y, aCol3W, aBtnH,
+        'GLOBL ◐', 'inspect.audio:mode:global',
+        aus?.volumeMode === 'global'
+          ? 'rgba(6,182,212,0.20)' : 'rgba(30,41,59,0.7)',
+        aus?.volumeMode === 'global' ? '#67e8f9' : '#cbd5e1',
+        aus?.volumeMode === 'global' ? '#06b6d4' : '#475569'
+      );
+      drawBtn(
+        56 + 1 * (aCol3W + aBtnGap), aRow3Y, aCol3W, aBtnH,
+        'LOCAL ◑', 'inspect.audio:mode:local',
+        aus?.volumeMode === 'local'
+          ? 'rgba(244,114,182,0.20)' : 'rgba(30,41,59,0.7)',
+        aus?.volumeMode === 'local' ? '#f0abfc' : '#cbd5e1',
+        aus?.volumeMode === 'local' ? '#f472b6' : '#475569'
+      );
+      drawBtn(
+        56 + 2 * (aCol3W + aBtnGap), aRow3Y, aCol3W, aBtnH,
+        'SPEED −', 'inspect.audio:speedDown',
+        'rgba(30,41,59,0.7)', '#cbd5e1', '#475569'
+      );
+      // Speed readout
+      const aSpeedX = 56 + 3 * (aCol3W + aBtnGap);
+      const aSpeedW = aCol3W;
+      ctx.fillStyle = 'rgba(30,41,59,0.7)';
+      ctx.fillRect(aSpeedX, aRow3Y, aSpeedW, aBtnH);
+      ctx.strokeStyle = '#475569'; ctx.lineWidth = 1;
+      ctx.strokeRect(aSpeedX, aRow3Y, aSpeedW, aBtnH);
+      ctx.fillStyle = '#f0abfc';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(
+        (aus?.playbackRate ?? 1.0).toFixed(1) + 'x',
+        aSpeedX + aSpeedW / 2, aRow3Y + aBtnH / 2
+      );
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      drawBtn(
+        aSpeedX + aSpeedW + aBtnGap, aRow3Y, aCol3W, aBtnH,
+        'SPEED +', 'inspect.audio:speedUp',
+        'rgba(16,185,129,0.20)', '#86efac', '#10b981'
+      );
+    }
     if (sel.type === 'video') {
       yShift = 110;
       const vcTop = 264;

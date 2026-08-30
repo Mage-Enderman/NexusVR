@@ -167,6 +167,7 @@ export function guessAssetType(filename: string): AssetType {
   if (lower.endsWith('.glb') || lower.endsWith('.gltf') || lower.endsWith('.obj') || lower.endsWith('.fbx')) return '3d-model';
   if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp') || lower.endsWith('.gif')) return 'image';
   if (lower.endsWith('.mp4') || lower.endsWith('.webm') || lower.endsWith('.mov')) return 'video';
+  if (lower.endsWith('.mp3') || lower.endsWith('.ogg') || lower.endsWith('.wav')) return 'audio';
   return 'misc';
 }
 
@@ -307,11 +308,11 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     try {
       const asset = await assetManager.importFile(file, pos, { videoSyncMode }, placeholderId);
       if (asset) {
-        if (asset.type !== 'video') {
-          manipulationManagerRef.current?.selectAsset(asset);
-        } else {
+        if (asset.type === 'video') {
           setActiveVideoAssetId(asset.id);
           resetVideoInactivityTimer();
+        } else if (asset.type !== 'audio') {
+          manipulationManagerRef.current?.selectAsset(asset);
         }
         recordSpawnUndo(asset);
         if (asset) {
@@ -361,6 +362,29 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
               }
             }
           }
+        }
+        if (asset.type === 'audio' && net.mode !== 'offline') {
+          const audioState = (asset.object3d.userData as Record<string, unknown>)?.audioState as Record<string, unknown> | undefined;
+          net.broadcastSpawn({
+            id: asset.id,
+            name: asset.name,
+            type: asset.type as AssetSpawnData['type'],
+            position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+            rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+            scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+            url: asset.url,
+            fileData: asset.fileData,
+            fileDataOversized: isP2PTransferNeeded ? true : undefined,
+            p2pTransferHint,
+            fileSize: file.size,
+            importerPeerId: net.localPeerId,
+            isCollidable: asset.isCollidable,
+            isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
+            materialState: (asset.object3d.userData as Record<string, unknown>)?.materialState as MaterialUpdate | undefined,
+            audioLoop: audioState?.loop as boolean | undefined,
+            audioPlaybackRate: audioState?.playbackRate as number | undefined,
+            grabbable: (asset.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined
+          });
         }
         if (saveToInventory) {
           const item: InventoryItem = {
@@ -458,11 +482,11 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
       }
 
       if (asset) {
-        if (asset.type !== 'video') {
-          manipulationManagerRef.current?.selectAsset(asset);
-        } else {
+        if (asset.type === 'video') {
           setActiveVideoAssetId(asset.id);
           resetVideoInactivityTimer();
+        } else if (asset.type !== 'audio') {
+          manipulationManagerRef.current?.selectAsset(asset);
         }
         recordSpawnUndo(asset);
 
@@ -498,6 +522,8 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
               globalVolume: typeof vs.globalVolume === 'number' ? vs.globalVolume : 0.8,
               flipped: vs.flipped !== false,
             } : undefined,
+            audioLoop: config.audioLoop,
+            audioPlaybackRate: config.audioPlaybackRate,
           });
         }
 
@@ -577,11 +603,11 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
           AssetManager.applyMaterialUpdate(asset, item.materialState);
           broadcastInventoryMaterialState(asset.id, item.materialState);
         }
-        if (asset.type !== 'video') {
-          manipulationManagerRef.current?.selectAsset(asset);
-        } else {
+        if (asset.type === 'video') {
           setActiveVideoAssetId(asset.id);
           resetVideoInactivityTimer();
+        } else if (asset.type !== 'audio') {
+          manipulationManagerRef.current?.selectAsset(asset);
         }
         recordSpawnUndo(asset);
       }
@@ -597,11 +623,11 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             AssetManager.applyMaterialUpdate(asset, item.materialState);
             broadcastInventoryMaterialState(asset.id, item.materialState);
           }
-          if (asset.type !== 'video') {
-            manipulationManagerRef.current?.selectAsset(asset);
-          } else {
+          if (asset.type === 'video') {
             setActiveVideoAssetId(asset.id);
             resetVideoInactivityTimer();
+          } else if (asset.type !== 'audio') {
+            manipulationManagerRef.current?.selectAsset(asset);
           }
           recordSpawnUndo(asset);
         }

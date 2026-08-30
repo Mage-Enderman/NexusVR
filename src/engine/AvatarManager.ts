@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
 import { VRMLoaderPlugin, VRM } from '@pixiv/three-vrm';
+import { VRMAnimator, detectVRMDimensions, type LocomotionState } from './VRMAnimator.ts';
 
 export interface AvatarTransform {
   peerId: string;
@@ -15,6 +16,15 @@ export interface AvatarTransform {
   vrmUrl?: string;
   isCompanion?: boolean; // If true, do not render duplicate avatar
   controllerType?: 'quest2' | 'quest3';
+  locomotion?: {
+    moveSpeed: number;
+    moveDirection: [number, number];
+    isCrouching: boolean;
+    isGrounded: boolean;
+    verticalVelocity: number;
+    yawVelocity: number;
+    locomotionMode: 'walk' | 'flight' | 'noclip';
+  };
 }
 
 export class PeerAvatar {
@@ -35,6 +45,18 @@ export class PeerAvatar {
   public audioElement: HTMLAudioElement | null = null;
   public isSpeaking = false;
   public vrmUrl: string | null = null;
+  private animator: VRMAnimator | null = null;
+  private locomotionState: LocomotionState = {
+    moveSpeed: 0, moveDirection: [0, 0], isCrouching: false,
+    isGrounded: true, verticalVelocity: 0, yawVelocity: 0,
+    locomotionMode: "walk",
+  };
+  private _estimatedVRMHeight = 1.5;
+  public get estimatedVRMHeight(): number { return this._estimatedVRMHeight; }
+  /** Avatar natural eye height (from root to eyes, unscaled). */
+  private _vrmEyeHeight = 1.4;
+  public get vrmEyeHeight(): number { return this._vrmEyeHeight; }
+  private targetHeadEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
   private hasReceivedFirstUpdate = false;
   private targetHeadPos = new THREE.Vector3();
@@ -140,6 +162,14 @@ export class PeerAvatar {
         this.vrm = vrm;
         vrm.scene.rotation.y = Math.PI; // Face forward
         this.group.add(vrm.scene);
+
+        // Compute avatar dimensions for accurate height and eye height.
+        const dims = detectVRMDimensions(vrm);
+        this._estimatedVRMHeight = dims.height;
+        this._vrmEyeHeight = dims.eyeHeight;
+
+        // Create procedural animator for this VRM.
+        this.animator = new VRMAnimator(vrm);
       }
     } catch (err) {
       console.warn(`Failed to load VRM for peer ${this.peerId}:`, err);
@@ -155,7 +185,8 @@ export class PeerAvatar {
     }
 
     this.targetHeadPos.set(...transform.headPosition);
-    this._scratchEuler.set(...transform.headRotation);
+    this._scratchEuler.set(transform.headRotation[0], transform.headRotation[1], transform.headRotation[2], 'YXZ');
+    this.targetHeadEuler.copy(this._scratchEuler);
     this.targetHeadQuat.setFromEuler(this._scratchEuler);
 
     if (transform.leftHandPosition) {
@@ -194,6 +225,11 @@ export class PeerAvatar {
       if (ring) ring.visible = transform.controllerType !== 'quest3';
     }
 
+    // Store locomotion state for VRMAnimator.
+    if (transform.locomotion) {
+      Object.assign(this.locomotionState, transform.locomotion);
+    }
+
     // Speaking indicator halo pulse
     this.isSpeaking = !!transform.isSpeaking;
     if (this.audioSpeakerMesh && this.audioSpeakerMesh.material) {
@@ -222,8 +258,24 @@ export class PeerAvatar {
       this.rightHandMesh.quaternion.slerp(this.targetRightQuat, alpha);
     }
     if (this.vrm) {
-      this.vrm.scene.position.lerp(this.targetHeadPos, alpha);
-      this.vrm.scene.position.y = this.targetHeadPos.y - 1.5;
+      const eyeH = this._vrmEyeHeight;
+      const crouchBlend = this.animator ? this.animator.getBlendToCrouch() : (this.locomotionState.isCrouching ? 1 : 0);
+      const crouchDrop = eyeH * 0.375; // 37.5% drop during crouch
+      const currentEyeH = eyeH - crouchDrop * crouchBlend;
+
+      // Position the avatar so feet remain grounded at floor level
+      this.vrm.scene.position.x = this.targetHeadPos.x;
+      this.vrm.scene.position.y = this.targetHeadPos.y - currentEyeH;
+      this.vrm.scene.position.z = this.targetHeadPos.z;
+
+      // Reset scale to 1.0 (unscaled VRM)
+      this.vrm.scene.scale.setScalar(1.0);
+
+      // Drive procedural animation with locomotion state and target head orientation
+      if (this.animator) {
+        this.animator.update(delta, this.locomotionState, this.targetHeadEuler);
+      }
+      // Update spring bones, materials, etc.
       this.vrm.update(delta);
     }
   }
@@ -394,7 +446,7 @@ export class AvatarManager {
     obj.getWorldQuaternion(this._scratchQuat);
     this.worldRoot.getWorldQuaternion(this._scratchRootInvQuat).invert();
     this._scratchRootInvQuat.multiply(this._scratchQuat);
-    this._scratchEuler.setFromQuaternion(this._scratchRootInvQuat, obj.rotation.order || 'YXZ');
+    this._scratchEuler.setFromQuaternion(this._scratchRootInvQuat, 'YXZ');
 
     return {
       position: [this._scratchPos.x, this._scratchPos.y, this._scratchPos.z],
