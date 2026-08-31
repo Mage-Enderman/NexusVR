@@ -4598,7 +4598,10 @@ const vrHud = new VRHUDManager(
           key={`import-dialog-${uiRefreshKey}`}
           initialFile={importInitialFile}
           onImport={handleImportAssetFromConfig}
-          onClose={() => setShowImportDialog(false)}
+          onClose={() => {
+            setShowImportDialog(false);
+            sceneEngineRef.current?.renderer.domElement.focus();
+          }}
           scene={sceneEngineRef.current?.scene}
           camera={sceneEngineRef.current?.camera}
           assetManager={assetManagerRef.current || undefined}
@@ -4776,7 +4779,7 @@ const vrHud = new VRHUDManager(
       {/* Global toast notifications (import results, errors, etc.) */}
       <ToastHost />
 
-      {/* Network stats debug overlay (Ctrl+Shift+N to toggle) */}
+      {/* Network stats debug overlay (Ctrl+Shift+D to toggle) */}
       <NetworkStatsOverlay
         visible={showNetworkStats}
         onToggle={() => setShowNetworkStats(v => !v)}

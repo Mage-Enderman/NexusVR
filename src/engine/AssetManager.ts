@@ -479,7 +479,9 @@ export class AssetManager {
     // Therefore: one 50% tick after the bytes resolve, then the loader
     // resolves at 100%. The placeholder shows a smooth 0 -> 50 -> 100
     // sweep with no visible percentage jitter.
-    const arrayBuffer = (isVideoExt && !config?.importAsRawFile)
+    const isAudioExt = AUDIO_EXTENSIONS.includes(ext);
+    const isMediaExt = isVideoExt || isAudioExt;
+    const arrayBuffer = (isMediaExt && !config?.importAsRawFile)
       ? null
       : await file.arrayBuffer();
     if (onProgress) {
@@ -561,8 +563,10 @@ export class AssetManager {
       // small files) before kicking off the optimize so the loader-driven
       // 50-95% phase has room to grow.
       if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
-      const optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, file.type || `image/${ext}`);
-      const optUrl = URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' }));
+      const mimeType = file.type || `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      const optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, mimeType);
+      const isConvertedToWebP = optBuf !== arrayBuffer;
+      const optUrl = isConvertedToWebP ? URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' })) : blobUrl;
       asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
     } else if (isVideoExt) {
       // Phase 2 + tier-aware VRAM cap: blob: URL plumbing. We hand
@@ -1123,6 +1127,37 @@ export class AssetManager {
           return;
         }
 
+        if (config?.imageDisplayMode === '2d-plane') {
+          const aspect = texture.image.width / texture.image.height || 1;
+          const width = Math.min(2.5, aspect * 2);
+          const height = width / aspect;
+
+          const imgGeo = new THREE.PlaneGeometry(width, height);
+          const imgMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+          const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+          group.add(imgMesh);
+
+          if (this.camera) {
+            const camPos = this.camera.position;
+            const dx = camPos.x - pos.x;
+            const dz = camPos.z - pos.z;
+            if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+              group.rotation.y = Math.atan2(dx, dz);
+            }
+          }
+
+          resolve({
+            id,
+            name,
+            type: 'image',
+            object3d: group,
+            url,
+            fileData: buffer,
+            isCollidable: true
+          });
+          return;
+        }
+
         // Default: 3D Panel
         const aspect = texture.image.width / texture.image.height || 1;
         const width = Math.min(2.5, aspect * 2);
@@ -1617,6 +1652,9 @@ export class AssetManager {
     // ── Waveform render loop ──
     const aNode = analyserNode as AnalyserNode | null;
     const freqData = new Uint8Array(aNode ? aNode.frequencyBinCount : 128);
+    let rafHandle: number | null = null;
+    let isTicking = false;
+
     const drawFrame = () => {
       const w = canvasW, h = canvasH;
       // Background
@@ -1673,7 +1711,7 @@ export class AssetManager {
 
       // Playback head line
       if (audioState.duration > 0) {
-        const pct = audioState.currentTime / audioState.duration;
+        const pct = Math.max(0, Math.min(1, audioState.currentTime / audioState.duration));
         const headX = pct * w;
         ctx.strokeStyle = '#f0abfc';
         ctx.lineWidth = 2;
@@ -1723,32 +1761,55 @@ export class AssetManager {
       ctx.fillText(audioState.loop ? '↻' : '⊘', 30, h - 20);
 
       canvasTexture.needsUpdate = true;
-      rafHandle = requestAnimationFrame(drawFrame);
+      if (audioState.playing) {
+        rafHandle = requestAnimationFrame(drawFrame);
+        isTicking = true;
+      } else {
+        isTicking = false;
+        rafHandle = null;
+      }
     };
-    let rafHandle = requestAnimationFrame(drawFrame);
-    this.audioTickCallbacks.set(id, drawFrame);
+
+    const requestFrameUpdate = () => {
+      if (!isTicking) {
+        drawFrame();
+      }
+    };
+
+    // Initial frame draw
+    drawFrame();
+    this.audioTickCallbacks.set(id, requestFrameUpdate);
 
     // ── Audio element event listeners ──
     audio.addEventListener('loadedmetadata', () => {
       audioState.duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+      requestFrameUpdate();
     });
     audio.addEventListener('timeupdate', () => {
       audioState.currentTime = audio.currentTime;
+      requestFrameUpdate();
     });
     audio.addEventListener('play', () => {
       audioState.playing = true;
+      if (!isTicking) {
+        rafHandle = requestAnimationFrame(drawFrame);
+        isTicking = true;
+      }
       for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
     });
     audio.addEventListener('pause', () => {
       audioState.playing = false;
+      requestFrameUpdate();
       for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
     });
     audio.addEventListener('volumechange', () => {
       audioState.muted = audio.muted;
+      requestFrameUpdate();
       for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
     });
     audio.addEventListener('ended', () => {
       audioState.playing = false;
+      requestFrameUpdate();
       for (const cb of this.onAudioPlaybackChangedCallbacks) cb(id);
     });
 

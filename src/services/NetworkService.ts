@@ -1383,7 +1383,7 @@ export class NetworkService {
     if (type === 'spawn' && payload && typeof payload === 'object') {
       const pd = payload as AssetSpawnData;
       const hostedFile = this.hostedAssets.get(pd.id);
-      if (pd.type === 'video' || hostedFile !== undefined) {
+      if (pd.type === 'video' || pd.type === 'audio' || hostedFile !== undefined) {
         const size = hostedFile instanceof File || hostedFile instanceof Blob
           ? hostedFile.size
           : hostedFile instanceof ArrayBuffer
@@ -1415,8 +1415,8 @@ export class NetworkService {
       prepared = {
         ...pd,
         assets: pd.assets.map((a) => {
-          // Videos are always served via P2P chunk transfer / streaming.
-          if (a.type === 'video') {
+          // Videos and Audios are always served via P2P chunk transfer / streaming.
+          if (a.type === 'video' || a.type === 'audio') {
             const hostedFile = this.hostedAssets.get(a.id || '');
             const size = hostedFile instanceof File || hostedFile instanceof Blob
               ? hostedFile.size

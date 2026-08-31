@@ -1,6 +1,6 @@
 /**
  * NetworkStatsOverlay — visual debug panel showing network stats.
- * Toggleable with Ctrl+Shift+N hotkey.
+ * Toggleable with Ctrl+Shift+D hotkey.
  *
  * Shows:
  * - FPS
@@ -39,10 +39,10 @@ export const NetworkStatsOverlay: React.FC<Props> = ({ visible, onToggle, peerCo
     return () => clearInterval(interval);
   }, [visible]);
 
-  // Hotkey: Ctrl+Shift+N
+  // Hotkey: Ctrl+Shift+D (D for debug/stats)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && e.key === 'N') {
+      if (e.ctrlKey && e.shiftKey && e.key === 'D') {
         e.preventDefault();
         onToggle();
       }
@@ -79,7 +79,7 @@ export const NetworkStatsOverlay: React.FC<Props> = ({ visible, onToggle, peerCo
           📊 Network Stats
         </span>
         <span style={{ color: '#666', fontSize: 10 }}>
-          Ctrl+Shift+N to toggle
+          Ctrl+Shift+D to toggle
         </span>
       </div>
 

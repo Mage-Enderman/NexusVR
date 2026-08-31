@@ -327,6 +327,7 @@ export class SpatialPanelManager {
     });
 
     this.panels.delete(id);
+    this.clearLockedHover();
   }
 
   /**

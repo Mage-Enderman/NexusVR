@@ -492,3 +492,102 @@ All notable changes made during this session. Sorted by category.
 ### Audit Document
 - **`BUG_AUDIT.md`** (new) — Comprehensive audit of 14 issues found across the
   codebase with severity ratings, file locations, and suggested fixes
+
+---
+
+## 🧠 BasisVR-Inspired Architecture Enhancements
+
+Studied BasisVR's production Unity/C# networking, avatar, audio, and moderation
+systems (via GitHub source) and ported the highest-impact architectural patterns
+to NexusVR's TypeScript/WebRTC stack. Full analysis in `BasisVRFindings.md`.
+
+### Network Profiler (High)
+- **`src/services/NetworkProfiler.ts`** (new, ~130 lines) — Per-envelope-type
+  byte counters, FPS tracking, send/recv throughput stats. Profiled by BasisVR's
+  `BasisNetworkProfiler` (20+ categories, zero-GC design). NexusVR version uses
+  TypedArrays for zero-allocation counter accumulation and a 500ms tick interval.
+  Exposed via `NetworkProfiler.getStats()` for the debug overlay.
+
+### Channel-Based Message Dispatch (High)
+- **`src/services/ChannelRegistry.ts`** (new, ~180 lines) — Numeric channel IDs
+  with typed handler registration, replacing ad-hoc envelope-type switch
+  statements. Inspired by BasisVR's `BasisNetworkEvents` (30+ numeric channels,
+  plugin channel system, multiplexed events). NexusVR version supports priority
+  ordering, channel groups (core/transform/spawn/audio/moderation/extension),
+  and a plugin registration API.
+
+### Avatar Codec — Smallest-Three Quaternion Compression (High)
+- **`src/services/AvatarCodec.ts`** (new, ~320 lines) — Encodes avatar rotation
+  data using smallest-three quaternion compression (25% bandwidth savings vs.
+  naive float triples) with deadband suppression (skips sending when pose hasn't
+  changed beyond a threshold). Four quality tiers (VeryLow/Low/Medium/High)
+  driven by distance to camera — close avatars get 3 bones + 2 blendshapes,
+  distant ones get just head rotation. Inspired by BasisVR's
+  `BasisNetworkAvatarCompressor` which uses a rig-neutral "generic rotation
+  space" encoding, Burst-compiled compression, and frame-delta quantization.
+  NexusVR version uses Float32Array scratch buffers and configurable deadband
+  angles per bone.
+
+### Compression Service (Medium)
+- **`src/services/CompressionService.ts`** (new, ~120 lines) — fflate-based
+  (zlib) compression for large spawn/sync envelopes. Spawn data exceeding 1KB
+  is compressed before WebRTC send and decompressed on receive, with a 30%
+  minimum savings gate (skip if compressed is larger). Inspired by BasisVR's
+  LZ4/Deflate compression across data channels. NexusVR version provides
+  `compress()`/`decompress()` + `compressEnvelope()`/`decompressEnvelope()`
+  helpers with per-type byte counters for the debug overlay.
+
+### Identity Service — UUID Player Identity & Permissions (Medium)
+- **`src/services/IdentityService.ts`** (new, ~220 lines) — UUID-based player
+  identity persisted in localStorage across sessions, with hierarchical
+  permission groups (admin > builder > guest > muted) supporting parent
+  inheritance. 12+ global lock flags (avatar, prop, chat, voice, etc.) pushed
+  by the host. Inspired by BasisVR's `BasisDID` (Decentralized Identifier),
+  `BasisPermissions` (hierarchical groups with inheritance), and
+  `BasisGlobalLockFlags` (server-pushed locks). NexusVR version adds
+  `canPerform()` permission checks and lock-aware gating.
+
+### Ownership Service (Medium)
+- **`src/services/OwnershipService.ts`** (new, ~180 lines) — Object ownership
+  with async request/response and local validation. Supports take, release,
+  request, grant, and revoke operations with a 10s timeout on unacknowledged
+  requests. Inspired by BasisVR's `BasisNetworkOwnership` (async
+  Take/Remove/Request with ownership transfer between clients) and its Burst-
+  compiled interpolation for ownership-bound object physics.
+
+### Audio Profile Service (Medium)
+- **`src/services/AudioProfileService.ts`** (new, ~160 lines) — Per-peer volume
+  control, mute/block lists, and talk modes (normal, proximity, whisper, shout).
+  Distance-based volume attenuation with configurable falloff. Inspired by
+  BasisVR's `BasisTalkModeManager` (proximity/private group/P2P direct/admin
+  shout modes), `BasisPlayerAudioVolume` (per-player volume), and their
+  complete audio pipeline (Opus + RNNoise + Steam Audio spatialization).
+  NexusVR version uses Web Audio API GainNode for volume attenuation.
+
+### VRM Content Validator (Medium)
+- **`src/services/VRMValidator.ts`** (new, ~230 lines) — Pre-load validation of
+  VRM avatar files checking poly count, bone count, texture resolution, file
+  size, and VRM version compatibility. Returns severity-rated warnings/errors
+  with suggested limits. Inspired by BasisVR's `BasisAvatarPerformanceLimits`
+  (pre-load hard blocks + post-load soft trims on poly/bone/material counts).
+  NexusVR version integrates into `AvatarManager.loadVRM()` — warns on import
+  but doesn't block.
+
+### Integration Into Existing Codebase (High)
+- **`src/services/NetworkService.ts`** — Added imports and wiring for all new
+  modules: compression on spawn/sync sends exceeding 1KB, decompression on
+  receive, profiling counters on every envelope, ChannelRegistry dispatch for
+  future extensible message routing, IdentityService/OwnershipService/
+  AudioProfileService initialization on connect, and cleanup on disconnect.
+- **`src/engine/AvatarManager.ts`** — Added VRMValidator import; VRM files
+  are now validated before loading with poly/bone/texture warnings logged.
+
+### Network Stats Debug Overlay (Medium)
+- **`src/components/NetworkStatsOverlay.tsx`** (new, ~130 lines) — Visual debug
+  panel toggled with Ctrl+Shift+D showing FPS, bytes/sec send/recv, avatar
+  codec encode/suppress stats and rate, compression ratio, top 5 channels by
+  traffic volume, and host/guest status. Semi-transparent dark panel in the
+  top-right corner with green monospace text. Polls stats every 500ms while
+  visible.
+- **`src/App.tsx`** — Added import, `showNetworkStats` state, keyboard handler
+  binding, and `<NetworkStatsOverlay>` in the render tree.

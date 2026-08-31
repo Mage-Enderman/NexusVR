@@ -471,7 +471,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
     let asset: LoadedAsset | null = null;
     streamingSuppressedAssetIdsRef.current.add(placeholderId);
-    if (config.file && assetType === 'video') {
+    if (config.file && (assetType === 'video' || assetType === 'audio')) {
       net.registerHostedFile(placeholderId, config.file);
       const vss = videoStreamingServiceRef.current;
       if (vss) {
@@ -496,6 +496,12 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
         if (config.file) {
           net.registerHostedFile(asset.id, config.file);
+          if (asset.type === 'video' || asset.type === 'audio') {
+            const vss = videoStreamingServiceRef.current;
+            if (vss) {
+              vss.registerHostFile(config.file, asset.id, config.file.type);
+            }
+          }
         }
 
         if (net.mode !== 'offline') {

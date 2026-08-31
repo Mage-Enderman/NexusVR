@@ -400,21 +400,10 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       splatEnableLod,
     };
 
-    // Keep the dialog open (spinner visible) until the import promise
-    // settles. Previously we closed immediately, so the "Running Import..."
-    // state was never visible and failures were completely silent.
-    try {
-      await onImport(config);
-      onClose();
-    } catch (err) {
+    onClose();
+    onImport(config).catch((err) => {
       console.warn('[Import] Failed:', err);
-      const label = selectedFile ? ` for "${selectedFile.name}"` : '';
-      toast.error(`Import failed${label}: ${err instanceof Error ? err.message : String(err)}`);
-      // Stay open and re-arm the submit button so the user can adjust
-      // settings (e.g. different scale mode) and retry.
-      setIsSubmitting(false);
-      submittingRef.current = false;
-    }
+    });
   };
 
   const category = getFileCategory();
