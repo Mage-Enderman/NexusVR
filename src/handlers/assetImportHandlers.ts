@@ -428,7 +428,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     const assetManager = assetManagerRef.current;
     if (!assetManager) return;
 
-    if (config.file && config.file.name.toLowerCase().endsWith('.vrm') && config.vrmAction === 'equip-avatar') {
+    if (config.file && config.file.name.toLowerCase().endsWith('.vrm') && config.vrmAction === 'equip-avatar' && !config.importAsRawFile) {
       await avatarManagerRef.current?.loadLocalVRM(config.file);
       toast.success(`Avatar "${config.file.name}" equipped`);
       if (config.saveToInventory && inventoryServiceRef.current) {
@@ -528,6 +528,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             } : undefined,
             audioLoop: config.audioLoop,
             audioPlaybackRate: config.audioPlaybackRate,
+            importAsRawFile: Boolean(config.importAsRawFile || asset.object3d.userData?.isRaw || asset.type === 'misc'),
           });
         }
 

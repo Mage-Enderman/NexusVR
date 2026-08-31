@@ -281,12 +281,12 @@ export class PeerAvatar {
 
       // Detect physical VR squatting if head is below standing eye height
       const squatOffset = Math.max(0, eyeH - this.targetHeadPos.y);
-      const physicalSquatBlend = Math.min(1.0, squatOffset / (eyeH * 0.375));
+      const physicalSquatBlend = Math.min(1.0, squatOffset / (eyeH * 0.24));
 
       const crouchBlend = this.animator
         ? Math.max(this.animator.getBlendToCrouch(), physicalSquatBlend)
         : (this.locomotionState.isCrouching ? 1 : physicalSquatBlend);
-      const crouchDrop = eyeH * 0.375;
+      const crouchDrop = eyeH * 0.24;
       const currentEyeH = eyeH - crouchDrop * crouchBlend;
 
       // Check if VR controllers are tracked for hand IK

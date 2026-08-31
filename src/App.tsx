@@ -1571,7 +1571,8 @@ const vrHud = new VRHUDManager(
             } : undefined;
           })() : undefined,
           grabbable: (asset.object3d.userData as Record<string, unknown>)?.grabbable as Record<string, unknown> | undefined,
-          collider: (asset.object3d.userData as Record<string, unknown>)?.collider as Record<string, unknown> | undefined
+          collider: (asset.object3d.userData as Record<string, unknown>)?.collider as Record<string, unknown> | undefined,
+          importAsRawFile: Boolean(asset.object3d.userData?.isRaw || asset.type === 'misc'),
         };
         net.broadcastSpawn(spawnData);
       }
@@ -1830,7 +1831,11 @@ const vrHud = new VRHUDManager(
         // how the original importing client rendered it. Previously the
         // P2P re-import dropped subtitle data entirely, so late joiners
         // never saw captions on videos imported with them.
-        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto', subtitleText: data.subtitlesData }, data.id).then((asset) => {
+        assetManager.importFile(file, pos, {
+          videoAspectRatio: data.videoAspectRatio || 'auto',
+          subtitleText: data.subtitlesData,
+          importAsRawFile: Boolean(data.importAsRawFile || data.type === 'misc')
+        }, data.id).then((asset) => {
           if (asset) {
             asset.object3d.rotation.set(...data.rotation);
             asset.object3d.scale.set(...data.scale);
@@ -2003,7 +2008,10 @@ const vrHud = new VRHUDManager(
         // placeholder the moment this asset resolves - clean
         // handoff, no separate tempId → assetId mapping required.
         const file = new File([blob], data.name);
-        assetManager.importFile(file, pos, { videoAspectRatio: data.videoAspectRatio || 'auto' }, data.id).then((asset) => {
+        assetManager.importFile(file, pos, {
+          videoAspectRatio: data.videoAspectRatio || 'auto',
+          importAsRawFile: Boolean(data.importAsRawFile || data.type === 'misc')
+        }, data.id).then((asset) => {
           if (asset) {
             asset.object3d.rotation.set(...data.rotation);
             asset.object3d.scale.set(...data.scale);

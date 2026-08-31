@@ -84,6 +84,7 @@ export interface AssetSpawnData {
   // Audio-specific
   audioLoop?: boolean;
   audioPlaybackRate?: number;
+  importAsRawFile?: boolean;
 }
 
 export interface MaterialUpdate {

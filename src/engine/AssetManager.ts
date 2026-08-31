@@ -1521,6 +1521,11 @@ export class AssetManager {
     const ctx = canvasEl.getContext('2d')!;
     const canvasTexture = new THREE.CanvasTexture(canvasEl);
     canvasTexture.colorSpace = THREE.SRGBColorSpace;
+    canvasTexture.minFilter = THREE.LinearFilter;
+    canvasTexture.magFilter = THREE.LinearFilter;
+    canvasTexture.generateMipmaps = false;
+    canvasTexture.repeat.set(1, -1);
+    canvasTexture.offset.set(0, 1);
 
     // Pre-computed static waveform from decoded audio buffer
     let staticWaveform: number[] | null = null;
@@ -1585,6 +1590,15 @@ export class AssetManager {
     const screenMesh = new THREE.Mesh(screenGeo, screenMat);
     screenMesh.position.z = 0.032;
     group.add(screenMesh);
+
+    if (this.camera) {
+      const camPos = this.camera.position;
+      const dx = camPos.x - pos.x;
+      const dz = camPos.z - pos.z;
+      if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+        group.rotation.y = Math.atan2(dx, dz);
+      }
+    }
 
     // ── Audio playback state ──
     const audioState: AudioPlaybackState = {

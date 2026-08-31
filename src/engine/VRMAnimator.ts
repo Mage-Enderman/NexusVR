@@ -373,9 +373,10 @@ export class VRMAnimator {
     const spine = this.bone("spine");
     const chest = this.bone("chest");
 
-    if (hip) hip.position.y = this.restHipsPosition.y - this.estimatedHeight * 0.16 * c;
-    if (spine) spine.rotation.x += 0.32 * c;
-    if (chest) chest.rotation.x += 0.15 * c;
+    // Lower hips precisely to match leg kinematics so feet remain firmly on the floor surface with zero floating
+    if (hip) hip.position.y = this.restHipsPosition.y - this.estimatedHeight * 0.24 * c;
+    if (spine) spine.rotation.x += 0.25 * c;
+    if (chest) chest.rotation.x += 0.10 * c;
 
     const lul = this.bone("leftUpperLeg");
     const lll = this.bone("leftLowerLeg");
@@ -384,13 +385,14 @@ export class VRMAnimator {
     const lf = this.bone("leftFoot");
     const rf = this.bone("rightFoot");
 
-    if (lul) lul.rotation.x += 1.15 * c;
-    if (lll) lll.rotation.x -= 2.10 * c;
-    if (lf) lf.rotation.x += 0.95 * c;
+    // Deep knee bend with matching ankle dorsiflexion keeping feet flat on the floor at Y=0
+    if (lul) lul.rotation.x += 1.05 * c;
+    if (lll) lll.rotation.x -= 2.05 * c;
+    if (lf) lf.rotation.x += 1.00 * c;
 
-    if (rul) rul.rotation.x += 1.15 * c;
-    if (rll) rll.rotation.x -= 2.10 * c;
-    if (rf) rf.rotation.x += 0.95 * c;
+    if (rul) rul.rotation.x += 1.05 * c;
+    if (rll) rll.rotation.x -= 2.05 * c;
+    if (rf) rf.rotation.x += 1.00 * c;
 
     if (!hasVRArms) {
       const lua = this.bone("leftUpperArm");
