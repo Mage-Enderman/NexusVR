@@ -557,13 +557,13 @@ export class AssetManager {
       asset = await this.loadOBJ(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
     } else if (['fbx'].includes(ext)) {
       asset = await this.loadFBX(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
-    } else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+    } else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'jfif'].includes(ext) || file.type.startsWith('image/')) {
       // Optimization phase (canvas resample) gives no progress granularity.
       // Mark the bytes phase done (50% — we already pushed it above for
       // small files) before kicking off the optimize so the loader-driven
       // 50-95% phase has room to grow.
       if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
-      const mimeType = file.type || `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+      const mimeType = file.type || `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}`;
       const optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, mimeType);
       const isConvertedToWebP = optBuf !== arrayBuffer;
       const optUrl = isConvertedToWebP ? URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' })) : blobUrl;

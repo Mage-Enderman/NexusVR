@@ -265,12 +265,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
 
   const getFileCategory = (): 'model' | 'splat' | 'image' | 'video' | 'audio' | 'vrm' | 'misc' => {
     const name = selectedFile ? selectedFile.name.toLowerCase() : urlInput.toLowerCase();
+    const type = selectedFile?.type?.toLowerCase() || '';
     if (name.endsWith('.vrm')) return 'vrm';
     if (isSplatFilename(name)) return 'splat';
     if (name.endsWith('.glb') || name.endsWith('.gltf') || name.endsWith('.obj') || name.endsWith('.fbx')) return 'model';
-    if (name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png') || name.endsWith('.webp') || name.endsWith('.gif')) return 'image';
-    if (name.endsWith('.mp4') || name.endsWith('.webm') || name.endsWith('.mov')) return 'video';
-    if (name.endsWith('.mp3') || name.endsWith('.ogg') || name.endsWith('.wav')) return 'audio';
+    if (type.startsWith('image/') || name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png') || name.endsWith('.webp') || name.endsWith('.gif')) return 'image';
+    if (type.startsWith('video/') || name.endsWith('.mp4') || name.endsWith('.webm') || name.endsWith('.mov')) return 'video';
+    if (type.startsWith('audio/') || name.endsWith('.mp3') || name.endsWith('.ogg') || name.endsWith('.wav')) return 'audio';
     return 'misc';
   };
 

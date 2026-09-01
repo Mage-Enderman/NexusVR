@@ -20,6 +20,7 @@ import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { UserRole } from '../types/permissions.ts';
 import type { ToolType } from '../components/WorldToolsPanel.tsx';
 import type { ImportConfig } from '../components/AssetImportDialog.tsx';
+import { DEFAULT_LIGHT_CONFIG } from '../engine/ResoniteLightSync.ts';
 import { toast } from '../services/ToastService.ts';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -198,6 +199,7 @@ export interface AssetImportHandlerDeps {
   resetVideoInactivityTimer: () => void;
   recordSpawnUndo: (asset: LoadedAsset) => void;
   localRole: UserRole;
+  lightNoShadowsRef?: React.MutableRefObject<boolean>;
 }
 
 // ─── Handler factory ────────────────────────────────────────────────────────
@@ -221,6 +223,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     resetVideoInactivityTimer,
     recordSpawnUndo,
     localRole,
+    lightNoShadowsRef,
   } = deps;
 
   // ─── Helpers ────────────────────────────────────────────────────────────
@@ -660,11 +663,80 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     setShowInventoryModal(false);
   };
 
+  // ─── spawnLightGizmo ──────────────────────────────────────────────────
+
+  const spawnLightGizmo = (type: 'point' | 'spot' | 'sun', color = '#f59e0b', intensity = 2, distance = 25) => {
+    const pos = new THREE.Vector3(0, 2.3, -1.8);
+    const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
+    if (!lightAsset) return;
+
+    lightAsset.name = `${type.toUpperCase()} Light`;
+    lightAsset.object3d.scale.set(0.25, 0.25, 0.25);
+    const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
+    if (mesh && mesh.material) {
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      mat.color.set('#1a1a1a');
+      mat.emissive.set(color);
+      mat.emissiveIntensity = 3.5;
+      mat.roughness = 0.1;
+    }
+    const ringGeo = new THREE.RingGeometry(0.7, 0.78, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color,
+      side: THREE.DoubleSide,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.8,
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    lightAsset.object3d.add(ringMesh);
+
+    const noShadows = lightNoShadowsRef?.current ?? false;
+    const effectiveIntensity = intensity * 35;
+    let light: THREE.Light;
+    if (type === 'point') {
+      const pLight = new THREE.PointLight(color, effectiveIntensity, distance, 1.5);
+      pLight.castShadow = !noShadows;
+      if (!noShadows) {
+        pLight.shadow.bias = -0.001;
+        pLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = pLight;
+    } else if (type === 'spot') {
+      const sLight = new THREE.SpotLight(color, effectiveIntensity, distance, Math.PI / 3, 0.4, 1.5);
+      sLight.castShadow = !noShadows;
+      if (!noShadows) {
+        sLight.shadow.bias = -0.001;
+        sLight.shadow.mapSize.set(1024, 1024);
+      }
+      light = sLight;
+    } else {
+      const dLight = new THREE.DirectionalLight(color, intensity * 2.0);
+      dLight.castShadow = !noShadows;
+      if (!noShadows) {
+        dLight.shadow.bias = -0.0005;
+        dLight.shadow.mapSize.set(2048, 2048);
+      }
+      light = dLight;
+    }
+    light.position.set(0, 0, 0);
+    lightAsset.object3d.add(light);
+    lightAsset.object3d.userData.resoniteLight = {
+      ...DEFAULT_LIGHT_CONFIG,
+      LightType: type === 'point' ? 'Point' : type === 'spot' ? 'Spot' : 'Directional',
+      Intensity: intensity,
+      Color: color,
+      Range: distance,
+    };
+    manipulationManagerRef.current?.selectAsset(lightAsset);
+  };
+
   return {
     handleSpawnPrimitive,
     handleImportFile,
     handleImportAssetFromConfig,
     handleSpawnFromInventory,
     handleEquipVrmFromInventory,
+    spawnLightGizmo,
   };
 }

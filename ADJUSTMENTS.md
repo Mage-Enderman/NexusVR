@@ -18,7 +18,25 @@
 
 ## Latest entries
 
-<!-- Copy the next block into here, then update -->
+### 2026-08-31 — Clipboard/Drag-and-Drop Image Import & Pointer Lock Freeze Fix
+
+- **Asked by:** user ("Drag and drop photo importing works but not copypaste image importing" and "Now both freeze the user trying to import an image")
+- **What I tried to do:**
+  1. Enable clipboard copy-paste image importing (support bitmap image copy, screenshot tools, web copy-image, base64 data URIs).
+  2. Prevent modal/dialog pointer-lock trapping (the "user freeze" bug).
+- **Root causes & fixes applied:**
+  1. **Pointer-Lock Trapping ("Freezing" bug):**
+     - When in first-person mode, the mouse is locked via Pointer Lock (`document.pointerLockElement`). Opening a modal (such as `AssetImportDialog`) did not call `document.exitPointerLock()`.
+     - `SceneEngine.onCanvasClickForLock` had a `canAcquirePointerLock?: () => boolean` hook that was never assigned in `App.tsx`, causing any canvas click to immediately re-request pointer lock and trap the cursor again.
+     - **Fix:** In `src/App.tsx`, wired `sceneEngine.canAcquirePointerLock = () => !isAnyModalOpen` and added an effect calling `document.exitPointerLock()` on modal open. In `src/hooks/useFileDropPaste.ts`, explicitly called `document.exitPointerLock()` on `drop` and `paste`.
+  2. **Clipboard Bitmap Data Structure (`DataTransferItemList`):**
+     - Bitmap images (Snipping Tool, `Win+Shift+S`, web copy) populate `e.clipboardData.items` (`DataTransferItem`), while `e.clipboardData.files` is often empty until `item.getAsFile()` is invoked.
+     - Extracted image files often lack extensions or are named `"blob"`. Filename-only suffix checks (`.png`/`.jpg`) in `AssetImportDialog.tsx` and `AssetManager.ts` failed and fell back to raw misc binary files.
+     - **Fix:** `src/hooks/useFileDropPaste.ts` now iterates `e.clipboardData.items`, extracts image files, synthesizes valid names (`pasted_image_<timestamp>.<ext>`), and handles base64 data URIs. `src/components/AssetImportDialog.tsx` and `src/engine/AssetManager.ts` now inspect `file.type.startsWith('image/')` and extended image extensions (`bmp`, `svg`, `jfif`).
+  3. **Stale Dialog File State:**
+     - `setImportInitialFile(null)` was not called when dismissing `AssetImportDialog`, and the dialog key was static (`uiRefreshKey`).
+     - **Fix:** `App.tsx` now clears `importInitialFile` on dialog close and keys the dialog with the file name/timestamp.
+- **Outcome:** succeeded. Verified with `npm.cmd run build`. Drag-and-drop and copy-paste image imports work seamlessly and free the cursor properly without freezing.
 
 ### 2026-08-26 — P2P recovery during PeerJS broker outage
 

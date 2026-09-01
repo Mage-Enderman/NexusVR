@@ -50,7 +50,9 @@ import type { ContextMenuItemDef } from './engine/ContextMenuManager.ts';
 import { DEFAULT_LIGHT_CONFIG, removeLightComponent, syncThreeLightFromConfig } from './engine/ResoniteLightSync.ts';
 import { createPanelActionHandler } from './handlers/createPanelActionHandler.ts';
 import { createAssetImportHandlers, createLoadingPlaceholder } from './handlers/assetImportHandlers.ts';
+import { createUndoRedoHandlers } from './handlers/undoRedoHandlers.ts';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.ts';
+import { useFileDropPaste } from './hooks/useFileDropPaste.ts';
 import { isGrabbable, isScalable } from './components/grabbable/GrabbableComponent.ts';
 import { X } from 'lucide-react';
 
@@ -428,6 +430,27 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [showShareModal, showSettingsModal, showWorldEnvModal, showImportDialog, showImportModal, showInventoryModal, showDashMenu, showRadialMenu, showToolsPanel]);
+
+  const isAnyModalOpen = Boolean(
+    showShareModal ||
+    showSettingsModal ||
+    showWorldEnvModal ||
+    showImportDialog ||
+    showImportModal ||
+    showInventoryModal ||
+    showDashMenu ||
+    showRadialMenu ||
+    showToolsPanel
+  );
+
+  useEffect(() => {
+    if (sceneEngineRef.current) {
+      sceneEngineRef.current.canAcquirePointerLock = () => !isAnyModalOpen;
+    }
+    if (isAnyModalOpen && document.pointerLockElement) {
+      document.exitPointerLock?.();
+    }
+  }, [isAnyModalOpen]);
 
   const handleToggleMute = useCallback(async () => {
     await networkServiceRef.current.toggleMute();
@@ -1442,28 +1465,13 @@ const vrHud = new VRHUDManager(
     // --- Undo/Redo: capture transform snapshots around gizmo drags ---
     let preDragSnapshot: TransformSnapshot | null = null;
     let preDragAssetId: string | null = null;
-
-    const captureSnapshot = (asset: LoadedAsset): TransformSnapshot => {
-      const obj = asset.object3d;
-      return {
-        position: [obj.position.x, obj.position.y, obj.position.z],
-        rotation: [obj.rotation.x, obj.rotation.y, obj.rotation.z],
-        scale: [obj.scale.x, obj.scale.y, obj.scale.z],
-      };
-    };
-
-    const applyTransformSnapshot = (assetId: string, snap: TransformSnapshot) => {
-      const asset = assetManager.assets.get(assetId);
-      if (!asset) return;
-      asset.object3d.position.set(...snap.position);
-      asset.object3d.rotation.set(...snap.rotation);
-      asset.object3d.scale.set(...snap.scale);
-      net.broadcastAssetUpdate(asset);
-      // If this asset is currently selected, force React re-render
-      if (manipulationManager.selectedAsset?.id === assetId) {
-        setSelectedAsset({ ...asset });
-      }
-    };
+    const { captureSnapshot, applyTransformSnapshot } = createUndoRedoHandlers({
+      undoRedoManagerRef,
+      assetManagerRef,
+      networkServiceRef,
+      manipulationManagerRef,
+      setSelectedAsset,
+    });
 
     disposers.push(manipulationManager.registerOnDragChange((dragging) => {
       // Capture the asset that's actually moving. For TC gizmo drags it
@@ -2877,57 +2885,12 @@ const vrHud = new VRHUDManager(
     }
   }, []);
 
-  // Global Drag-and-Drop and Paste (Ctrl+V) Listeners
-  useEffect(() => {
-    const handleDragOver = (e: DragEvent) => {
-      e.preventDefault();
-    };
-    const handleDrop = (e: DragEvent) => {
-      e.preventDefault();
-      if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
-        setImportInitialFile(e.dataTransfer.files[0]);
-        setShowImportDialog(true);
-      }
-    };
-    const handlePaste = (e: ClipboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      // Inputs always hand off to the browser's default paste behavior.
-      if (['INPUT', 'TEXTAREA'].includes(tag)) {
-        if (plainPasteModeRef.current) plainPasteModeRef.current = false;
-        return;
-      }
-
-      // Ctrl+Shift+V (no input focus): user explicitly wants plain text -
-      // suppress the asset-import path. Browser default paste into <body>
-      // is effectively a no-op anyway, so this is "do nothing unsafe with
-      // the clipboard contents" - exactly the spec intent.
-      if (plainPasteModeRef.current) {
-        plainPasteModeRef.current = false;
-        e.preventDefault();
-        return;
-      }
-
-      if (e.clipboardData?.files && e.clipboardData.files[0]) {
-        setImportInitialFile(e.clipboardData.files[0]);
-        setShowImportDialog(true);
-      } else if (e.clipboardData) {
-        const text = e.clipboardData.getData('text');
-        if (text && (text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:'))) {
-          setImportInitialFile(null);
-          setShowImportDialog(true);
-        }
-      }
-    };
-
-    window.addEventListener('dragover', handleDragOver);
-    window.addEventListener('drop', handleDrop);
-    window.addEventListener('paste', handlePaste);
-    return () => {
-      window.removeEventListener('dragover', handleDragOver);
-      window.removeEventListener('drop', handleDrop);
-      window.removeEventListener('paste', handlePaste);
-    };
-  }, []);
+  // Global Drag-and-Drop and Paste (Ctrl+V) Listeners (extracted to useFileDropPaste hook)
+  useFileDropPaste({
+    plainPasteModeRef,
+    setImportInitialFile,
+    setShowImportDialog,
+  });
 
   const handleJoinRoom = useCallback(async (targetRoomId: string, targetMode: ConnectionMode, isCompanion = false) => {
     const net = networkServiceRef.current;
@@ -3031,6 +2994,18 @@ const vrHud = new VRHUDManager(
     if (!held) return;
     am.downloadAsset(held);
   }, [getHeldAssetForSide]);
+
+  // ─── Undo / Redo & Snapshot Handlers (extracted to undoRedoHandlers) ───
+  const {
+    recordSpawnUndo,
+    respawnFromSnapshot,
+  } = createUndoRedoHandlers({
+    undoRedoManagerRef,
+    assetManagerRef,
+    networkServiceRef,
+    manipulationManagerRef,
+    setSelectedAsset,
+  });
 
   const handleDuplicateHeld = useCallback(async (side?: 'left' | 'right') => {
     const held = getHeldAssetForSide(side);
@@ -3608,71 +3583,35 @@ const vrHud = new VRHUDManager(
 
   const handleSpawnPrimitiveRef = useRef<((type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void) | null>(null);
 
-  const spawnLightGizmo = useCallback((type: 'point' | 'spot' | 'sun', color = '#f59e0b', intensity = 2, distance = 25) => {
-    const pos = new THREE.Vector3(0, 2.3, -1.8);
-    const lightAsset = assetManagerRef.current?.spawnPrimitive('sphere', pos);
-    if (!lightAsset) return;
-
-    lightAsset.name = `${type.toUpperCase()} Light`;
-    lightAsset.object3d.scale.set(0.25, 0.25, 0.25);
-    const mesh = lightAsset.object3d.children[0] as THREE.Mesh;
-    if (mesh && mesh.material) {
-      const mat = mesh.material as THREE.MeshStandardMaterial;
-      mat.color.set('#1a1a1a');
-      mat.emissive.set(color);
-      mat.emissiveIntensity = 3.5;
-      mat.roughness = 0.1;
-    }
-    const ringGeo = new THREE.RingGeometry(0.7, 0.78, 32);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color,
-      side: THREE.DoubleSide,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.8,
-    });
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    lightAsset.object3d.add(ringMesh);
-
-    const noShadows = lightNoShadowsRef.current;
-    const effectiveIntensity = intensity * 35;
-    let light: THREE.Light;
-    if (type === 'point') {
-      const pLight = new THREE.PointLight(color, effectiveIntensity, distance, 1.5);
-      pLight.castShadow = !noShadows;
-      if (!noShadows) {
-        pLight.shadow.bias = -0.001;
-        pLight.shadow.mapSize.set(1024, 1024);
-      }
-      light = pLight;
-    } else if (type === 'spot') {
-      const sLight = new THREE.SpotLight(color, effectiveIntensity, distance, Math.PI / 3, 0.4, 1.5);
-      sLight.castShadow = !noShadows;
-      if (!noShadows) {
-        sLight.shadow.bias = -0.001;
-        sLight.shadow.mapSize.set(1024, 1024);
-      }
-      light = sLight;
-    } else {
-      const dLight = new THREE.DirectionalLight(color, intensity * 2.0);
-      dLight.castShadow = !noShadows;
-      if (!noShadows) {
-        dLight.shadow.bias = -0.0005;
-        dLight.shadow.mapSize.set(2048, 2048);
-      }
-      light = dLight;
-    }
-    light.position.set(0, 0, 0);
-    lightAsset.object3d.add(light);
-    lightAsset.object3d.userData.resoniteLight = {
-      ...DEFAULT_LIGHT_CONFIG,
-      LightType: type === 'point' ? 'Point' : type === 'spot' ? 'Spot' : 'Directional',
-      Intensity: intensity,
-      Color: color,
-      Range: distance,
-    };
-    manipulationManagerRef.current?.selectAsset(lightAsset);
-  }, []);
+  // ─── Asset import / spawn handlers (extracted to assetImportHandlers) ───
+  const {
+    handleSpawnPrimitive,
+    handleImportFile,
+    handleImportAssetFromConfig,
+    handleSpawnFromInventory,
+    handleEquipVrmFromInventory,
+    spawnLightGizmo,
+  } = createAssetImportHandlers({
+    sceneEngineRef,
+    assetManagerRef,
+    manipulationManagerRef,
+    avatarManagerRef,
+    networkServiceRef,
+    videoStreamingServiceRef,
+    inventoryServiceRef,
+    pendingAssetsRef,
+    streamingSuppressedAssetIdsRef,
+    setActiveVideoAssetId,
+    setActiveTool,
+    setShowToolsPanel,
+    setShowInventoryModal,
+    setShowDashMenu,
+    resetVideoInactivityTimer,
+    recordSpawnUndo,
+    localRole,
+    lightNoShadowsRef,
+  });
+  useEffect(() => { handleSpawnPrimitiveRef.current = handleSpawnPrimitive; });
 
   const closeVrRadial = useCallback((menuSide?: 'left' | 'right') => {
     if (!menuSide || menuSide === 'left') {
@@ -3803,106 +3742,6 @@ const vrHud = new VRHUDManager(
     sceneEngineRef.current?.respawn();
   }, []);
 
-  // Helper: record an undo action for a newly spawned/imported asset
-  const recordSpawnUndo = (asset: LoadedAsset) => {
-    const obj = asset.object3d;
-    const snapshot: AssetSnapshot = {
-      id: asset.id,
-      name: asset.name,
-      type: asset.type,
-      position: [obj.position.x, obj.position.y, obj.position.z],
-      rotation: [obj.rotation.x, obj.rotation.y, obj.rotation.z],
-      scale: [obj.scale.x, obj.scale.y, obj.scale.z],
-      url: asset.url,
-      fileData: asset.fileData,
-      primitiveType: (obj.userData as Record<string, unknown>)?.primitiveType as string | undefined,
-      isCollidable: asset.isCollidable,
-      // Same write as `handleDeleteSelected` above so an undo's
-      // respawn re-broadcasts the asset with the same persisting state
-      // the user originally configured it with.
-      isPersistent: (obj.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
-    };
-    const latestId = { value: asset.id };
-    undoRedoManagerRef.current.push({
-      label: `Spawn ${asset.name}`,
-      undo: () => {
-        const am = assetManagerRef.current;
-        if (!am) return;
-        am.removeAsset(latestId.value);
-        networkServiceRef.current.broadcastRemove(latestId.value);
-        if (manipulationManagerRef.current?.selectedAsset?.id === latestId.value) {
-          manipulationManagerRef.current.selectAsset(null);
-          setSelectedAsset(null);
-        }
-      },
-      redo: () => {
-        respawnFromSnapshot(snapshot, latestId);
-      },
-    });
-  };
-
-  // Helper: respawn an asset from an undo snapshot.
-  // `latestId` is a mutable holder so that if the respawn creates a new
-  // asset with a different ID (file-based imports), the redo closure
-  // picks up the correct ID.
-  const respawnFromSnapshot = (snap: AssetSnapshot, latestId?: { value: string }) => {
-    const am = assetManagerRef.current;
-    if (!am) return;
-    const pos = new THREE.Vector3(...snap.position);
-    let asset: LoadedAsset | null = null;
-    if (snap.type === 'primitive' && snap.primitiveType) {
-      asset = am.spawnPrimitive(snap.primitiveType as 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane', pos);
-    } else if (snap.fileData && snap.name) {
-      const blob = new Blob([snap.fileData]);
-      const file = new File([blob], snap.name);
-      am.importFile(file, pos).then((a) => {
-        if (a) {
-          a.object3d.rotation.set(...snap.rotation);
-          a.object3d.scale.set(...snap.scale);
-          // File/url respawn parity with the primitive respawn
-          // branch above: restore the persistent flag from the undo
-          // snapshot onto the re-imported mesh's userData and include
-          // the bit in the re-broadcast envelope so peers re-receiving
-          // the respawned asset see the same flag.
-          if (snap.isPersistent !== undefined) {
-            a.object3d.userData.isPersistent = snap.isPersistent;
-          }
-          // Update the mutable ID holder so redo uses the new ID
-          if (latestId) latestId.value = a.id;
-          networkServiceRef.current.broadcastSpawn({
-            id: a.id, name: a.name, type: a.type as AssetSpawnData['type'],
-            position: snap.position, rotation: snap.rotation, scale: snap.scale,
-            url: a.url, fileData: a.fileData, isCollidable: a.isCollidable,
-            isPersistent: snap.isPersistent,
-          });
-        }
-      });
-      return;
-    }
-    if (asset) {
-      asset.object3d.rotation.set(...snap.rotation);
-      asset.object3d.scale.set(...snap.scale);
-      // Restore the persistent flag from the undo snapshot onto the
-      // freshly-spawned primitive's userData so the inspector / tree
-      // indicator reflect the original user-configured state. Old
-      // snapshots without the bit fall back to the spawn default
-      // (AssetManager sets userData.isPersistent = true).
-      if (snap.isPersistent !== undefined) {
-        asset.object3d.userData.isPersistent = snap.isPersistent;
-      }
-      // Update the mutable ID holder if provided
-      if (latestId) latestId.value = asset.id;
-      networkServiceRef.current.broadcastSpawn({
-        id: asset.id, name: asset.name, type: asset.type as AssetSpawnData['type'],
-        position: snap.position, rotation: snap.rotation, scale: snap.scale,
-        url: asset.url, fileData: asset.fileData, isCollidable: asset.isCollidable,
-        isPersistent: snap.isPersistent,
-      });
-    } else {
-      console.warn(`[UndoRedo] Could not respawn asset "${snap.name}" - no primitiveType, fileData, or url.`);
-    }
-  };
-
   // ===========================================================================
   // Keyboard shortcuts (extracted to useKeyboardShortcuts hook)
   // ===========================================================================
@@ -3939,34 +3778,6 @@ const vrHud = new VRHUDManager(
     onRecordSpawnUndo: recordSpawnUndo,
     onRefreshUI: handleRefreshUI,
   });
-
-  // ─── Asset import / spawn handlers (extracted to reduce App.tsx size) ─
-  const {
-    handleSpawnPrimitive,
-    handleImportFile,
-    handleImportAssetFromConfig,
-    handleSpawnFromInventory,
-    handleEquipVrmFromInventory,
-  } = createAssetImportHandlers({
-    sceneEngineRef,
-    assetManagerRef,
-    manipulationManagerRef,
-    avatarManagerRef,
-    networkServiceRef,
-    videoStreamingServiceRef,
-    inventoryServiceRef,
-    pendingAssetsRef,
-    streamingSuppressedAssetIdsRef,
-    setActiveVideoAssetId,
-    setActiveTool,
-    setShowToolsPanel,
-    setShowInventoryModal,
-    setShowDashMenu,
-    resetVideoInactivityTimer,
-    recordSpawnUndo,
-    localRole,
-  });
-  useEffect(() => { handleSpawnPrimitiveRef.current = handleSpawnPrimitive; });
 
   const handleUpdateUserName = (name: string) => {
     networkServiceRef.current.setLocalUserName(name);
@@ -4594,12 +4405,13 @@ const vrHud = new VRHUDManager(
 
       {/* Interactive Asset Customization Dialog */}
       {showImportDialog && (
-      <AssetImportDialog
-          key={`import-dialog-${uiRefreshKey}`}
+        <AssetImportDialog
+          key={`import-dialog-${importInitialFile?.name || 'custom'}-${uiRefreshKey}`}
           initialFile={importInitialFile}
           onImport={handleImportAssetFromConfig}
           onClose={() => {
             setShowImportDialog(false);
+            setImportInitialFile(null);
             sceneEngineRef.current?.renderer.domElement.focus();
           }}
           scene={sceneEngineRef.current?.scene}
