@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 export interface UseFileDropPasteOptions {
   plainPasteModeRef: React.MutableRefObject<boolean>;
   setImportInitialFile: (file: File | null) => void;
+  setImportInitialUrl?: (url: string) => void;
   setShowImportDialog: (show: boolean) => void;
 }
 
@@ -13,6 +14,7 @@ export interface UseFileDropPasteOptions {
 export function useFileDropPaste({
   plainPasteModeRef,
   setImportInitialFile,
+  setImportInitialUrl,
   setShowImportDialog,
 }: UseFileDropPasteOptions): void {
   useEffect(() => {
@@ -29,7 +31,18 @@ export function useFileDropPaste({
       if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
         const file = e.dataTransfer.files[0];
         setImportInitialFile(file);
+        setImportInitialUrl?.('');
         setShowImportDialog(true);
+        return;
+      }
+      const uri = e.dataTransfer?.getData('text/uri-list') || e.dataTransfer?.getData('text/plain');
+      if (uri) {
+        const trimmed = uri.trim();
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
+          setImportInitialFile(null);
+          setImportInitialUrl?.(trimmed);
+          setShowImportDialog(true);
+        }
       }
     };
 
@@ -120,6 +133,7 @@ export function useFileDropPaste({
           if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
             e.preventDefault();
             setImportInitialFile(null);
+            setImportInitialUrl?.(trimmed);
             setShowImportDialog(true);
           }
         }
@@ -134,5 +148,5 @@ export function useFileDropPaste({
       window.removeEventListener('drop', handleDrop);
       window.removeEventListener('paste', handlePaste);
     };
-  }, [plainPasteModeRef, setImportInitialFile, setShowImportDialog]);
+  }, [plainPasteModeRef, setImportInitialFile, setImportInitialUrl, setShowImportDialog]);
 }

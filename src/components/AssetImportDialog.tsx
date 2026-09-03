@@ -97,6 +97,7 @@ export interface ImportConfig {
 
 interface AssetImportDialogProps {
   initialFile?: File | null;
+  initialUrl?: string;
   onImport: (config: ImportConfig) => Promise<void>;
   onClose: () => void;
   scene?: THREE.Scene;
@@ -177,6 +178,7 @@ const ResoniteOptionButton: React.FC<ResoniteOptionProps> = ({
 
 export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
   initialFile,
+  initialUrl,
   onImport,
   onClose,
   scene,
@@ -188,13 +190,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
 }) => {
   const interactive = interactivePermissionGranted ?? true;
   const [selectedFile, setSelectedFile] = useState<File | null>(initialFile || null);
-  const [urlInput, setUrlInput] = useState<string>('');
-  const [activeTab, setActiveTab] = useState<'file' | 'url'>(initialFile ? 'file' : 'file');
+  const [urlInput, setUrlInput] = useState<string>(initialUrl || '');
+  const [activeTab, setActiveTab] = useState<'file' | 'url'>(initialUrl ? 'url' : 'file');
   const submittingRef = useRef(false);
 
   // Resonite-style page navigation wizard state
-  const [page, setPage] = useState<ImportPage>(initialFile ? 'what-are-you-importing' : 'select-source');
-  const [history, setHistory] = useState<ImportPage[]>(initialFile ? ['select-source'] : []);
+  const [page, setPage] = useState<ImportPage>(initialFile || initialUrl ? 'what-are-you-importing' : 'select-source');
+  const [history, setHistory] = useState<ImportPage[]>(initialFile || initialUrl ? ['select-source'] : []);
 
   // General settings
   const [saveToInventory, setSaveToInventory] = useState<boolean>(false);
@@ -260,8 +262,13 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
       // sync if a new splat container is added.
       if (isSplatFilename(initialFile.name.toLowerCase())) setSplatFlip180(true);
       else setFlipModel180(false);
+    } else if (initialUrl) {
+      setUrlInput(initialUrl);
+      setActiveTab('url');
+      setPage('what-are-you-importing');
+      setHistory(['select-source']);
     }
-  }, [initialFile]);
+  }, [initialFile, initialUrl]);
 
   const getFileCategory = (): 'model' | 'splat' | 'image' | 'video' | 'audio' | 'vrm' | 'misc' => {
     const name = selectedFile ? selectedFile.name.toLowerCase() : urlInput.toLowerCase();
@@ -401,6 +408,14 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     };
 
     onClose();
+    // Re-acquire pointer lock if in desktop mode so the user's movement and look controls don't freeze!
+    try {
+      const dom = (scene as any)?.userData?.domElement || document.querySelector('canvas');
+      if (dom && !document.pointerLockElement) {
+        dom.requestPointerLock?.();
+      }
+    } catch { /* ignore */ }
+
     onImport(config).catch((err) => {
       console.warn('[Import] Failed:', err);
     });

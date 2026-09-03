@@ -211,7 +211,7 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   instanceId,
   spatialPanelManager,
   videoActions,
-  targetObject,
+  targetObject: _targetObject,
   worldRoot,
   interactivePermissionGranted,
   originatorHeader,
@@ -219,12 +219,9 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
   locomotionPermissions,
   onUpdateLocomotionPermissions,
 }) => {
-  // Mirror of the prop with a default so we don't sprinkle `?? true`
-  // checks across the JSX. The defaults preserve the pre-broadcast
-  // behaviour: panel is fully interactive, asset docks via default
-  // propping the spatial wrapper's parentObject to selectedAsset?.object3d.
   const interactive = interactivePermissionGranted ?? true;
-  const dockTarget = targetObject ?? selectedAsset?.object3d ?? undefined;
+  // Note: dockTarget/parentObject is intentionally omitted for the spatial wrapper
+  // so inspectors spawn in front of the camera/user, matching the import window.
   // The actual top of the scene graph — used as the hierarchy tree's
   // default root so the left pane shows the WHOLE scene (parents,
   // siblings, everything) the way Resonite's Scene Inspector does,
@@ -994,7 +991,6 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
       defaultWidth={560}
       defaultHeight={780}
       initialPinned={true}
-      parentObject={dockTarget ?? undefined}
       onBringToMe={() => {
         if (selectedAsset) onBringAsset(selectedAsset);
       }}

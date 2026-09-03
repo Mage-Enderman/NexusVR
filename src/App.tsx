@@ -37,8 +37,7 @@ import { DashMenu } from './components/DashMenu.tsx';
 import { loadSubtitleSettings, saveSubtitleSettings, type SubtitleSettings } from './utils/subtitleSettings.ts';
 import { VRHUDManager } from './engine/VRHUDManager.ts';
 import { BrushManager } from './engine/BrushManager.ts';
-import { WorldToolsPanel } from './components/WorldToolsPanel.tsx';
-import type { ToolType } from './components/WorldToolsPanel.tsx';
+import type { ToolType } from './engine/ContextMenuManager.ts';
 import { SceneInspectorWindow } from './components/SceneInspectorWindow.tsx';
 import { SpatialPopUpWrapper } from './components/SpatialPopUpWrapper.tsx';
 import { VideoObjectControls } from './components/VideoObjectControls.tsx';
@@ -177,6 +176,16 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   inspectorInstancesRef.current = inspectorInstances;
 
   const openInspectorForAsset = useCallback((asset: LoadedAsset | null) => {
+    const existing = asset
+      ? inspectorInstancesRef.current.find(i => i.pinnedAsset?.id === asset.id)
+      : inspectorInstancesRef.current.find(i => !i.pinnedAsset);
+    if (existing) {
+      const se = sceneEngineRef.current;
+      if (se?.spatialPanelManager && se?.camera) {
+        se.spatialPanelManager.bringToCamera(existing.id, se.camera);
+        return;
+      }
+    }
     const instanceId = asset
       ? `inspector-${asset.id}-${Date.now()}`
       : `inspector-hierarchy-${Date.now()}`;
@@ -306,6 +315,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   const [showImportModal, setShowImportModal] = useState<boolean>(false);
   const [showImportDialog, setShowImportDialog] = useState<boolean>(false);
   const [importInitialFile, setImportInitialFile] = useState<File | null>(null);
+  const [importInitialUrl, setImportInitialUrl] = useState<string>('');
   const [showWorldEnvModal, setShowWorldEnvModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showChatPanel, setShowChatPanel] = useState<boolean>(true);
@@ -344,9 +354,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
   // `showRadialMenuRef`, `locomotionModeRef` above. Synced by the
   // mirror useEffect further below.
   const selectedAssetRef = useRef<LoadedAsset | null>(null);
-  const [showToolsPanel, setShowToolsPanel] = useState<boolean>(false);
   const [activeTool, setActiveTool] = useState<ToolType | null>(null);
-  const [brushWidth, setBrushWidth] = useState<number>(0.05);
   const [uiRefreshKey, setUiRefreshKey] = useState<number>(0);
 
   const handleRefreshUI = useCallback(() => {
@@ -425,11 +433,10 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
       if (showInventoryModal) { setShowInventoryModal(false); return; }
       if (showDashMenu) { setShowDashMenu(false); return; }
       if (showRadialMenu) { setShowRadialMenu(false); return; }
-      if (showToolsPanel) { setShowToolsPanel(false); return; }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [showShareModal, showSettingsModal, showWorldEnvModal, showImportDialog, showImportModal, showInventoryModal, showDashMenu, showRadialMenu, showToolsPanel]);
+  }, [showShareModal, showSettingsModal, showWorldEnvModal, showImportDialog, showImportModal, showInventoryModal, showDashMenu, showRadialMenu]);
 
   const isAnyModalOpen = Boolean(
     showShareModal ||
@@ -438,9 +445,7 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     showImportDialog ||
     showImportModal ||
     showInventoryModal ||
-    showDashMenu ||
-    showRadialMenu ||
-    showToolsPanel
+    showDashMenu
   );
 
   useEffect(() => {
@@ -1830,6 +1835,7 @@ const vrHud = new VRHUDManager(
         const ext = (data.name || '').split('.').pop()?.toLowerCase() || '';
         const mime = data.type === 'video' || ['mp4', 'webm', 'mov'].includes(ext) ? 'video/mp4'
           : data.type === 'audio' || ['mp3', 'ogg', 'wav'].includes(ext) ? 'audio/mpeg'
+          : data.type === 'image' || ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext) ? (ext === 'jpg' ? 'image/jpeg' : `image/${ext || 'png'}`)
           : 'application/octet-stream';
         const fullBlob = new Blob(chunks as ArrayBuffer[], { type: mime });
         const file = new File([fullBlob], data.name || 'Asset', { type: mime });
@@ -1842,6 +1848,7 @@ const vrHud = new VRHUDManager(
         assetManager.importFile(file, pos, {
           videoAspectRatio: data.videoAspectRatio || 'auto',
           subtitleText: data.subtitlesData,
+          imageDisplayMode: data.imageDisplayMode || '2d-plane',
           importAsRawFile: Boolean(data.importAsRawFile || data.type === 'misc')
         }, data.id).then((asset) => {
           if (asset) {
@@ -2018,6 +2025,7 @@ const vrHud = new VRHUDManager(
         const file = new File([blob], data.name);
         assetManager.importFile(file, pos, {
           videoAspectRatio: data.videoAspectRatio || 'auto',
+          imageDisplayMode: data.imageDisplayMode || '2d-plane',
           importAsRawFile: Boolean(data.importAsRawFile || data.type === 'misc')
         }, data.id).then((asset) => {
           if (asset) {
@@ -2564,7 +2572,12 @@ const vrHud = new VRHUDManager(
         if (showRadialMenuRef.current) {
           setShowRadialMenu(false);
         } else {
-          setRadialMenuPos({ x: e.clientX, y: e.clientY });
+          const isPointerLocked = document.pointerLockElement !== null;
+          if (isPointerLocked || cameraModeRef.current === 'first-person') {
+            setRadialMenuPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+          } else {
+            setRadialMenuPos({ x: e.clientX, y: e.clientY });
+          }
           setShowRadialMenu(true);
         }
       } else if (e.button === 3 || e.button === 4) {
@@ -2889,6 +2902,7 @@ const vrHud = new VRHUDManager(
   useFileDropPaste({
     plainPasteModeRef,
     setImportInitialFile,
+    setImportInitialUrl,
     setShowImportDialog,
   });
 
@@ -3581,6 +3595,71 @@ const vrHud = new VRHUDManager(
     manipulationManagerRef.current?.selectAsset(null);
   }, []);
 
+  const handleToggleWireframe = useCallback(() => {
+    if (selectedAsset) {
+      let isWire = false;
+      selectedAsset.object3d.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
+          const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          m.wireframe = !m.wireframe;
+          m.needsUpdate = true;
+          isWire = m.wireframe;
+        }
+      });
+      networkServiceRef.current.broadcastMaterialUpdate({
+        assetId: selectedAsset.id,
+        wireframe: isWire,
+      });
+    }
+  }, [selectedAsset]);
+
+  const handleSampleMaterial = useCallback(() => {
+    if (selectedAsset) {
+      selectedAsset.object3d.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
+          const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          if (m.color) {
+            console.log(`[Material] Sampled color #${m.color.getHexString()}`);
+          }
+        }
+      });
+    }
+  }, [selectedAsset]);
+
+  const handleApplyMaterialColor = useCallback((color: string) => {
+    if (selectedAsset) {
+      selectedAsset.object3d.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
+          const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
+          m.color.set(color);
+          m.needsUpdate = true;
+        }
+      });
+      networkServiceRef.current.broadcastMaterialUpdate({
+        assetId: selectedAsset.id,
+        color,
+      });
+    }
+  }, [selectedAsset]);
+
+  const handleToggleDrawing = useCallback(() => {
+    if (brushManagerRef.current) {
+      const drawing = !brushManagerRef.current.isActive;
+      brushManagerRef.current.isActive = drawing;
+      if (drawing) {
+        brushManagerRef.current.startStroke('#ff007f', 0.05);
+      }
+    }
+  }, []);
+
+  const handleClearStrokes = useCallback(() => {
+    brushManagerRef.current?.clearAll();
+  }, []);
+
+  const handleChangeBrushColor = useCallback((c: string) => {
+    if (brushManagerRef.current) brushManagerRef.current.currentColor = c;
+  }, []);
+
   const handleSpawnPrimitiveRef = useRef<((type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void) | null>(null);
 
   // ─── Asset import / spawn handlers (extracted to assetImportHandlers) ───
@@ -3603,7 +3682,6 @@ const vrHud = new VRHUDManager(
     streamingSuppressedAssetIdsRef,
     setActiveVideoAssetId,
     setActiveTool,
-    setShowToolsPanel,
     setShowInventoryModal,
     setShowDashMenu,
     resetVideoInactivityTimer,
@@ -3674,7 +3752,14 @@ const vrHud = new VRHUDManager(
     },
     onSpawnPrimitive: (type) => { handleSpawnPrimitiveRef.current?.(type); closeVrRadial(menuSide); },
     onSetLocomotionMode: (mode) => { handleSetLocomotionMode(mode); },
-  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute, spawnLightGizmo, handleToggleSelectionMode, handleDeselectAll, handleSetLocomotionMode]);
+    onToggleWireframe: handleToggleWireframe,
+    onSampleMaterial: handleSampleMaterial,
+    onApplyMaterialColor: handleApplyMaterialColor,
+    onToggleDrawing: handleToggleDrawing,
+    onClearStrokes: handleClearStrokes,
+    brushColor: '#ff007f',
+    onChangeBrushColor: handleChangeBrushColor,
+  }), [closeVrRadial, handleDestroyHeld, handleDuplicateHeld, handleSaveHeldToInventory, handleDownloadHeld, handleToggleMute, spawnLightGizmo, handleToggleSelectionMode, handleDeselectAll, handleSetLocomotionMode, handleToggleWireframe, handleSampleMaterial, handleApplyMaterialColor, handleToggleDrawing, handleClearStrokes, handleChangeBrushColor]);
   const buildVrRadialInitialState = useCallback((menuSide: 'left' | 'right'): VRRadialMenuState => {
     const sideHeldAsset = heldAssetsBySideRef.current[menuSide];
     const sideIsHolding = sideHeldAsset !== null || heldSideRef.current === menuSide || (isHeldRef.current && heldSideRef.current === null);
@@ -3686,7 +3771,7 @@ const vrHud = new VRHUDManager(
       isHeld: sideIsHolding,
       isMuted: networkServiceRef.current.isMuted,
       heldAssetType: sideHeldAsset?.type ? String(sideHeldAsset.type) : sideIsHolding ? heldAssetTypeRef.current : null,
-      activeTab: activeToolRef.current === 'light' ? 'light' : activeToolRef.current === 'dev' ? 'dev' : sideIsHolding ? 'held' : 'general',
+      activeTab: activeToolRef.current === 'light' ? 'light' : activeToolRef.current === 'dev' ? 'dev' : activeToolRef.current === 'material' ? 'material' : activeToolRef.current === 'shape' ? 'shape' : activeToolRef.current === 'brush' ? 'brush' : sideIsHolding ? 'held' : 'general',
       activeTool: activeToolRef.current,
       noShadows: lightNoShadowsRef.current,
       selectionMode: selectionModeRef.current,
@@ -3753,7 +3838,6 @@ const vrHud = new VRHUDManager(
     setShowChatPanel,
     setUnreadChatCount,
     setActiveTool,
-    setShowToolsPanel,
     setRadialMenuPos,
     setShowRadialMenu,
     setShowInventoryModal,
@@ -3834,72 +3918,74 @@ const vrHud = new VRHUDManager(
 
       {/* Center Crosshair - cyan when idle, amber when dev tool hovers
           a selectable asset, green when hovering an interactive panel. */}
-      <div className="absolute inset-0 z-[5] pointer-events-none flex items-center justify-center">
-        {(() => {
-          const overPanel = isCrosshairOverPanel && cameraMode === 'first-person';
-          const overAsset =
-            !overPanel &&
-            centerRayHitAssetId !== null &&
-            activeTool === 'dev' &&
-            cameraMode === 'first-person';
+      {!showRadialMenu && (
+        <div className="absolute inset-0 z-[5] pointer-events-none flex items-center justify-center">
+          {(() => {
+            const overPanel = isCrosshairOverPanel && cameraMode === 'first-person';
+            const overAsset =
+              !overPanel &&
+              centerRayHitAssetId !== null &&
+              activeTool === 'dev' &&
+              cameraMode === 'first-person';
 
-          const stroke = overPanel
-            ? 'rgba(52,211,153,0.95)'   // green - panel hover
-            : overAsset
-            ? 'rgba(245,158,11,0.95)'   // amber - asset hover
-            : 'rgba(0,240,255,0.7)';    // cyan  - idle
+            const stroke = overPanel
+              ? 'rgba(52,211,153,0.95)'   // green - panel hover
+              : overAsset
+              ? 'rgba(245,158,11,0.95)'   // amber - asset hover
+              : 'rgba(0,240,255,0.7)';    // cyan  - idle
 
-          const strokeOuter = overPanel
-            ? 'rgba(52,211,153,0.55)'
-            : overAsset
-            ? 'rgba(245,158,11,0.65)'
-            : 'rgba(0,240,255,0.5)';
+            const strokeOuter = overPanel
+              ? 'rgba(52,211,153,0.55)'
+              : overAsset
+              ? 'rgba(245,158,11,0.65)'
+              : 'rgba(0,240,255,0.5)';
 
-          const fillDot = overPanel
-            ? 'rgba(52,211,153,1)'
-            : overAsset
-            ? 'rgba(245,158,11,1)'
-            : 'rgba(0,240,255,0.9)';
+            const fillDot = overPanel
+              ? 'rgba(52,211,153,1)'
+              : overAsset
+              ? 'rgba(245,158,11,1)'
+              : 'rgba(0,240,255,0.9)';
 
-          const outerR = overPanel ? 5 : overAsset ? 3.6 : 3;
-          // Gap: panel hover shows wider gap to feel more like a pointer
-          const gapInner = overPanel ? 7 : 8;
-          const gapOuter = overPanel ? 10 : 8;
+            const outerR = overPanel ? 5 : overAsset ? 3.6 : 3;
+            // Gap: panel hover shows wider gap to feel more like a pointer
+            const gapInner = overPanel ? 7 : 8;
+            const gapOuter = overPanel ? 10 : 8;
 
-          return (
-            // pointerEvents="none" on the root SVG + Tailwind className
-            // belt-and-braces: SVG child elements default to
-            // pointer-events: visiblePainted, and a parent CSS rule of
-            // pointer-events: none does NOT reliably cascade into SVG
-            // children across browsers/renderers (Chromium and Firefox
-            // have both shipped quirks here). When the inspector is
-            // centered on the camera via "Bring To Me", the X/Y input
-            // wrappers straddle the exact screen center, and the
-            // crosshair dot/ring can absorb those clicks silently while
-            // the offset Z input (further right) still works. Setting
-            // the attribute directly on the SVG element forces every
-            // painting descendant into the same pass-through state.
-            <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
-              {/* Outer ring - larger and coloured when over panel */}
-              <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
-              {/* Crosshair lines - gap widens on panel hover to look like a hand cursor */}
-              <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
-              <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
-              <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
-              <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
-              {/* Centre dot - square on panel hover to echo a pointer/cursor icon */}
-              {overPanel
-                ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
-                : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
-              }
-              {/* Subtle pulse ring on panel hover */}
-              {overPanel && (
-                <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
-              )}
-            </svg>
-          );
-        })()}
-      </div>
+            return (
+              // pointerEvents="none" on the root SVG + Tailwind className
+              // belt-and-braces: SVG child elements default to
+              // pointer-events: visiblePainted, and a parent CSS rule of
+              // pointer-events: none does NOT reliably cascade into SVG
+              // children across browsers/renderers (Chromium and Firefox
+              // have both shipped quirks here). When the inspector is
+              // centered on the camera via "Bring To Me", the X/Y input
+              // wrappers straddle the exact screen center, and the
+              // crosshair dot/ring can absorb those clicks silently while
+              // the offset Z input (further right) still works. Setting
+              // the attribute directly on the SVG element forces every
+              // painting descendant into the same pass-through state.
+              <svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" pointerEvents="none" style={{ pointerEvents: 'none' }} className="pointer-events-none">
+                {/* Outer ring - larger and coloured when over panel */}
+                <circle cx="14" cy="14" r={outerR} stroke={strokeOuter} strokeWidth="1.5" fill="none" pointerEvents="none" />
+                {/* Crosshair lines - gap widens on panel hover to look like a hand cursor */}
+                <line x1="14" y1="2"  x2="14" y2={gapInner}  stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+                <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+                <line x1="2"  y1="14" x2={gapInner}  y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+                <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" pointerEvents="none" />
+                {/* Centre dot - square on panel hover to echo a pointer/cursor icon */}
+                {overPanel
+                  ? <rect x="12.5" y="12.5" width="3" height="3" fill={fillDot} rx="0.5" pointerEvents="none" />
+                  : <circle cx="14" cy="14" r="1" fill={fillDot} pointerEvents="none" />
+                }
+                {/* Subtle pulse ring on panel hover */}
+                {overPanel && (
+                  <circle cx="14" cy="14" r="7" stroke="rgba(52,211,153,0.25)" strokeWidth="1" fill="none" pointerEvents="none" />
+                )}
+              </svg>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Top Glass Navigation Bar */}
       <Navbar
@@ -4020,104 +4106,16 @@ const vrHud = new VRHUDManager(
         onSpawnPrimitive={handleSpawnPrimitive}
         onOpenInventory={() => setShowInventoryModal(true)}
         onOpenImport={() => { setImportInitialFile(null); setShowImportDialog(true); }}
-        onOpenTools={() => setShowToolsPanel(!showToolsPanel)}
+        onOpenTools={() => setActiveTool((prev) => (prev === 'dev' ? null : 'dev'))}
         onOpenInspector={() => openInspectorForAsset(selectedAsset)}
         onOpenRadialMenu={() => {
           setRadialMenuPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
           setShowRadialMenu(true);
         }}
-        activeTool={showToolsPanel ? activeTool : null}
+        activeTool={activeTool}
         transformSpace={transformSpace}
         onToggleSpace={handleToggleSpace}
       />
-
-      {/* Resonite / World Tools Panel */}
-      {showToolsPanel && (
-        <WorldToolsPanel
-          activeTool={activeTool}
-          onSelectTool={(t) => {
-            setActiveTool(t);
-            if (t === 'brush') {
-              brushManagerRef.current?.startStroke('#00f0ff', 0.05);
-            }
-          }}
-          selectedAsset={selectedAsset}
-          onSpawnPrimitive={handleSpawnPrimitive}
-          onApplyMaterial={(color, roughness, metalness, wireframe, emissive, opacity, textureUrl) => {
-            if (selectedAsset) {
-              selectedAsset.object3d.traverse((child) => {
-                if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
-                  const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
-                  if (color) m.color.set(color);
-                  if (roughness !== undefined) m.roughness = roughness;
-                  if (metalness !== undefined) m.metalness = metalness;
-                  if (wireframe !== undefined) m.wireframe = wireframe;
-                  if (emissive) m.emissive.set(emissive);
-                  if (opacity !== undefined) {
-                    m.opacity = opacity;
-                    m.transparent = opacity < 1.0;
-                  }
-                  if (textureUrl) {
-                    if (textureUrl === 'none') {
-                      m.map = null;
-                      m.needsUpdate = true;
-                    } else {
-                      new THREE.TextureLoader().load(textureUrl, (tex) => {
-                        tex.wrapS = THREE.RepeatWrapping;
-                        tex.wrapT = THREE.RepeatWrapping;
-                        tex.repeat.set(2, 2);
-                        m.map = tex;
-                        m.needsUpdate = true;
-                      });
-                    }
-                  }
-                  m.needsUpdate = true;
-                }
-              });
-            }
-          }}
-          onSpawnLight={(type, color, intensity, distance) => {
-            spawnLightGizmo(type as 'point' | 'spot' | 'sun', color, intensity, distance);
-          }}
-          onToggleDrawing={() => {
-            if (brushManagerRef.current) {
-              const drawing = !brushManagerRef.current.isActive;
-              brushManagerRef.current.isActive = drawing;
-              if (drawing) {
-                const pos = new THREE.Vector3(0, 1.5, -1.5);
-                brushManagerRef.current.startStroke('#ff007f', 0.05);
-                brushManagerRef.current.addPoint(pos);
-                brushManagerRef.current.addPoint(pos.clone().add(new THREE.Vector3(0.5, 0.5, 0)));
-                brushManagerRef.current.addPoint(pos.clone().add(new THREE.Vector3(1.0, 0, 0)));
-              }
-            }
-          }}
-          currentTransformMode={currentTransformMode}
-          onSetTransformMode={setCurrentTransformMode}
-          onToggleWireframe={() => {
-            if (selectedAsset) {
-              selectedAsset.object3d.traverse((child) => {
-                if ((child as THREE.Mesh).isMesh && (child as THREE.Mesh).material) {
-                  const m = (child as THREE.Mesh).material as THREE.MeshStandardMaterial;
-                  (m as THREE.MeshStandardMaterial).wireframe = !(m as THREE.MeshStandardMaterial).wireframe;
-                }
-              });
-            }
-          }}
-          brushColor="#ff007f"
-          onChangeBrushColor={(c) => {
-            if (brushManagerRef.current) brushManagerRef.current.currentColor = c;
-          }}
-          brushWidth={brushWidth}
-          onChangeBrushWidth={(w) => {
-            setBrushWidth(w);
-            if (brushManagerRef.current) brushManagerRef.current.currentWidth = w;
-          }}
-          isDrawingActive={false}
-          onClearStrokes={() => brushManagerRef.current?.clearAll()}
-          onClose={() => setShowToolsPanel(false)}
-        />
-      )}
 
       {/* Resonite Spatial Scene Inspector Windows (multi-instance, each pinned to its asset) */}
       {inspectorInstances.map(instance => {
@@ -4406,13 +4404,18 @@ const vrHud = new VRHUDManager(
       {/* Interactive Asset Customization Dialog */}
       {showImportDialog && (
         <AssetImportDialog
-          key={`import-dialog-${importInitialFile?.name || 'custom'}-${uiRefreshKey}`}
+          key={`import-dialog-${importInitialFile?.name || importInitialUrl || 'custom'}-${uiRefreshKey}`}
           initialFile={importInitialFile}
+          initialUrl={importInitialUrl}
           onImport={handleImportAssetFromConfig}
           onClose={() => {
             setShowImportDialog(false);
             setImportInitialFile(null);
+            setImportInitialUrl('');
             sceneEngineRef.current?.renderer.domElement.focus();
+            if (sceneEngineRef.current?.cameraMode === 'first-person' && !document.pointerLockElement) {
+              sceneEngineRef.current?.renderer.domElement.requestPointerLock?.();
+            }
           }}
           scene={sceneEngineRef.current?.scene}
           camera={sceneEngineRef.current?.camera}
@@ -4586,6 +4589,13 @@ const vrHud = new VRHUDManager(
           if (!se) return;
           se.collisionManager.enabled = !se.collisionManager.enabled;
         }}
+        onToggleWireframe={handleToggleWireframe}
+        onSampleMaterial={handleSampleMaterial}
+        onApplyMaterialColor={handleApplyMaterialColor}
+        onToggleDrawing={handleToggleDrawing}
+        onClearStrokes={handleClearStrokes}
+        brushColor="#ff007f"
+        onChangeBrushColor={handleChangeBrushColor}
       />
 
       {/* Global toast notifications (import results, errors, etc.) */}

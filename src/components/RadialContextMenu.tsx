@@ -33,7 +33,11 @@ import {
   Box,
   CircleDot,
   Cylinder,
-  Square
+  Square,
+  Triangle,
+  Disc,
+  Eye,
+  Brush
 } from 'lucide-react';
 import type { AssetType } from '../engine/AssetManager.ts';
 import {
@@ -42,6 +46,7 @@ import {
   type ContextMenuItemDef,
   type ComputedArcSlice,
   type ContextMenuContext,
+  type RadialTab,
 } from '../engine/ContextMenuManager.ts';
 
 export interface RadialContextMenuProps {
@@ -87,6 +92,14 @@ export interface RadialContextMenuProps {
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
   collisionEnabled?: boolean;
   onToggleCollision?: () => void;
+  onToggleWireframe?: () => void;
+  isDrawingActive?: boolean;
+  onToggleDrawing?: () => void;
+  onClearStrokes?: () => void;
+  brushColor?: string;
+  onChangeBrushColor?: (color: string) => void;
+  onSampleMaterial?: () => void;
+  onApplyMaterialColor?: (color: string) => void;
 }
 
 /**
@@ -203,8 +216,16 @@ function getSliceIcon(
       return <CircleDot className="w-5 h-5 text-cyan-400" />;
     case 'cylinder':
       return <Cylinder className="w-5 h-5 text-cyan-400" />;
+    case 'cone':
+      return <Triangle className="w-5 h-5 text-cyan-400" />;
+    case 'torus':
+      return <Disc className="w-5 h-5 text-cyan-400" />;
     case 'plane':
       return <Square className="w-5 h-5 text-cyan-400" />;
+    case 'wireframe':
+      return <Eye className="w-5 h-5 text-sky-400" />;
+    case 'brush':
+      return <Brush className="w-5 h-5 text-pink-400" />;
     default:
       return <Sparkles className="w-5 h-5 text-cyan-400" />;
   }
@@ -253,8 +274,16 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   onSpawnPrimitive,
   collisionEnabled = true,
   onToggleCollision,
+  onToggleWireframe,
+  isDrawingActive = false,
+  onToggleDrawing,
+  onClearStrokes,
+  brushColor = '#ff007f',
+  onChangeBrushColor,
+  onSampleMaterial,
+  onApplyMaterialColor,
 }) => {
-  const [activeTab, setActiveTab] = useState<'general' | 'grab' | 'held' | 'light' | 'dev'>('general');
+  const [activeTab, setActiveTab] = useState<RadialTab>('general');
   const [menuStack, setMenuStack] = useState<ContextMenuItemDef[][]>([]);
 
   useEffect(() => {
@@ -264,10 +293,16 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
       setActiveTab('dev');
     } else if (activeTool === 'light') {
       setActiveTab('light');
+    } else if (activeTool === 'material') {
+      setActiveTab('material');
+    } else if (activeTool === 'shape') {
+      setActiveTab('shape');
+    } else if (activeTool === 'brush') {
+      setActiveTab('brush');
     } else if (isHeld) {
       setActiveTab('held');
     } else {
-      setActiveTab((prev) => (prev === 'held' || prev === 'light' || prev === 'dev' ? 'general' : prev));
+      setActiveTab((prev) => (['held', 'light', 'dev', 'material', 'shape', 'brush'].includes(prev) ? 'general' : prev));
     }
   }, [isOpen, isHeld, activeTool]);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -291,6 +326,10 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   }, [isOpen]);
 
   useEffect(() => {
+    setVirtualCursor({ x: 180, y: 180 });
+  }, [menuStack, activeTab]);
+
+  useEffect(() => {
     if (!isOpen) return;
 
     const handleMouseMove = (e: MouseEvent) => {
@@ -311,8 +350,8 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
       }
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mousemove', handleMouseMove, { capture: true });
+    return () => window.removeEventListener('mousemove', handleMouseMove, { capture: true });
   }, [isOpen, position]);
 
   const handleNextLocomotion = () => {
@@ -376,6 +415,14 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
     onToggleCollision,
     allowedLocomotions,
     onSetLocomotionMode,
+    onToggleWireframe,
+    isDrawingActive,
+    onToggleDrawing,
+    onClearStrokes,
+    brushColor,
+    onChangeBrushColor,
+    onSampleMaterial,
+    onApplyMaterialColor,
   };
 
   const currentItems = menuStack.length > 0
@@ -391,24 +438,29 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
   const dist = Math.sqrt(dx * dx + dy * dy);
   let computedHover: number | null = null;
 
-  if (dist >= 36 && dist <= 160) {
-    const angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
+  if (dist >= 36) {
+    let angleDeg = Math.atan2(dy, dx) * (180 / Math.PI) + 90;
+    angleDeg = ((angleDeg % 360) + 360) % 360;
+
+    let closestIdx = 0;
+    let minAngleDiff = Infinity;
     for (let i = 0; i < slices.length; i++) {
       const s = slices[i];
-      if (
-        (angleDeg >= s.startDeg && angleDeg <= s.endDeg) ||
-        (angleDeg - 360 >= s.startDeg && angleDeg - 360 <= s.endDeg) ||
-        (angleDeg + 360 >= s.startDeg && angleDeg + 360 <= s.endDeg)
-      ) {
-        computedHover = i;
-        break;
+      let mid = ((s.startDeg + s.endDeg) / 2) % 360;
+      if (mid < 0) mid += 360;
+      let diff = Math.abs(angleDeg - mid);
+      if (diff > 180) diff = 360 - diff;
+      if (diff < minAngleDiff) {
+        minAngleDiff = diff;
+        closestIdx = i;
       }
     }
-  } else if (dist < 36) {
+    computedHover = closestIdx;
+  } else {
     computedHover = -1;
   }
 
-  const activeIndex = hoveredIndex !== null ? hoveredIndex : (isLocked ? computedHover : null);
+  const activeIndex = isLocked ? computedHover : (hoveredIndex !== null ? hoveredIndex : null);
 
   const triggerSliceAction = (index: number) => {
     const now = performance.now();
@@ -497,7 +549,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
         e.preventDefault();
         e.stopPropagation();
         if (activeIndex === -1) {
-          setActiveTab(prev => (prev === 'general' ? 'grab' : 'general'));
+          triggerSliceAction(-1);
         } else if (activeIndex !== null && activeIndex >= 0) {
           triggerSliceAction(activeIndex);
         } else {
@@ -532,7 +584,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 pointer-events-auto select-none flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fade-in font-['Outfit',sans-serif]"
+      className="fixed inset-0 z-50 pointer-events-auto select-none flex items-center justify-center bg-black/40 animate-fade-in font-['Outfit',sans-serif]"
       onClick={onClose}
       onContextMenu={(e) => { e.preventDefault(); onClose(); }}
     >
@@ -629,19 +681,52 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
             </text>
           </g>
 
-          {/* Virtual Cursor Dot for locked / first-person mode */}
-          {isLocked && (
-            <g transform={`translate(${virtualCursor.x}, ${virtualCursor.y})`} className="pointer-events-none">
-              <circle
-                r="6"
-                fill="#00f0ff"
-                stroke="#ffffff"
-                strokeWidth="2"
-                style={{ filter: 'drop-shadow(0 0 6px rgba(0, 240, 255, 0.9))' }}
-              />
-              <circle r="2" fill="#ffffff" />
-            </g>
-          )}
+          {/* Virtual In-Game Cursor for locked / first-person mode */}
+          {isLocked && (() => {
+            const isHoveringSlice = activeIndex !== null && activeIndex >= 0;
+            const isHoveringHub = activeIndex === -1;
+            const cursorColor = isHoveringSlice
+              ? slices[activeIndex]?.color || '#00f0ff'
+              : isHoveringHub
+              ? (isHeld ? '#f59e0b' : '#00f0ff')
+              : '#00f0ff';
+            const outerR = (isHoveringSlice || isHoveringHub) ? 5 : 3.5;
+            const gapInner = (isHoveringSlice || isHoveringHub) ? 7 : 8;
+            const gapOuter = (isHoveringSlice || isHoveringHub) ? 10 : 8;
+
+            return (
+              <g transform={`translate(${virtualCursor.x - 14}, ${virtualCursor.y - 14})`} className="pointer-events-none">
+                {/* Outer ring */}
+                <circle
+                  cx="14"
+                  cy="14"
+                  r={outerR}
+                  stroke={cursorColor}
+                  strokeWidth="1.5"
+                  fill="none"
+                  style={{
+                    filter: `drop-shadow(0 0 6px ${cursorColor})`,
+                    transition: 'all 0.1s ease',
+                  }}
+                />
+                {/* Crosshair lines */}
+                <line x1="14" y1="2" x2="14" y2={gapInner} stroke={cursorColor} strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="14" y1={28 - gapInner} x2="14" y2="26" stroke={cursorColor} strokeWidth="1.5" strokeLinecap="round" />
+                <line x1="2" y1="14" x2={gapInner} y2="14" stroke={cursorColor} strokeWidth="1.5" strokeLinecap="round" />
+                <line x1={28 - gapOuter} y1="14" x2="26" y2="14" stroke={cursorColor} strokeWidth="1.5" strokeLinecap="round" />
+                {/* Center dot / rect */}
+                {(isHoveringSlice || isHoveringHub) ? (
+                  <rect x="12.5" y="12.5" width="3" height="3" fill={cursorColor} rx="0.5" />
+                ) : (
+                  <circle cx="14" cy="14" r="1.2" fill={cursorColor} />
+                )}
+                {/* Pulse ring on hover */}
+                {(isHoveringSlice || isHoveringHub) && (
+                  <circle cx="14" cy="14" r="7" stroke={cursorColor} strokeWidth="1" fill="none" opacity="0.4" />
+                )}
+              </g>
+            );
+          })()}
         </svg>
 
         {/* OUTSIDE LABELS — positioned pointing outward from each sector like Resonite */}
@@ -691,7 +776,7 @@ export const RadialContextMenu: React.FC<RadialContextMenuProps> = ({
 
       {/* Bottom helper pill */}
       <div style={{ position: 'absolute', bottom: '24px', backgroundColor: 'rgba(2, 6, 23, 0.85)', border: '1px solid rgba(255, 255, 255, 0.1)', padding: '6px 16px', borderRadius: '9999px', fontSize: '11px', color: '#cbd5e1', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <span className="text-cyan-400 font-bold">Resonite Menu:</span>
+        <span className="text-cyan-400 font-bold">Radial menu:</span>
         <span>Click center circle to switch between General & Grab options.</span>
       </div>
     </div>

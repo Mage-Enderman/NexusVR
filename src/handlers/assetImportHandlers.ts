@@ -18,7 +18,7 @@ import type { VideoStreamingService } from '../services/VideoStreamingService.ts
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { UserRole } from '../types/permissions.ts';
-import type { ToolType } from '../components/WorldToolsPanel.tsx';
+import type { ToolType } from '../engine/ContextMenuManager.ts';
 import type { ImportConfig } from '../components/AssetImportDialog.tsx';
 import { DEFAULT_LIGHT_CONFIG } from '../engine/ResoniteLightSync.ts';
 import { toast } from '../services/ToastService.ts';
@@ -191,7 +191,6 @@ export interface AssetImportHandlerDeps {
   // React state setters
   setActiveVideoAssetId: React.Dispatch<React.SetStateAction<string | null>>;
   setActiveTool: React.Dispatch<React.SetStateAction<ToolType | null>>;
-  setShowToolsPanel: React.Dispatch<React.SetStateAction<boolean>>;
   setShowInventoryModal: React.Dispatch<React.SetStateAction<boolean>>;
   setShowDashMenu: React.Dispatch<React.SetStateAction<boolean>>;
 
@@ -217,7 +216,6 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     streamingSuppressedAssetIdsRef,
     setActiveVideoAssetId,
     setActiveTool,
-    setShowToolsPanel,
     setShowInventoryModal,
     setShowDashMenu,
     resetVideoInactivityTimer,
@@ -474,10 +472,10 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
     let asset: LoadedAsset | null = null;
     streamingSuppressedAssetIdsRef.current.add(placeholderId);
-    if (config.file && (assetType === 'video' || assetType === 'audio')) {
+    if (config.file && (assetType === 'video' || assetType === 'audio' || assetType === 'image')) {
       net.registerHostedFile(placeholderId, config.file);
       const vss = videoStreamingServiceRef.current;
-      if (vss) {
+      if (vss && assetType === 'video') {
         vss.registerHostFile(config.file, placeholderId, config.file.type);
       }
     }
@@ -508,7 +506,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
         }
 
         if (net.mode !== 'offline') {
-          const isP2PNeeded = !asset.fileData && Boolean(config.file);
+          const isP2PNeeded = (!asset.fileData || asset.type === 'image' || (config.file && config.file.size > 256 * 1024)) && Boolean(config.file);
           const p2pTransferHint = isP2PNeeded ? { id: asset.id, size: config.file!.size } : undefined;
           const vs = asset.object3d.userData?.videoState as Record<string, unknown> | undefined;
           net.broadcastSpawn({
@@ -519,12 +517,13 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
             scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
             url: asset.url,
-            fileData: asset.fileData,
+            fileData: isP2PNeeded ? undefined : asset.fileData,
             fileDataOversized: isP2PNeeded ? true : undefined,
             p2pTransferHint,
             isCollidable: asset.isCollidable,
             isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
             videoAspectRatio: config.videoAspectRatio,
+            imageDisplayMode: config.imageDisplayMode || '2d-plane',
             subtitlesData: vs?.subtitlesData as string | undefined,
             subtitlesEnabled: vs?.subtitlesEnabled as boolean | undefined,
             // Compact playback/orientation snapshot so spawn receivers
@@ -580,7 +579,6 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
 
     if (item.type === 'tool') {
       setActiveTool((item.toolType as ToolType) || 'dev');
-      setShowToolsPanel(true);
       setShowInventoryModal(false);
       setShowDashMenu(false);
       return;

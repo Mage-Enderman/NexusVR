@@ -956,9 +956,13 @@ export class SceneEngine {
     this.spatialPanelManager?.render(this.scene, this.camera);
     // Crosshair hover: find panel element under screen center while locked or in first-person mode
     if ((this.isPointerLocked || this.cameraMode === 'first-person') && this.spatialPanelManager) {
-      const cx = (this.container.clientWidth  || window.innerWidth)  / 2;
-      const cy = (this.container.clientHeight || window.innerHeight) / 2;
-      this.spatialPanelManager.updateLockedHover(cx, cy);
+      if ((window as any).__isRadialMenuOpen) {
+        this.spatialPanelManager.clearLockedHover();
+      } else {
+        const cx = (this.container.clientWidth  || window.innerWidth)  / 2;
+        const cy = (this.container.clientHeight || window.innerHeight) / 2;
+        this.spatialPanelManager.updateLockedHover(cx, cy);
+      }
     }
   };
 
@@ -1090,6 +1094,7 @@ export class SceneEngine {
   };
 
   private updateFirstPersonMovement(delta: number): void {
+    if ((window as any).__isRadialMenuOpen) return;
     let speed = (this.keysPressed['ShiftLeft'] || this.keysPressed['ShiftRight'] ? 8.0 : 4.0) * delta;
     if (this.locomotionMode === 'flight') speed *= 1.5;
     if (this.locomotionMode === 'noclip') speed *= 3.0; // Fast noclip speed

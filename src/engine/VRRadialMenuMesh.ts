@@ -5,6 +5,7 @@ import {
   type ContextMenuItemDef,
   type ComputedArcSlice,
   type ContextMenuContext,
+  type RadialTab,
 } from './ContextMenuManager.ts';
 
 export interface VRRadialMenuState {
@@ -16,7 +17,7 @@ export interface VRRadialMenuState {
   isMuted?: boolean;
   heldAssetType: string | null;
   heldAssetCustomItems?: ContextMenuItemDef[];
-  activeTab: 'general' | 'grab' | 'held' | 'light' | 'dev';
+  activeTab: RadialTab;
   activeTool?: string | null;
   noShadows?: boolean;
   lightColor?: string;
@@ -53,6 +54,13 @@ export interface VRRadialMenuCallbacks {
   onToggleGizmoSpace?: () => void;
   onSpawnPrimitive?: (type: 'cube' | 'sphere' | 'cylinder' | 'cone' | 'torus' | 'plane') => void;
   onSetLocomotionMode?: (mode: 'walk' | 'flight' | 'noclip') => void;
+  onToggleWireframe?: () => void;
+  onSampleMaterial?: () => void;
+  onApplyMaterialColor?: (color: string) => void;
+  onToggleDrawing?: () => void;
+  onClearStrokes?: () => void;
+  brushColor?: string;
+  onChangeBrushColor?: (color: string) => void;
 }
 
 const SIZE = 512;      // canvas px
@@ -86,7 +94,7 @@ export class VRRadialMenuMesh {
   private mesh: THREE.Mesh;
 
   private hoveredSlice: number = -1;   // -1 = hub, ≥0 = slice index, null = nothing
-  private _activeTab: 'general' | 'grab' | 'held' | 'light' | 'dev' = 'general';
+  private _activeTab: RadialTab = 'general';
   private menuStack: ContextMenuItemDef[][] = [];
   private _state: VRRadialMenuState;
   private _callbacks: VRRadialMenuCallbacks;
@@ -149,7 +157,7 @@ export class VRRadialMenuMesh {
   // Public API
   // -------------------------------------------------------------------------
 
-  public get activeTab(): 'general' | 'grab' | 'held' | 'light' | 'dev' { return this._activeTab; }
+  public get activeTab(): RadialTab { return this._activeTab; }
 
   public setVisible(v: boolean): void {
     this.group.visible = v;
@@ -167,7 +175,7 @@ export class VRRadialMenuMesh {
     this._draw();
   }
 
-  public setActiveTab(tab: 'general' | 'grab' | 'held' | 'light' | 'dev'): void {
+  public setActiveTab(tab: RadialTab): void {
     this.menuStack = [];
     this._activeTab = tab;
     this._draw();
@@ -519,6 +527,13 @@ export class VRRadialMenuMesh {
       onSpawnPrimitive: cb.onSpawnPrimitive,
       allowedLocomotions: s.allowedLocomotions,
       onSetLocomotionMode: cb.onSetLocomotionMode,
+      onToggleWireframe: cb.onToggleWireframe,
+      onSampleMaterial: cb.onSampleMaterial,
+      onApplyMaterialColor: cb.onApplyMaterialColor,
+      onToggleDrawing: cb.onToggleDrawing,
+      onClearStrokes: cb.onClearStrokes,
+      brushColor: cb.brushColor,
+      onChangeBrushColor: cb.onChangeBrushColor,
     };
   }
 

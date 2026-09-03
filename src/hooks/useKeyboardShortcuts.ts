@@ -10,7 +10,7 @@ import type { NetworkService } from '../services/NetworkService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 import type { UndoRedoManager } from '../services/UndoRedoManager.ts';
 import type { VRHUDManager } from '../engine/VRHUDManager.ts';
-import type { ToolType } from '../components/WorldToolsPanel.tsx';
+import type { ToolType } from '../engine/ContextMenuManager.ts';
 import { getGrabbable, setGrabbable } from '../components/grabbable/GrabbableComponent.ts';
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,6 @@ interface UseKeyboardShortcutsParams {
   setShowChatPanel: React.Dispatch<React.SetStateAction<boolean>>;
   setUnreadChatCount: React.Dispatch<React.SetStateAction<number>>;
   setActiveTool: React.Dispatch<React.SetStateAction<ToolType | null>>;
-  setShowToolsPanel: React.Dispatch<React.SetStateAction<boolean>>;
   setRadialMenuPos: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
   setShowRadialMenu: React.Dispatch<React.SetStateAction<boolean>>;
   setShowInventoryModal: React.Dispatch<React.SetStateAction<boolean>>;
@@ -79,7 +78,6 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
     setShowChatPanel,
     setUnreadChatCount,
     setActiveTool,
-    setShowToolsPanel,
     setRadialMenuPos,
     setShowRadialMenu,
     setShowInventoryModal,
@@ -386,27 +384,22 @@ export function useKeyboardShortcuts(params: UseKeyboardShortcutsParams) {
         } else if (e.key === '2') {
           e.preventDefault();
           setActiveTool((prev) => (prev === 'dev' ? null : 'dev'));
-          setShowToolsPanel(true);
           return;
         } else if (e.key === '3') {
           e.preventDefault();
           setActiveTool((prev) => (prev === 'brush' ? null : 'brush'));
-          setShowToolsPanel(true);
           return;
         } else if (e.key === '4') {
           e.preventDefault();
           setActiveTool((prev) => (prev === 'material' ? null : 'material'));
-          setShowToolsPanel(true);
           return;
         } else if (e.key === '5') {
           e.preventDefault();
           setActiveTool((prev) => (prev === 'shape' ? null : 'shape'));
-          setShowToolsPanel(true);
           return;
         } else if (e.key === '6') {
           e.preventDefault();
           setActiveTool((prev) => (prev === 'light' ? null : 'light'));
-          setShowToolsPanel(true);
           return;
         } else if (e.key === '7') {
           e.preventDefault();

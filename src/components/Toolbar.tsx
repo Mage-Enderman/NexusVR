@@ -127,13 +127,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
           </button>
         </Tooltip>
 
-        <Tooltip text="World Tools">
+        <Tooltip text={activeTool ? `Equipped: ${activeTool.toUpperCase()} (Click to Unequip)` : "Equip Dev Tool (Key 2)"}>
           <button
             onClick={onOpenTools}
-            className={`btn btn-glass text-xs py-2 px-3 ${activeTool ? 'bg-amber-500/20 border-amber-500/50 text-amber-300' : ''}`}
+            className={`btn btn-glass text-xs py-2 px-3 ${activeTool ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300' : ''}`}
           >
-            <Wrench className="w-4 h-4 text-[#ffd700]" />
-            <span className="hidden md:inline">Tools</span>
+            <Wrench className="w-4 h-4 text-cyan-400" />
+            <span className="hidden md:inline">{activeTool ? activeTool.toUpperCase() : 'Dev Tool'}</span>
           </button>
         </Tooltip>
 

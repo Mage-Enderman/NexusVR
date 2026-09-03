@@ -51,6 +51,7 @@ export interface AssetSpawnData {
   isPersistent?: boolean;
   materialState?: MaterialUpdate | MaterialUpdate[] | Record<string, MaterialUpdate>;
   videoAspectRatio?: '16:9' | '9:16' | '1:1' | 'auto';
+  imageDisplayMode?: '2d-plane' | 'billboard' | 'panel' | 'panorama-360' | 'skybox';
   subtitlesData?: string;
   subtitlesEnabled?: boolean;
   /** Compact playback snapshot (host's playhead at snapshot time) so
@@ -1383,7 +1384,11 @@ export class NetworkService {
     if (type === 'spawn' && payload && typeof payload === 'object') {
       const pd = payload as AssetSpawnData;
       const hostedFile = this.hostedAssets.get(pd.id);
-      if (pd.type === 'video' || pd.type === 'audio' || hostedFile !== undefined) {
+      const isOversizedImage = pd.type === 'image' && (hostedFile !== undefined || (pd.fileData instanceof ArrayBuffer && pd.fileData.byteLength > 256 * 1024));
+      if (pd.type === 'video' || pd.type === 'audio' || isOversizedImage || hostedFile !== undefined) {
+        if (hostedFile === undefined && pd.fileData instanceof ArrayBuffer) {
+          this.hostedAssets.set(pd.id, pd.fileData);
+        }
         const size = hostedFile instanceof File || hostedFile instanceof Blob
           ? hostedFile.size
           : hostedFile instanceof ArrayBuffer
@@ -1543,15 +1548,18 @@ export class NetworkService {
 
     // Handle compressed envelopes (from CompressionService)
     if (raw && typeof raw === 'object' && (raw as any).type === '__compressed') {
-      const cp = (raw as any).payload as { type: string; data: number[] };
+      const cp = (raw as any).payload as { type: string; data: number[] | string };
       if (cp && cp.type && cp.data) {
-        const decompressed = CompressionService.decompress(new Uint8Array(cp.data), true);
+        const u8 = typeof cp.data === 'string'
+          ? new Uint8Array(base64ToArrayBuffer(cp.data))
+          : new Uint8Array(cp.data);
+        const decompressed = CompressionService.decompress(u8, true);
         try {
           const parsed = JSON.parse(decompressed);
           const env2 = this.parseEnvelope(parsed);
           if (env2) {
             this.lastSeenPeers.set(fromPeerId, Date.now());
-            NetworkProfiler.recordReceive(env2.type, cp.data.length);
+            NetworkProfiler.recordReceive(env2.type, typeof cp.data === 'string' ? cp.data.length : cp.data.length);
             try {
               this.dispatchEnvelope(env2, fromPeerId);
             } catch (err) {
@@ -1779,8 +1787,8 @@ export class NetworkService {
         if (needsCompression) {
           const { data, compressed } = CompressionService.compress(jsonStr);
           if (compressed) {
-            // Send as compressed envelope
-            conn.send({ type: '__compressed', payload: { type: env.type, data: Array.from(data as Uint8Array) } });
+            // Send as compressed envelope with base64 string (avoids allocating millions of JS numbers)
+            conn.send({ type: '__compressed', payload: { type: env.type, data: uint8ArrayToBase64(data as Uint8Array) } });
             return;
           }
         }
@@ -2649,19 +2657,23 @@ const MAX_INLINED_FILE_BYTES = 15 * 1024 * 1024; // 15 MB
  *      `String.fromCharCode.apply(null, Array.from(view))` for the chunk
  *      → Latin-1 string conversion and stay on the fast path.
  */
-function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
+function uint8ArrayToBase64(bytes: Uint8Array): string {
   const CHUNK = 0x6000; // 24 KB per btoa invocation (multiple of 3)
   let b64 = '';
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    const view = bytes.subarray(i, i + CHUNK);
-    const binary = String.fromCharCode.apply(
-      null,
-      Array.from(view) as unknown as number[]
-    );
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i += CHUNK) {
+    const end = Math.min(i + CHUNK, len);
+    let binary = '';
+    for (let j = i; j < end; j++) {
+      binary += String.fromCharCode(bytes[j]);
+    }
     b64 += btoa(binary);
   }
   return b64;
+}
+
+function arrayBufferToBase64(buf: ArrayBufferLike): string {
+  return uint8ArrayToBase64(new Uint8Array(buf));
 }
 
 function base64ToArrayBuffer(b64: string): ArrayBuffer {

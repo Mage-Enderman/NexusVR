@@ -14,6 +14,9 @@ export interface ComputedArcSlice extends ContextMenuItemDef {
   endDeg: number;
 }
 
+export type ToolType = 'dev' | 'material' | 'light' | 'shape' | 'brush';
+export type RadialTab = 'general' | 'grab' | 'held' | 'light' | 'dev' | 'material' | 'shape' | 'brush';
+
 export interface ContextMenuContext {
   locomotionMode: 'walk' | 'flight' | 'noclip';
   scalingEnabled: boolean;
@@ -30,6 +33,7 @@ export interface ContextMenuContext {
   gizmoMode?: 'translate' | 'rotate' | 'scale';
   gizmoSpace?: 'local' | 'world';
   collisionEnabled?: boolean;
+  isDrawingActive?: boolean;
   // Actions
   onUndo?: () => void;
   onRedo?: () => void;
@@ -57,6 +61,13 @@ export interface ContextMenuContext {
   onToggleCollision?: () => void;
   allowedLocomotions?: Array<'walk' | 'flight' | 'noclip'>;
   onSetLocomotionMode?: (mode: 'walk' | 'flight' | 'noclip') => void;
+  onToggleWireframe?: () => void;
+  onSampleMaterial?: () => void;
+  onApplyMaterialColor?: (color: string) => void;
+  onToggleDrawing?: () => void;
+  onClearStrokes?: () => void;
+  brushColor?: string;
+  onChangeBrushColor?: (color: string) => void;
 }
 
 /**
@@ -118,7 +129,7 @@ export function computeArcSlices(items: ContextMenuItemDef[], separationDeg = 6)
  */
 export function buildActiveMenuItems(
   context: ContextMenuContext,
-  activeTab: 'general' | 'grab' | 'held' | 'light' | 'dev' = 'general'
+  activeTab: RadialTab = 'general'
 ): ContextMenuItemDef[] {
   // 1. Dev Tool override (Resonite Dev Tool equipped)
   if (context.activeTool === 'dev' || activeTab === 'dev') {
@@ -186,6 +197,24 @@ export function buildActiveMenuItems(
             closeOnClick: true,
           },
           {
+            id: 'spawn_cone',
+            label: 'Cone',
+            subLabel: 'Primitive',
+            color: '#00f0ff',
+            icon: 'cone',
+            action: () => context.onSpawnPrimitive?.('cone'),
+            closeOnClick: true,
+          },
+          {
+            id: 'spawn_torus',
+            label: 'Torus',
+            subLabel: 'Primitive',
+            color: '#00f0ff',
+            icon: 'torus',
+            action: () => context.onSpawnPrimitive?.('torus'),
+            closeOnClick: true,
+          },
+          {
             id: 'spawn_plane',
             label: 'Plane',
             subLabel: 'Primitive',
@@ -212,6 +241,15 @@ export function buildActiveMenuItems(
             action: () => context.onSpawnSpotLight?.(),
             closeOnClick: true,
           },
+          {
+            id: 'spawn_sun_light',
+            label: 'Sun Light',
+            subLabel: 'Light',
+            color: '#ffffff',
+            icon: 'sun',
+            action: () => context.onSpawnSunLight?.(),
+            closeOnClick: true,
+          },
         ],
       },
       {
@@ -222,6 +260,15 @@ export function buildActiveMenuItems(
         icon: 'inspector',
         action: context.onOpenInspector,
         closeOnClick: true,
+      },
+      {
+        id: 'wireframe',
+        label: 'Wireframe',
+        subLabel: 'Toggle Shading',
+        color: '#38bdf8',
+        icon: 'wireframe',
+        action: context.onToggleWireframe,
+        closeOnClick: false,
       },
       {
         id: 'gizmo',
@@ -317,7 +364,232 @@ export function buildActiveMenuItems(
     ];
   }
 
-  // 2. Tool overrides (e.g. Light Tool)
+  // 2. Material Tool override
+  if (context.activeTool === 'material' || activeTab === 'material') {
+    return [
+      {
+        id: 'inspector',
+        label: 'Material Editor',
+        subLabel: 'Open Inspector',
+        color: '#a855f7',
+        icon: 'inspector',
+        action: context.onOpenInspector,
+        closeOnClick: true,
+      },
+      {
+        id: 'sample',
+        label: 'Sample Target',
+        subLabel: 'Extract Material',
+        color: '#06b6d4',
+        icon: 'palette',
+        action: context.onSampleMaterial,
+        closeOnClick: true,
+      },
+      {
+        id: 'wireframe',
+        label: 'Wireframe',
+        subLabel: 'Toggle Shading',
+        color: '#38bdf8',
+        icon: 'wireframe',
+        action: context.onToggleWireframe,
+        closeOnClick: false,
+      },
+      {
+        id: 'swatch_cyan',
+        label: 'Neon Cyan',
+        subLabel: 'Apply Swatch',
+        color: '#00f0ff',
+        icon: 'palette',
+        action: () => context.onApplyMaterialColor?.('#00f0ff'),
+        closeOnClick: true,
+      },
+      {
+        id: 'swatch_gold',
+        label: 'Polished Gold',
+        subLabel: 'Apply Swatch',
+        color: '#ffd700',
+        icon: 'palette',
+        action: () => context.onApplyMaterialColor?.('#ffd700'),
+        closeOnClick: true,
+      },
+      {
+        id: 'swatch_purple',
+        label: 'Cyber Purple',
+        subLabel: 'Apply Swatch',
+        color: '#a855f7',
+        icon: 'palette',
+        action: () => context.onApplyMaterialColor?.('#a855f7'),
+        closeOnClick: true,
+      },
+      {
+        id: 'undo',
+        label: 'Undo',
+        subLabel: 'Last Action',
+        color: '#ef4444',
+        icon: 'undo',
+        action: context.onUndo,
+        closeOnClick: true,
+      },
+      {
+        id: 'unequip',
+        label: 'Dequip',
+        subLabel: 'Unequip Tool',
+        color: '#f8fafc',
+        icon: 'unequip',
+        action: context.onUnequipTool,
+        closeOnClick: true,
+      },
+    ];
+  }
+
+  // 3. Shape Tool override
+  if (context.activeTool === 'shape' || activeTab === 'shape') {
+    return [
+      {
+        id: 'spawn_cube',
+        label: 'Cube',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'cube',
+        action: () => context.onSpawnPrimitive?.('cube'),
+        closeOnClick: true,
+      },
+      {
+        id: 'spawn_sphere',
+        label: 'Sphere',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'sphere',
+        action: () => context.onSpawnPrimitive?.('sphere'),
+        closeOnClick: true,
+      },
+      {
+        id: 'spawn_cylinder',
+        label: 'Cylinder',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'cylinder',
+        action: () => context.onSpawnPrimitive?.('cylinder'),
+        closeOnClick: true,
+      },
+      {
+        id: 'spawn_cone',
+        label: 'Cone',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'cone',
+        action: () => context.onSpawnPrimitive?.('cone'),
+        closeOnClick: true,
+      },
+      {
+        id: 'spawn_torus',
+        label: 'Torus',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'torus',
+        action: () => context.onSpawnPrimitive?.('torus'),
+        closeOnClick: true,
+      },
+      {
+        id: 'spawn_plane',
+        label: 'Plane',
+        subLabel: 'Primitive',
+        color: '#00f0ff',
+        icon: 'plane',
+        action: () => context.onSpawnPrimitive?.('plane'),
+        closeOnClick: true,
+      },
+      {
+        id: 'undo',
+        label: 'Undo',
+        subLabel: 'Last Action',
+        color: '#ef4444',
+        icon: 'undo',
+        action: context.onUndo,
+        closeOnClick: true,
+      },
+      {
+        id: 'unequip',
+        label: 'Dequip',
+        subLabel: 'Unequip Tool',
+        color: '#f8fafc',
+        icon: 'unequip',
+        action: context.onUnequipTool,
+        closeOnClick: true,
+      },
+    ];
+  }
+
+  // 4. Brush Tool override
+  if (context.activeTool === 'brush' || activeTab === 'brush') {
+    return [
+      {
+        id: 'toggle_draw',
+        label: context.isDrawingActive ? 'Stop Draw' : 'Start Draw',
+        subLabel: '3D Ribbon',
+        color: context.isDrawingActive ? '#ef4444' : '#ec4899',
+        icon: 'brush',
+        action: context.onToggleDrawing,
+        closeOnClick: false,
+      },
+      {
+        id: 'clear_strokes',
+        label: 'Clear All',
+        subLabel: 'Erase Ribbon',
+        color: '#f43f5e',
+        icon: 'trash',
+        action: context.onClearStrokes,
+        closeOnClick: true,
+      },
+      {
+        id: 'brush_cyan',
+        label: 'Cyan Ribbon',
+        subLabel: 'Brush Color',
+        color: '#00f0ff',
+        icon: 'palette',
+        action: () => context.onChangeBrushColor?.('#00f0ff'),
+        closeOnClick: false,
+      },
+      {
+        id: 'brush_pink',
+        label: 'Neon Pink',
+        subLabel: 'Brush Color',
+        color: '#ec4899',
+        icon: 'palette',
+        action: () => context.onChangeBrushColor?.('#ec4899'),
+        closeOnClick: false,
+      },
+      {
+        id: 'brush_gold',
+        label: 'Gold Ribbon',
+        subLabel: 'Brush Color',
+        color: '#ffd700',
+        icon: 'palette',
+        action: () => context.onChangeBrushColor?.('#ffd700'),
+        closeOnClick: false,
+      },
+      {
+        id: 'undo',
+        label: 'Undo',
+        subLabel: 'Last Action',
+        color: '#ef4444',
+        icon: 'undo',
+        action: context.onUndo,
+        closeOnClick: true,
+      },
+      {
+        id: 'unequip',
+        label: 'Dequip',
+        subLabel: 'Unequip Tool',
+        color: '#f8fafc',
+        icon: 'unequip',
+        action: context.onUnequipTool,
+        closeOnClick: true,
+      },
+    ];
+  }
+
+  // 5. Light Tool override
   if (context.activeTool === 'light' || activeTab === 'light') {
     return [
       {

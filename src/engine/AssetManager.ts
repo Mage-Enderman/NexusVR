@@ -672,6 +672,7 @@ export class AssetManager {
       if (!response.ok) {
         throw new Error(`Failed to fetch URL: ${url} (${response.status} ${response.statusText})`);
       }
+      const contentType = response.headers.get('content-type') || '';
       const contentLength = response.headers.get('content-length');
       const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
       let arrayBuffer: ArrayBuffer;
@@ -747,8 +748,8 @@ export class AssetManager {
         asset = await this.loadOBJ(id, name, blobUrl, arrayBuffer, position, config, onProgress);
       } else if (['fbx'].includes(ext)) {
         asset = await this.loadFBX(id, name, blobUrl, arrayBuffer, position, config, onProgress);
-      } else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
-                // textureLoader.load's onProgress covers the decode phase 50-95%.
+      } else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'jfif'].includes(ext) || contentType.startsWith('image/')) {
+        // textureLoader.load's onProgress covers the decode phase 50-95%.
         if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
         asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
       } else if (['mp4', 'webm', 'mov'].includes(ext)) {
@@ -1021,15 +1022,25 @@ export class AssetManager {
   }
 
   public static async optimizeImageBuffer(buffer: ArrayBuffer, mimeType: string): Promise<ArrayBuffer> {
-    // If small (< 1 MB), keep as-is unless dimensions are huge
-    if (buffer.byteLength < 1024 * 1024) return buffer;
+    // If small (< 2 MB) or animated GIF/SVG, keep as-is
+    if (buffer.byteLength < 2 * 1024 * 1024) return buffer;
+    if (mimeType.includes('gif') || mimeType.includes('svg')) return buffer;
     try {
       const blob = new Blob([buffer], { type: mimeType });
       const url = URL.createObjectURL(blob);
       const img = new Image();
       await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Failed to load image for optimization'));
+        const timeout = setTimeout(() => {
+          reject(new Error('Image optimization timed out'));
+        }, 1500);
+        img.onload = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+        img.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error('Failed to load image for optimization'));
+        };
         img.src = url;
       });
       URL.revokeObjectURL(url);
@@ -1108,13 +1119,15 @@ export class AssetManager {
         }
 
         if (config?.imageDisplayMode === 'billboard') {
-          const aspect = texture.image.width / texture.image.height || 1;
-          const width = Math.min(2.5, aspect * 2);
+          const aspect = texture.image ? (texture.image.width / texture.image.height || 1) : 1;
+          const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
           const height = width / aspect;
+
           const spriteMat = new THREE.SpriteMaterial({ map: texture });
           const sprite = new THREE.Sprite(spriteMat);
           sprite.scale.set(width, height, 1);
           group.add(sprite);
+
           resolve({
             id,
             name,
@@ -1127,14 +1140,26 @@ export class AssetManager {
           return;
         }
 
-        if (config?.imageDisplayMode === '2d-plane') {
-          const aspect = texture.image.width / texture.image.height || 1;
-          const width = Math.min(2.5, aspect * 2);
+        const displayMode = config?.imageDisplayMode || '2d-plane';
+        if (displayMode === '2d-plane') {
+          const imgWidth = (texture.image && texture.image.width) ? texture.image.width : 1024;
+          const imgHeight = (texture.image && texture.image.height) ? texture.image.height : 1024;
+          const aspect = imgWidth / imgHeight || 1;
+          const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
           const height = width / aspect;
 
           const imgGeo = new THREE.PlaneGeometry(width, height);
-          const imgMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+          const imgMat = new THREE.MeshBasicMaterial({
+            map: texture,
+            side: THREE.DoubleSide,
+            transparent: true,
+            alphaTest: 0.01,
+          });
           const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+          imgMesh.name = `${name} (Mesh)`;
+          imgMesh.castShadow = true;
+          imgMesh.receiveShadow = true;
+          group.name = name;
           group.add(imgMesh);
 
           if (this.camera) {
@@ -1145,6 +1170,16 @@ export class AssetManager {
               group.rotation.y = Math.atan2(dx, dz);
             }
           }
+
+          group.userData.grabbable = {
+            enabled: true,
+            scalable: true,
+            allowSteal: true,
+            grabPriority: 0,
+            editModeOnly: false,
+            destroyOnRelease: false,
+          };
+          group.userData.is2DImage = true;
 
           resolve({
             id,
@@ -1158,9 +1193,11 @@ export class AssetManager {
           return;
         }
 
-        // Default: 3D Panel
-        const aspect = texture.image.width / texture.image.height || 1;
-        const width = Math.min(2.5, aspect * 2);
+        // Default / Explicit Panel mode
+        const imgWidth = (texture.image && texture.image.width) ? texture.image.width : 1024;
+        const imgHeight = (texture.image && texture.image.height) ? texture.image.height : 1024;
+        const aspect = imgWidth / imgHeight || 1;
+        const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
         const height = width / aspect;
 
         const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.05);
@@ -1173,6 +1210,7 @@ export class AssetManager {
         const imgMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
         const imgMesh = new THREE.Mesh(imgGeo, imgMat);
         imgMesh.position.z = 0.028;
+        group.name = name;
         group.add(imgMesh);
 
         if (this.camera) {
@@ -1183,6 +1221,15 @@ export class AssetManager {
             group.rotation.y = Math.atan2(dx, dz);
           }
         }
+
+        group.userData.grabbable = {
+          enabled: true,
+          scalable: true,
+          allowSteal: true,
+          grabPriority: 0,
+          editModeOnly: false,
+          destroyOnRelease: false,
+        };
 
         resolve({
           id,
@@ -1196,7 +1243,6 @@ export class AssetManager {
       }, undefined, reject);
     });
   }
-
 
   /**
    * Draw a video frame to canvas with rotation compensation.

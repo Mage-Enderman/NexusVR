@@ -252,29 +252,8 @@ export class SpatialPanelManager {
       group.rotation.set(0, 0, 0);
     } else {
       scene.add(group);
-      if (parent) {
-        // Separate though linked object: placed near the inspected object in world space,
-        // never parented to it so transformations/scaling don't affect the inspector.
-        const parentPos = new THREE.Vector3();
-        parent.getWorldPosition(parentPos);
-        const camPos = new THREE.Vector3();
-        camera.getWorldPosition(camPos);
-
-        const dirToCam = new THREE.Vector3().subVectors(camPos, parentPos);
-        dirToCam.y = 0;
-        if (dirToCam.lengthSq() > 0.0001) dirToCam.normalize();
-        else dirToCam.set(0, 0, 1);
-
-        group.position.copy(parentPos).addScaledVector(dirToCam, 0.95);
-        group.position.y = Math.max(1.0, parentPos.y);
-
-        // Orient to face camera horizontally
-        const yaw = Math.atan2(dirToCam.x, dirToCam.z);
-        group.rotation.set(0, yaw, 0);
-      } else {
-        // Floating case — use camera-relative placement as before.
-        this._placeInFrontOfCamera(group, camera);
-      }
+      // Floating panels (inspectors, import dialog, dash menu, etc.) spawn in front of the camera
+      this._placeInFrontOfCamera(group, camera);
 
       if (anchorOffset) {
         group.position.add(anchorOffset);
@@ -909,8 +888,28 @@ export class SpatialPanelManager {
     if (camDir.lengthSq() < 0.0001) camDir.set(0, 0, -1);
     camDir.normalize();
 
-    group.position.copy(camPos).addScaledVector(camDir, 1.8);
-    group.position.y = Math.max(1.0, camPos.y);
+    const basePos = camPos.clone().addScaledVector(camDir, 1.8);
+    basePos.y = Math.max(1.0, camPos.y);
+
+    // If another visible floating panel is already sitting right here (within 0.35m),
+    // cascade slightly to the right and down so multiple windows don't perfectly overlap.
+    const camRight = new THREE.Vector3().crossVectors(camDir, new THREE.Vector3(0, 1, 0)).normalize();
+    let overlapCount = 0;
+    for (const [, otherEntry] of this.panels) {
+      if (otherEntry.group !== group && otherEntry.visible && !otherEntry.group.userData.spatialPanelParent) {
+        if (otherEntry.group.position.distanceTo(basePos) < 0.35) {
+          overlapCount++;
+        }
+      }
+    }
+
+    if (overlapCount > 0) {
+      const step = ((overlapCount - 1) % 4) + 1;
+      basePos.addScaledVector(camRight, step * 0.22);
+      basePos.y -= step * 0.08;
+    }
+
+    group.position.copy(basePos);
 
     // Face toward camera (rotate 180° because the CSS3DObject's front face
     // points in -Z by default in CSS3DRenderer)
