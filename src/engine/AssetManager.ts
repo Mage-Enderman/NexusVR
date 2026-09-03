@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GifReader } from 'omggif';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
@@ -180,6 +181,7 @@ export class AssetManager {
   private pendingLiveStreams: Map<string, MediaStream> = new Map();
   private videoTickCallbacks: Map<string, () => void> = new Map();
   private audioTickCallbacks: Map<string, () => void> = new Map();
+  private animatedImageTickCallbacks: Map<string, (delta: number) => void> = new Map();
   private onAssetAddedCallbacks: Set<(asset: LoadedAsset) => void> = new Set();
   private onAssetRemovedCallbacks: Set<(id: string) => void> = new Set();
   private onVideoPlaybackChangedCallbacks: Set<(id: string) => void> = new Set();
@@ -280,6 +282,11 @@ export class AssetManager {
     if (this.videoTickCallbacks.size > 0) {
       for (const cb of this.videoTickCallbacks.values()) {
         try { cb(); } catch { /* ignore */ }
+      }
+    }
+    if (this.animatedImageTickCallbacks.size > 0) {
+      for (const cb of this.animatedImageTickCallbacks.values()) {
+        try { cb(_delta); } catch { /* ignore */ }
       }
     }
   }
@@ -564,10 +571,37 @@ export class AssetManager {
       // 50-95% phase has room to grow.
       if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
       const mimeType = file.type || `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}`;
-      const optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, mimeType);
-      const isConvertedToWebP = optBuf !== arrayBuffer;
-      const optUrl = isConvertedToWebP ? URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' })) : blobUrl;
-      asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
+
+      // 1. Check for animated GIF first (full transparency + frame animation via omggif)
+      if (ext === 'gif' || mimeType === 'image/gif') {
+        const animatedGif = await this.loadAnimatedGif(id, file.name, arrayBuffer!, position, config);
+        if (animatedGif) {
+          asset = animatedGif;
+        }
+      }
+
+      // 2. Check for animated WebP / APNG via WebCodecs ImageDecoder
+      if (!asset && (ext === 'webp' || ext === 'png' || ext === 'apng') && typeof ImageDecoder !== 'undefined') {
+        const animatedImage = await this.loadAnimatedImageDecoder(id, file.name, arrayBuffer!, mimeType, position, config);
+        if (animatedImage) {
+          asset = animatedImage;
+        }
+      }
+
+      // 3. Static image fallback
+      if (!asset) {
+        let optBuf = arrayBuffer!;
+        if (!ext.includes('gif') && !ext.includes('svg') && !mimeType.includes('gif') && !mimeType.includes('svg') && arrayBuffer!.byteLength > 2 * 1024 * 1024) {
+          try {
+            optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, mimeType);
+          } catch {
+            optBuf = arrayBuffer!;
+          }
+        }
+        const isConvertedToWebP = optBuf !== arrayBuffer;
+        const optUrl = isConvertedToWebP ? URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' })) : blobUrl;
+        asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
+      }
     } else if (isVideoExt) {
       // Phase 2 + tier-aware VRAM cap: blob: URL plumbing. We hand
       // the File/Blob directly to loadVideo, which sets
@@ -751,7 +785,28 @@ export class AssetManager {
       } else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'jfif'].includes(ext) || contentType.startsWith('image/')) {
         // textureLoader.load's onProgress covers the decode phase 50-95%.
         if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
-        asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+        const mimeType = contentType.split(';')[0].trim() || `image/${ext === 'jpg' ? 'jpeg' : ext || 'png'}`;
+
+        // 1. Check for animated GIF first
+        if (ext === 'gif' || mimeType === 'image/gif') {
+          const animatedGif = await this.loadAnimatedGif(id, name, arrayBuffer, position, config);
+          if (animatedGif) {
+            asset = animatedGif;
+          }
+        }
+
+        // 2. Check for animated WebP / APNG
+        if (!asset && (ext === 'webp' || ext === 'png' || ext === 'apng') && typeof ImageDecoder !== 'undefined') {
+          const animatedImage = await this.loadAnimatedImageDecoder(id, name, arrayBuffer, mimeType, position, config);
+          if (animatedImage) {
+            asset = animatedImage;
+          }
+        }
+
+        // 3. Static image fallback
+        if (!asset) {
+          asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
+        }
       } else if (['mp4', 'webm', 'mov'].includes(ext)) {
         // Phase 2: blob: URL plumbing — same disabled-MSE note as
         // _loadFile above. Future re-enablement of the chunked-MSE
@@ -1242,6 +1297,254 @@ export class AssetManager {
         });
       }, undefined, reject);
     });
+  }
+
+  private async loadAnimatedGif(
+    id: string,
+    name: string,
+    buffer: ArrayBuffer,
+    pos: THREE.Vector3,
+    config?: Partial<ImportConfig>
+  ): Promise<LoadedAsset | null> {
+    try {
+      const u8 = new Uint8Array(buffer);
+      const reader = new (GifReader as any)(u8);
+      const numFrames = reader.numFrames();
+      if (numFrames <= 1) return null;
+
+      const width = reader.width;
+      const height = reader.height;
+      const frames: { imageData: ImageData; delayMs: number }[] = [];
+      const currentPixels = new Uint8ClampedArray(width * height * 4);
+
+      for (let i = 0; i < numFrames; i++) {
+        const info = reader.frameInfo(i);
+        const snapshot = info.disposal === 3 ? new Uint8ClampedArray(currentPixels) : null;
+
+        reader.decodeAndBlitFrameRGBA(i, currentPixels as unknown as number[]);
+
+        const frameData = new ImageData(new Uint8ClampedArray(currentPixels), width, height);
+        const delayMs = Math.max(20, (info.delay && info.delay > 1 ? info.delay : 10) * 10);
+        frames.push({ imageData: frameData, delayMs });
+
+        if (info.disposal === 2) {
+          for (let row = 0; row < info.height; row++) {
+            const start = ((info.y + row) * width + info.x) * 4;
+            const end = start + info.width * 4;
+            currentPixels.fill(0, start, end);
+          }
+        } else if (info.disposal === 3 && snapshot) {
+          currentPixels.set(snapshot);
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+      ctx.putImageData(frames[0].imageData, 0, 0);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = config?.textureFiltering === 'pixel-art' ? THREE.NearestFilter : THREE.LinearFilter;
+      texture.magFilter = config?.textureFiltering === 'pixel-art' ? THREE.NearestFilter : THREE.LinearFilter;
+      texture.generateMipmaps = false;
+
+      let currentFrame = 0;
+      let timeAccumulator = 0;
+
+      const tick = (delta: number) => {
+        timeAccumulator += delta * 1000;
+        const delay = frames[currentFrame].delayMs;
+        if (timeAccumulator >= delay) {
+          timeAccumulator = timeAccumulator % delay;
+          currentFrame = (currentFrame + 1) % frames.length;
+          ctx.putImageData(frames[currentFrame].imageData, 0, 0);
+          texture.needsUpdate = true;
+        }
+      };
+
+      this.animatedImageTickCallbacks.set(id, tick);
+
+      const aspect = width / height || 1;
+      const quadWidth = Math.min(2.5, Math.max(0.6, aspect * 1.5));
+      const quadHeight = quadWidth / aspect;
+
+      const group = new THREE.Group();
+      group.name = name;
+      group.position.copy(pos);
+
+      const imgGeo = new THREE.PlaneGeometry(quadWidth, quadHeight);
+      const imgMat = new THREE.MeshBasicMaterial({
+        map: texture,
+        side: THREE.DoubleSide,
+        transparent: true,
+        alphaTest: 0.001,
+      });
+      const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+      imgMesh.name = `${name} (Mesh)`;
+      imgMesh.castShadow = true;
+      imgMesh.receiveShadow = true;
+      group.add(imgMesh);
+
+      if (this.camera) {
+        const camPos = this.camera.position;
+        const dx = camPos.x - pos.x;
+        const dz = camPos.z - pos.z;
+        if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+          group.rotation.y = Math.atan2(dx, dz);
+        }
+      }
+
+      group.userData.grabbable = {
+        enabled: true,
+        scalable: true,
+        allowSteal: true,
+        grabPriority: 0,
+        editModeOnly: false,
+        destroyOnRelease: false,
+      };
+      group.userData.is2DImage = true;
+      group.userData.isAnimatedImage = true;
+      group.userData.dispose = () => {
+        this.animatedImageTickCallbacks.delete(id);
+        texture.dispose();
+      };
+
+      return {
+        id,
+        name,
+        type: 'image',
+        object3d: group,
+        url: URL.createObjectURL(new Blob([buffer], { type: 'image/gif' })),
+        fileData: buffer,
+        isCollidable: true,
+      };
+    } catch (err) {
+      console.warn('[AssetManager] Failed to load animated GIF with omggif, fallback to static:', err);
+      return null;
+    }
+  }
+
+  private async loadAnimatedImageDecoder(
+    id: string,
+    name: string,
+    buffer: ArrayBuffer,
+    mimeType: string,
+    pos: THREE.Vector3,
+    config?: Partial<ImportConfig>
+  ): Promise<LoadedAsset | null> {
+    if (typeof ImageDecoder === 'undefined') return null;
+    try {
+      // @ts-ignore WebCodecs ImageDecoder API
+      const decoder = new ImageDecoder({ data: buffer, type: mimeType });
+      await decoder.tracks.ready;
+      const track = decoder.tracks.selectedTrack;
+      if (!track || track.frameCount <= 1) return null;
+
+      const numFrames = track.frameCount;
+      const width = (track as any).displayWidth || (track as any).width || 512;
+      const height = (track as any).displayHeight || (track as any).height || 512;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+
+      const frames: { imageBitmap: ImageBitmap; delayMs: number }[] = [];
+      for (let i = 0; i < numFrames; i++) {
+        const { image } = await decoder.decode({ frameIndex: i });
+        const delayMs = Math.max(20, (image.duration || 100000) / 1000);
+        const bmp = await createImageBitmap(image);
+        image.close();
+        frames.push({ imageBitmap: bmp, delayMs });
+      }
+
+      ctx.drawImage(frames[0].imageBitmap, 0, 0);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = config?.textureFiltering === 'pixel-art' ? THREE.NearestFilter : THREE.LinearFilter;
+      texture.magFilter = config?.textureFiltering === 'pixel-art' ? THREE.NearestFilter : THREE.LinearFilter;
+      texture.generateMipmaps = false;
+
+      let currentFrame = 0;
+      let timeAccumulator = 0;
+
+      const tick = (delta: number) => {
+        timeAccumulator += delta * 1000;
+        const delay = frames[currentFrame].delayMs;
+        if (timeAccumulator >= delay) {
+          timeAccumulator = timeAccumulator % delay;
+          currentFrame = (currentFrame + 1) % frames.length;
+          ctx.clearRect(0, 0, width, height);
+          ctx.drawImage(frames[currentFrame].imageBitmap, 0, 0);
+          texture.needsUpdate = true;
+        }
+      };
+
+      this.animatedImageTickCallbacks.set(id, tick);
+
+      const aspect = width / height || 1;
+      const quadWidth = Math.min(2.5, Math.max(0.6, aspect * 1.5));
+      const quadHeight = quadWidth / aspect;
+
+      const group = new THREE.Group();
+      group.name = name;
+      group.position.copy(pos);
+
+      const imgGeo = new THREE.PlaneGeometry(quadWidth, quadHeight);
+      const imgMat = new THREE.MeshBasicMaterial({
+        map: texture,
+        side: THREE.DoubleSide,
+        transparent: true,
+        alphaTest: 0.001,
+      });
+      const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+      imgMesh.name = `${name} (Mesh)`;
+      imgMesh.castShadow = true;
+      imgMesh.receiveShadow = true;
+      group.add(imgMesh);
+
+      if (this.camera) {
+        const camPos = this.camera.position;
+        const dx = camPos.x - pos.x;
+        const dz = camPos.z - pos.z;
+        if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+          group.rotation.y = Math.atan2(dx, dz);
+        }
+      }
+
+      group.userData.grabbable = {
+        enabled: true,
+        scalable: true,
+        allowSteal: true,
+        grabPriority: 0,
+        editModeOnly: false,
+        destroyOnRelease: false,
+      };
+      group.userData.is2DImage = true;
+      group.userData.isAnimatedImage = true;
+      group.userData.dispose = () => {
+        this.animatedImageTickCallbacks.delete(id);
+        texture.dispose();
+      };
+
+      return {
+        id,
+        name,
+        type: 'image',
+        object3d: group,
+        url: URL.createObjectURL(new Blob([buffer], { type: mimeType })),
+        fileData: buffer,
+        isCollidable: true,
+      };
+    } catch (err) {
+      console.warn('[AssetManager] ImageDecoder animated image path threw, fallback to standard:', err);
+      return null;
+    }
   }
 
   /**

@@ -442,7 +442,6 @@ const videoStreamingServiceRef = useRef<VideoStreamingService>(
     showShareModal ||
     showSettingsModal ||
     showWorldEnvModal ||
-    showImportDialog ||
     showImportModal ||
     showInventoryModal ||
     showDashMenu

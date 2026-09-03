@@ -24,10 +24,6 @@ export function useFileDropPaste({
 
     const handleDrop = (e: DragEvent) => {
       e.preventDefault();
-      // Release pointer lock so user has active cursor to interact with import wizard
-      if (document.pointerLockElement) {
-        document.exitPointerLock?.();
-      }
       if (e.dataTransfer?.files && e.dataTransfer.files[0]) {
         const file = e.dataTransfer.files[0];
         setImportInitialFile(file);
@@ -60,11 +56,6 @@ export function useFileDropPaste({
         plainPasteModeRef.current = false;
         e.preventDefault();
         return;
-      }
-
-      // Release pointer lock so user has active cursor to interact with import wizard
-      if (document.pointerLockElement) {
-        document.exitPointerLock?.();
       }
 
       // 1. Check clipboardData.items for copied image / file data items (e.g. screenshots, copied image bitmaps)
