@@ -14,7 +14,7 @@ import { IdentityService } from './IdentityService.ts';
 import { OwnershipService } from './OwnershipService.ts';
 import { AudioProfileService } from './AudioProfileService.ts';
 
-export type ConnectionMode = 'offline' | 'online' | 'paired';
+export type ConnectionMode = 'offline' | 'online';
 
 export interface ChatMessage {
   id: string;
@@ -567,11 +567,6 @@ export class NetworkService {
       // true if the host claim actually succeeds.
       this.isHost = false;
       this.hostId = `${roomId}-host`;
-    } else if (mode === 'paired') {
-      // Pair mode: roomId IS the other peer's full peer id. We still need
-      // our OWN id to register with the broker before dialing.
-      this.localPeerId = `peer-${Math.random().toString(36).substring(2, 9)}`;
-      this.isHost = false;
     } else {
       return;
     }
@@ -742,9 +737,6 @@ export class NetworkService {
       if (this.mode === 'online' && this.roomId) {
         if (this.localPeerId === `${this.roomId}-host`) return;
         void this.attemptDialHostOrClaim(this.roomId);
-        void this.enableVoiceChat();
-      } else if (this.mode === 'paired' && this.roomId) {
-        this.connectToPeer(this.roomId);
         void this.enableVoiceChat();
       }
     });

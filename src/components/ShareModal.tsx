@@ -1,13 +1,17 @@
-import React, { useState } from 'react';
-import { X, Share2, Smartphone, QrCode, Copy, Check, Users, WifiOff, ArrowRight } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { 
+  X, Share2, Smartphone, Copy, Check, Users, WifiOff, ArrowRight, 
+  RefreshCw, CheckCircle, Wifi
+} from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import type { ConnectionMode } from '../services/NetworkService.ts';
+import { CompanionTunnelService, type TunnelStatus, type DeviceInfo } from '../services/CompanionTunnelService.ts';
 
 interface ShareModalProps {
   currentMode: ConnectionMode;
   currentRoomId: string | null;
   onClose: () => void;
-  onJoinRoom: (roomId: string, mode: ConnectionMode, isCompanion?: boolean) => void;
+  onJoinRoom: (roomId: string, mode: ConnectionMode) => void;
   onDisconnect: () => void;
   initialTab?: 'multiplayer' | 'pairing';
 }
@@ -22,23 +26,43 @@ export const ShareModal: React.FC<ShareModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'multiplayer' | 'pairing'>(initialTab);
   const [customRoomName, setCustomRoomName] = useState('');
-  const [pairingInputCode, setPairingInputCode] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
-  // Generate a random pairing code for PC host
-  const [generatedPairCode] = useState(() => `PAIR-${Math.random().toString(36).substring(2, 6).toUpperCase()}`);
+  // Companion tunnel service state
+  const tunnel = CompanionTunnelService.getInstance();
+  const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus>(tunnel.status);
+  const [pairCode, setPairCode] = useState<string>(tunnel.pairCode);
+  const [companionDevice, setCompanionDevice] = useState<DeviceInfo | null>(tunnel.companionDevice);
+
+  useEffect(() => {
+    // Ensure host is listening when the pairing tab is active
+    if (activeTab === 'pairing' && tunnel.status === 'idle') {
+      tunnel.startHost().then((code) => {
+        setPairCode(code);
+      }).catch(console.warn);
+    }
+
+    const unbind = tunnel.onStatusChange((status, dev) => {
+      setTunnelStatus(status);
+      setPairCode(tunnel.pairCode);
+      setCompanionDevice(dev || null);
+    });
+
+    return () => unbind();
+  }, [activeTab]);
 
   const shareUrl = typeof window !== 'undefined' 
     ? `${window.location.origin}${window.location.pathname}?room=${currentRoomId || ''}`
     : '';
 
-  const pairUrl = typeof window !== 'undefined'
-    ? `${window.location.origin}${window.location.pathname}?pair=${generatedPairCode}`
+  const companionBridgeUrl = typeof window !== 'undefined'
+    ? `${window.location.origin}${window.location.pathname}?bridge=${pairCode}`
     : '';
 
   const handleCreateRandomRoom = () => {
     const randomId = `nexus-${Math.random().toString(36).substring(2, 7)}`;
-    onJoinRoom(randomId, 'online', false);
+    onJoinRoom(randomId, 'online');
     onClose();
   };
 
@@ -46,27 +70,28 @@ export const ShareModal: React.FC<ShareModalProps> = ({
     e.preventDefault();
     if (!customRoomName.trim()) return;
     const cleanId = customRoomName.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-');
-    onJoinRoom(cleanId, 'online', false);
+    onJoinRoom(cleanId, 'online');
     onClose();
   };
 
-  const handleStartPairingHost = () => {
-    onJoinRoom(generatedPairCode, 'paired', false);
-    onClose();
+  const handleRegenerateCode = async () => {
+    try {
+      const nextCode = await tunnel.startHost();
+      setPairCode(nextCode);
+    } catch (e) {
+      console.warn('Failed to regenerate pair code:', e);
+    }
   };
 
-  const handleConnectCompanion = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pairingInputCode.trim()) return;
-    const code = pairingInputCode.trim().toUpperCase();
-    onJoinRoom(code.startsWith('PAIR-') ? code : `PAIR-${code}`, 'paired', true);
-    onClose();
-  };
-
-  const copyToClipboard = (text: string) => {
+  const copyToClipboard = (text: string, type: 'link' | 'code') => {
     navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (type === 'link') {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    } else {
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    }
   };
 
   return (
@@ -80,7 +105,7 @@ export const ShareModal: React.FC<ShareModalProps> = ({
             </div>
             <div>
               <h2 className="text-xl font-bold font-['Outfit'] tracking-wide">Share & Collaborate</h2>
-              <p className="text-xs text-slate-400">Invite peers to your world or pair your mobile/Quest companion.</p>
+              <p className="text-xs text-slate-400">Invite peers to your world or pair your mobile/laptop companion.</p>
             </div>
           </div>
           <button onClick={onClose} className="btn-icon btn-glass hover:text-rose-400">
@@ -124,11 +149,11 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                     className="text-input text-xs py-2 px-3 flex-1 font-mono bg-black/40 text-cyan-200 select-all"
                   />
                   <button
-                    onClick={() => copyToClipboard(shareUrl)}
+                    onClick={() => copyToClipboard(shareUrl, 'link')}
                     className="btn btn-primary text-xs py-2 px-3 shrink-0"
                   >
-                    {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                    <span>{copied ? 'Copied!' : 'Copy Link'}</span>
+                    {copiedLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    <span>{copiedLink ? 'Copied!' : 'Copy Link'}</span>
                   </button>
                 </div>
                 <div className="pt-2 border-t border-white/10 flex justify-end">
@@ -183,55 +208,105 @@ export const ShareModal: React.FC<ShareModalProps> = ({
 
         {/* Pairing Tab */}
         {activeTab === 'pairing' && (
-          <div className="space-y-6 animate-in fade-in duration-200">
-            <div className="glass-card bg-purple-500/10 border-purple-500/30 p-4">
-              <h3 className="text-sm font-bold text-purple-300 flex items-center gap-2">
+          <div className="space-y-5 animate-in fade-in duration-200">
+            <div className="glass-card bg-purple-500/10 border-purple-500/30 p-3.5">
+              <h3 className="text-xs font-bold text-purple-300 flex items-center gap-2">
                 <Smartphone className="w-4 h-4 text-purple-400" />
-                <span>Companion Device Pairing</span>
+                <span>Companion Asset Import Tunnel</span>
               </h3>
-              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                Pair your Oculus Quest or smartphone to your PC session! Assets and models uploaded on your PC will instantly sync to your VR headset without spawning duplicate user avatars.
+              <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                Pair your phone or laptop to feed photos, videos, and 3D models directly into your VR session without singleplayer restrictions!
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-              {/* Host PC Option */}
-              <div className="flex flex-col items-center justify-center p-4 bg-slate-900/80 rounded-2xl border border-white/5 space-y-3 text-center">
-                <span className="text-xs font-bold uppercase tracking-wider text-purple-400">Scan on Quest / Mobile</span>
-                <div className="p-3 bg-white rounded-xl shadow-lg">
-                  <QRCodeCanvas value={pairUrl} size={130} />
-                </div>
-                <div className="font-mono text-base font-bold text-cyan-300 bg-black/50 px-3 py-1 rounded border border-cyan-500/30 select-all">
-                  {generatedPairCode}
+            {/* Connection Status Banner */}
+            {tunnelStatus === 'connected' ? (
+              <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="text-xs font-bold text-emerald-300 block">
+                      Connected: {companionDevice?.name || 'External Device'}
+                    </span>
+                    <span className="text-[10px] text-emerald-400/80">
+                      Ready to feed photos & assets into VR
+                    </span>
+                  </div>
                 </div>
                 <button
-                  onClick={handleStartPairingHost}
-                  className="btn btn-secondary w-full text-xs py-2 bg-gradient-to-r from-purple-600 to-indigo-600"
+                  onClick={() => tunnel.disconnect()}
+                  className="btn btn-glass text-[10px] py-1 px-2.5 text-slate-300 hover:text-rose-400"
                 >
-                  <QrCode className="w-3.5 h-3.5" />
-                  <span>Start Hosting Pairing</span>
+                  Unpair
                 </button>
               </div>
+            ) : (
+              <div className="p-2.5 bg-slate-900/60 border border-white/5 rounded-xl flex items-center gap-2 text-xs text-slate-300">
+                <Wifi className="w-4 h-4 text-cyan-400 animate-pulse shrink-0" />
+                <span>Waiting for companion device to connect...</span>
+              </div>
+            )}
 
-              {/* Client Companion Option */}
-              <form onSubmit={handleConnectCompanion} className="space-y-3 flex flex-col justify-center">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300">Enter Code on Companion</h4>
-                <p className="text-xs text-slate-400">If you are on your Quest or smartphone right now, enter the pairing code displayed on your PC screen:</p>
+            {/* Big Pair Code & QR Section */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center bg-slate-900/80 p-4 rounded-2xl border border-white/5">
+              {/* QR Code */}
+              <div className="flex flex-col items-center justify-center space-y-2 text-center">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400">
+                  Scan QR with Camera
+                </span>
+                <div className="p-2.5 bg-white rounded-xl shadow-lg">
+                  <QRCodeCanvas value={companionBridgeUrl} size={120} />
+                </div>
+              </div>
+
+              {/* Manual Entry Code (Extra Large & Easy to Read in VR) */}
+              <div className="flex flex-col items-center sm:items-start space-y-2.5 text-center sm:text-left">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400">
+                  Or Enter Code Manually
+                </span>
+                <div className="font-mono text-3xl font-extrabold tracking-widest text-[#00f0ff] bg-black/60 px-4 py-2 rounded-xl border border-cyan-500/40 select-all shadow-inner">
+                  {pairCode || '----'}
+                </div>
+                <p className="text-[11px] text-slate-400 leading-snug">
+                  On your phone, open your browser and enter code <strong className="text-cyan-300">{pairCode}</strong>.
+                </p>
+                <div className="flex gap-2 w-full pt-1">
+                  <button
+                    onClick={() => copyToClipboard(pairCode, 'code')}
+                    className="btn btn-glass text-xs py-1.5 px-3 flex-1 flex items-center justify-center gap-1.5 text-cyan-300"
+                  >
+                    {copiedCode ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedCode ? 'Copied' : 'Copy Code'}</span>
+                  </button>
+                  <button
+                    onClick={handleRegenerateCode}
+                    title="Generate New Code"
+                    className="btn btn-glass text-xs py-1.5 px-2 text-slate-400 hover:text-white"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Direct Link Share */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium text-slate-400">Direct Companion Link</label>
+              <div className="flex items-center gap-2">
                 <input
                   type="text"
-                  placeholder="PAIR-XXXX"
-                  value={pairingInputCode}
-                  onChange={(e) => setPairingInputCode(e.target.value)}
-                  className="text-input text-center text-lg font-mono tracking-widest uppercase py-2.5"
+                  readOnly
+                  value={companionBridgeUrl}
+                  className="text-input text-xs py-2 px-3 flex-1 font-mono bg-black/40 text-purple-200 select-all"
                 />
                 <button
-                  type="submit"
-                  className="btn btn-primary w-full py-2.5 text-xs bg-gradient-to-r from-[#00f0ff] to-[#00a8ff] text-black font-bold"
+                  onClick={() => copyToClipboard(companionBridgeUrl, 'link')}
+                  className="btn btn-secondary text-xs py-2 px-3 shrink-0"
                 >
-                  <Smartphone className="w-4 h-4" />
-                  <span>Connect Companion</span>
+                  {copiedLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedLink ? 'Copied' : 'Copy'}</span>
                 </button>
-              </form>
+              </div>
             </div>
           </div>
         )}

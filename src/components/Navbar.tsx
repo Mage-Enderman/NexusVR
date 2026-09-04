@@ -19,6 +19,8 @@ interface NavbarProps {
   onToggleChat: () => void;
   onEnterVR: () => void;
   unreadChatCount: number;
+  companionConnected?: boolean;
+  companionDeviceName?: string;
 }
 
 /**
@@ -50,6 +52,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleChat,
   onEnterVR,
   unreadChatCount,
+  companionConnected,
+  companionDeviceName,
 }) => {
   const [moreOpen, setMoreOpen] = useState(false);
 
@@ -86,10 +90,14 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Users className="w-3.5 h-3.5" /> Room: {roomId || 'Active'} ({peerCount + 1})
             </span>
           )}
-          {mode === 'paired' && (
-            <span className="badge badge-green">
-              <Smartphone className="w-3.5 h-3.5" /> Companion Paired
-            </span>
+          {companionConnected && (
+            <button
+              onClick={onOpenPairing}
+              className="badge badge-green flex items-center gap-1 hover:brightness-125 transition-all cursor-pointer"
+              title="Companion Device Tunneled - Click to view"
+            >
+              <Smartphone className="w-3.5 h-3.5" /> {companionDeviceName || 'Companion'} Paired
+            </button>
           )}
 
           {mode !== 'offline' && isHost && (

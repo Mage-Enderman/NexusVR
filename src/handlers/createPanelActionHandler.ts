@@ -7,6 +7,7 @@ import type { ManipulationManager } from '../engine/ManipulationManager.ts';
 import type { VRHUDManager } from '../engine/VRHUDManager.ts';
 import type { UndoRedoManager } from '../services/UndoRedoManager.ts';
 import type { NetworkService, ConnectionMode } from '../services/NetworkService.ts';
+import { CompanionTunnelService } from '../services/CompanionTunnelService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 
 /**
@@ -159,9 +160,12 @@ export function createPanelActionHandler(
       handleDisconnect();
       return;
     }
-    if (actionId === 'pair:host') {
-      const code = `PAIR-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
-      handleJoinRoom(code, 'paired', false);
+    if (actionId === 'pair:host' || actionId === 'pair:newCode') {
+      CompanionTunnelService.getInstance().startHost().catch(console.warn);
+      return;
+    }
+    if (actionId === 'pair:disconnect') {
+      CompanionTunnelService.getInstance().disconnect();
       return;
     }
     // === VR 3D radial panel actions ===

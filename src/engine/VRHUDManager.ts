@@ -94,6 +94,12 @@ export interface PanelContext {
    * setDataContext stays shared.
    */
   chatMessages: ChatMessage[];
+  /** Companion asset tunnel state for VR display */
+  companionInfo?: {
+    status: 'idle' | 'listening' | 'connected' | 'transferring' | 'error';
+    pairCode: string;
+    deviceName?: string;
+  };
 }
 
 /** Drawer signature. Provided per-panelId by App.tsx or built-in. */
@@ -1532,29 +1538,81 @@ export class VRHUDManager {
     w: number,
     _h: number,
     helper: PanelDrawHelper,
-    _data: PanelContext
+    data: PanelContext
   ): void {
-    const bodyTop = helper.drawStandardChrome('PAIR COMPANION', 'Connect a Quest or mobile device', '#a855f7');
+    const info = data.companionInfo;
+    const isConnected = info?.status === 'connected';
+    const isTransferring = info?.status === 'transferring';
+    const pairCode = info?.pairCode || '----';
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'nexusvr.app';
+    const bridgeUrl = `${origin}/?bridge=${pairCode}`;
 
-    ctx.fillStyle = 'rgba(168,85,247,0.15)';
-    ctx.fillRect(40, bodyTop + 10, w - 80, 110);
-    ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 2;
-    ctx.strokeRect(40, bodyTop + 10, w - 80, 110);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 22px sans-serif';
-    ctx.fillText('PAIRING MODE', 60, bodyTop + 50);
-    ctx.fillStyle = '#c084fc'; ctx.font = '14px sans-serif';
-    ctx.fillText('Open the desktop Pair Companion tab for the live pair', 60, bodyTop + 84);
-    ctx.fillText('code + QR (the live code is generated server-side).', 60, bodyTop + 104);
+    const bodyTop = helper.drawStandardChrome('COMPANION TUNNEL', 'Import photos & assets from phone or laptop', '#00f0ff');
 
-    helper.registerButton({ x: 40, y: bodyTop + 140, w: 320, h: 50 }, 'pair:host');
-    ctx.fillStyle = 'rgba(168,85,247,0.28)'; ctx.fillRect(40, bodyTop + 140, 320, 50);
-    ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 2; ctx.strokeRect(40, bodyTop + 140, 320, 50);
-    ctx.fillStyle = '#c084fc'; ctx.font = 'bold 18px sans-serif';
-    ctx.fillText('START PAIRING HOST', 80, bodyTop + 172);
+    if (isConnected || isTransferring) {
+      // Connected state
+      ctx.fillStyle = isTransferring ? 'rgba(168,85,247,0.18)' : 'rgba(16,185,129,0.15)';
+      ctx.fillRect(40, bodyTop + 10, w - 80, 120);
+      ctx.strokeStyle = isTransferring ? '#c084fc' : '#10b981'; ctx.lineWidth = 2;
+      ctx.strokeRect(40, bodyTop + 10, w - 80, 120);
 
-    ctx.fillStyle = '#94a3b8'; ctx.font = '13px sans-serif';
-    ctx.fillText('Companion devices (Quest / mobile) sync assets and world state', 400, bodyTop + 154);
-    ctx.fillText('without spawning a duplicate user avatar.', 400, bodyTop + 174);
+      ctx.fillStyle = isTransferring ? '#e9d5ff' : '#34d399'; ctx.font = 'bold 22px sans-serif';
+      ctx.fillText(isTransferring ? '📥 RECEIVING ASSET FROM PHONE...' : `🟢 PAIRED: ${info?.deviceName || 'Mobile Device'}`, 60, bodyTop + 45);
+
+      ctx.fillStyle = '#cbd5e1'; ctx.font = '14px sans-serif';
+      ctx.fillText('Take a photo or pick a file on your phone and tap "Send to VR".', 60, bodyTop + 78);
+      ctx.fillText('The 3D Import Wizard will appear in front of you ready to "Run Import".', 60, bodyTop + 102);
+
+      helper.registerButton({ x: 40, y: bodyTop + 150, w: 200, h: 45 }, 'pair:disconnect');
+      ctx.fillStyle = 'rgba(239,68,68,0.2)'; ctx.fillRect(40, bodyTop + 150, 200, 45);
+      ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1.5; ctx.strokeRect(40, bodyTop + 150, 200, 45);
+      ctx.fillStyle = '#f87171'; ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('DISCONNECT', 80, bodyTop + 178);
+
+      helper.registerButton({ x: 260, y: bodyTop + 150, w: 220, h: 45 }, 'pair:newCode');
+      ctx.fillStyle = 'rgba(0,240,255,0.15)'; ctx.fillRect(260, bodyTop + 150, 220, 45);
+      ctx.strokeStyle = '#00f0ff'; ctx.lineWidth = 1.5; ctx.strokeRect(260, bodyTop + 150, 220, 45);
+      ctx.fillStyle = '#38bdf8'; ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('NEW PAIR CODE', 300, bodyTop + 178);
+    } else {
+      // Waiting / Manual Code state - Extra large font for easy reading in VR
+      ctx.fillStyle = 'rgba(15,23,42,0.85)';
+      ctx.fillRect(40, bodyTop + 10, w - 80, 205);
+      ctx.strokeStyle = 'rgba(0,240,255,0.4)'; ctx.lineWidth = 2;
+      ctx.strokeRect(40, bodyTop + 10, w - 80, 205);
+
+      ctx.fillStyle = '#00f0ff'; ctx.font = 'bold 13px sans-serif';
+      ctx.fillText('ENTER THIS CODE ON YOUR PHONE OR LAPTOP:', 60, bodyTop + 38);
+
+      // Large High-Contrast Pair Code Box
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(60, bodyTop + 50, 320, 60);
+      ctx.strokeStyle = '#00f0ff'; ctx.lineWidth = 2;
+      ctx.strokeRect(60, bodyTop + 50, 320, 60);
+      ctx.fillStyle = '#00f0ff'; ctx.font = 'bold 36px monospace';
+      ctx.fillText(pairCode, 100, bodyTop + 94);
+
+      // Quick instructions
+      ctx.fillStyle = '#94a3b8'; ctx.font = '13px sans-serif';
+      ctx.fillText('1. On your phone browser, open:', 410, bodyTop + 60);
+      ctx.fillStyle = '#c084fc'; ctx.font = 'bold 14px monospace';
+      ctx.fillText(bridgeUrl, 410, bodyTop + 82);
+      ctx.fillStyle = '#94a3b8'; ctx.font = '13px sans-serif';
+      ctx.fillText('2. Select photo or model and tap "Send to VR".', 410, bodyTop + 104);
+
+      // Status indicator
+      ctx.fillStyle = 'rgba(0,240,255,0.15)';
+      ctx.fillRect(60, bodyTop + 130, w - 120, 32);
+      ctx.fillStyle = '#38bdf8'; ctx.font = 'bold 13px sans-serif';
+      ctx.fillText('● WAITING FOR DEVICE TO CONNECT...', 80, bodyTop + 151);
+
+      // Action buttons
+      helper.registerButton({ x: 60, y: bodyTop + 172, w: 200, h: 36 }, 'pair:newCode');
+      ctx.fillStyle = 'rgba(168,85,247,0.2)'; ctx.fillRect(60, bodyTop + 172, 200, 36);
+      ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 1; ctx.strokeRect(60, bodyTop + 172, 200, 36);
+      ctx.fillStyle = '#c084fc'; ctx.font = 'bold 13px sans-serif';
+      ctx.fillText('NEW PAIR CODE', 95, bodyTop + 195);
+    }
   }
 
   /** Session panel: read-only status of network, locomotion, slow-walk. */
