@@ -14,7 +14,7 @@ import type { SceneEngine } from '../engine/SceneEngine.ts';
 import type { ManipulationManager } from '../engine/ManipulationManager.ts';
 import type { AvatarManager } from '../engine/AvatarManager.ts';
 import type { NetworkService, AssetSpawnData, PendingSpawnData, MaterialUpdate } from '../services/NetworkService.ts';
-import type { VideoStreamingService } from '../services/VideoStreamingService.ts';
+import type { VideoStreamingService, VideoStreamingHint } from '../services/VideoStreamingService.ts';
 import type { InventoryService, InventoryItem } from '../services/InventoryService.ts';
 import { ROLE_PERMISSIONS } from '../types/permissions.ts';
 import type { UserRole } from '../types/permissions.ts';
@@ -313,6 +313,9 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     try {
       const asset = await assetManager.importFile(file, pos, { videoSyncMode }, placeholderId);
       if (asset) {
+        sceneEngineRef.current?.worldRoot.remove(localEntry.group);
+        localEntry.dispose();
+        pendingAssetsRef.current.delete(placeholderId);
         if (asset.type === 'video') {
           setActiveVideoAssetId(asset.id);
           resetVideoInactivityTimer();
@@ -453,6 +456,16 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
     const displayName = rawName.length > 26 ? rawName.slice(0, 25) + '…' : rawName;
     const assetType: AssetType = guessAssetType((config.file?.name ?? config.url ?? ''));
 
+    if (assetType === 'image') {
+      console.log(`[NexusVR:ImageImport] 🚀 handleImportAssetFromConfig starting: "${displayName}"`, {
+        placeholderId,
+        source: config.file ? 'file' : 'url',
+        fileSize: config.file ? `${(config.file.size / 1024).toFixed(1)} KB` : undefined,
+        url: config.url,
+        config,
+      });
+    }
+
     if (net.mode !== 'offline') {
       const pendingData: PendingSpawnData = {
         id: placeholderId,
@@ -487,6 +500,10 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
       }
 
       if (asset) {
+        sceneEngineRef.current?.worldRoot.remove(localEntry.group);
+        localEntry.dispose();
+        pendingAssetsRef.current.delete(placeholderId);
+
         if (asset.type === 'video') {
           setActiveVideoAssetId(asset.id);
           resetVideoInactivityTimer();
@@ -495,19 +512,37 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
         }
         recordSpawnUndo(asset);
 
+        if (asset.type === 'image') {
+          console.log(`[NexusVR:ImageImport] 🎉 Successfully spawned image "${asset.name}" (id: ${asset.id})`, {
+            type: asset.type,
+            position: [asset.object3d.position.x, asset.object3d.position.y, asset.object3d.position.z],
+            rotation: [asset.object3d.rotation.x, asset.object3d.rotation.y, asset.object3d.rotation.z],
+            scale: [asset.object3d.scale.x, asset.object3d.scale.y, asset.object3d.scale.z],
+            userData: asset.object3d.userData,
+          });
+        }
+
+        let streamingHint: VideoStreamingHint | undefined = undefined;
         if (config.file) {
           net.registerHostedFile(asset.id, config.file);
           if (asset.type === 'video' || asset.type === 'audio') {
             const vss = videoStreamingServiceRef.current;
-            if (vss) {
-              vss.registerHostFile(config.file, asset.id, config.file.type);
+            if (vss && asset.type === 'video') {
+              streamingHint = vss.registerHostFile(config.file, asset.id, config.file.type);
+              if (streamingHint) {
+                (asset.object3d.userData as Record<string, unknown>).streamingHint = streamingHint;
+              }
             }
           }
         }
 
         if (net.mode !== 'offline') {
-          const isP2PNeeded = (!asset.fileData || asset.type === 'image' || (config.file && config.file.size > 256 * 1024)) && Boolean(config.file);
-          const p2pTransferHint = isP2PNeeded ? { id: asset.id, size: config.file!.size } : undefined;
+          const isP2PNeeded = asset.type === 'image' || !asset.fileData || (config.file && config.file.size > 256 * 1024);
+          if (asset.fileData && !net.hasHostedFile(asset.id)) {
+            net.registerHostedFile(asset.id, asset.fileData);
+          }
+          const assetSize = asset.fileData ? asset.fileData.byteLength : (config.file?.size || 0);
+          const p2pTransferHint = isP2PNeeded && assetSize > 0 ? { id: asset.id, size: assetSize } : undefined;
           const vs = asset.object3d.userData?.videoState as Record<string, unknown> | undefined;
           net.broadcastSpawn({
             id: asset.id,
@@ -519,6 +554,9 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             url: asset.url,
             fileData: isP2PNeeded ? undefined : asset.fileData,
             fileDataOversized: isP2PNeeded ? true : undefined,
+            fileSize: config.file?.size,
+            senderPeerId: net.localPeerId,
+            streamingHint,
             p2pTransferHint,
             isCollidable: asset.isCollidable,
             isPersistent: (asset.object3d.userData as Record<string, unknown>)?.isPersistent as boolean | undefined,
@@ -531,6 +569,7 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             videoState: vs ? {
               playing: Boolean(vs.playing),
               currentTime: typeof vs.currentTime === 'number' ? vs.currentTime : 0,
+              duration: typeof vs.duration === 'number' ? vs.duration : 0,
               globalVolume: typeof vs.globalVolume === 'number' ? vs.globalVolume : 0.8,
               flipped: vs.flipped !== false,
             } : undefined,
@@ -538,6 +577,20 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
             audioPlaybackRate: config.audioPlaybackRate,
             importAsRawFile: Boolean(config.importAsRawFile || asset.object3d.userData?.isRaw || asset.type === 'misc'),
           });
+
+          if (asset.type === 'video') {
+            const vss = videoStreamingServiceRef.current;
+            const videoSyncMode = config.videoSyncMode || 'persistent';
+            for (const peerId of net.peers) {
+              if (videoSyncMode === 'watch-party' && asset.videoElement) {
+                vss?.startLiveStreamToPeer(asset.id, asset.videoElement, peerId);
+              } else if (streamingHint) {
+                vss?.beginStreamingToPeer(streamingHint, peerId).catch((err) => {
+                  console.warn('[VideoStreaming] pump failed for', peerId, err);
+                });
+              }
+            }
+          }
         }
 
         if (config.saveToInventory && inventoryServiceRef.current) {
@@ -561,6 +614,9 @@ export function createAssetImportHandlers(deps: AssetImportHandlerDeps) {
       pendingAssetsRef.current.delete(placeholderId);
       if (net.mode !== 'offline') {
         net.broadcastPendingCancel(placeholderId);
+      }
+      if (assetType === 'image') {
+        console.error(`[NexusVR:ImageImport] ❌ Failed to import image "${displayName}":`, err);
       }
       console.warn('[Import] Failed:', err);
       // Surface to user AND rethrow so callers (AssetImportDialog) can keep

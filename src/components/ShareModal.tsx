@@ -3,7 +3,7 @@ import {
   X, Share2, Smartphone, Copy, Check, Users, WifiOff, ArrowRight, 
   RefreshCw, CheckCircle, Wifi
 } from 'lucide-react';
-import { QRCodeCanvas } from 'qrcode.react';
+import { QRCodeSVG } from 'qrcode.react';
 import type { ConnectionMode } from '../services/NetworkService.ts';
 import { CompanionTunnelService, type TunnelStatus, type DeviceInfo } from '../services/CompanionTunnelService.ts';
 
@@ -254,8 +254,20 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                 <span className="text-[10px] font-bold uppercase tracking-wider text-purple-400">
                   Scan QR with Camera
                 </span>
-                <div className="p-2.5 bg-white rounded-xl shadow-lg">
-                  <QRCodeCanvas value={companionBridgeUrl} size={120} />
+                <div className="p-2 bg-white rounded-xl shadow-lg flex items-center justify-center min-w-[144px] min-h-[144px]">
+                  {pairCode ? (
+                    <QRCodeSVG 
+                      value={companionBridgeUrl} 
+                      size={136} 
+                      marginSize={2}
+                      level="M"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center justify-center text-slate-500 gap-1">
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      <span className="text-[9px]">Generating...</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -307,6 +319,11 @@ export const ShareModal: React.FC<ShareModalProps> = ({
                   <span>{copiedLink ? 'Copied' : 'Copy'}</span>
                 </button>
               </div>
+              {typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && (
+                <p className="text-[10px] text-amber-300/80 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5 rounded-lg text-center mt-2">
+                  💡 Local Dev Tip: For mobile cameras scanning QR, ensure phone is on same Wi-Fi and use your PC's LAN IP or enter the 4-character Pair Code manually.
+                </p>
+              )}
             </div>
           </div>
         )}

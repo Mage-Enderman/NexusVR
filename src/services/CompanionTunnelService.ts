@@ -27,8 +27,6 @@ export interface TunnelTransferMeta {
   totalChunks: number;
 }
 
-const CHUNK_SIZE = 48 * 1024; // 48KB chunks — safe for all mobile WebRTC implementations
-
 export function normalizePairCode(rawCode: string): string {
   return rawCode.replace(/^PAIR[-_]?/i, '').replace(/[^A-Za-z0-9]/g, '').toUpperCase().trim();
 }
@@ -159,7 +157,7 @@ export class CompanionTunnelService {
 
     conn.on('open', () => {
       // Send handshake
-      conn.send({
+      this.sendControlMessage({
         type: 'tunnel-hello',
         name: 'NexusVR Host',
         isMobile: false,
@@ -217,7 +215,7 @@ export class CompanionTunnelService {
 
         this.peer.on('open', () => {
           if (!this.peer) return;
-          const conn = this.peer.connect(hostPeerId, { reliable: true });
+          const conn = this.peer.connect(hostPeerId, { reliable: true, serialization: 'raw' });
           this.activeConn = conn;
 
           conn.on('open', () => {
@@ -230,7 +228,7 @@ export class CompanionTunnelService {
               platform: navigator.platform || (isMobile ? 'Mobile' : 'Desktop')
             };
 
-            conn.send({
+            this.sendControlMessage({
               type: 'tunnel-hello',
               ...devInfo
             });
@@ -270,6 +268,15 @@ export class CompanionTunnelService {
   // DATA TRANSMISSION PROTOCOL
   // ──────────────────────────────────────────────────────────────────────────
 
+  private sendControlMessage(msg: Record<string, unknown>): void {
+    if (!this.activeConn || !this.activeConn.open) return;
+    try {
+      this.activeConn.send(JSON.stringify(msg));
+    } catch (err) {
+      console.warn('[Tunnel] Failed to send control message:', err);
+    }
+  }
+
   public async sendFile(file: File, onProgress?: (pct: number) => void): Promise<void> {
     if (!this.activeConn || !this.activeConn.open) {
       throw new Error('Not connected to primary device');
@@ -278,44 +285,74 @@ export class CompanionTunnelService {
     const transferId = `xfer-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const buffer = await file.arrayBuffer();
     const totalBytes = buffer.byteLength;
-    const totalChunks = Math.ceil(totalBytes / CHUNK_SIZE);
+    const CHUNK_PAYLOAD_SIZE = 32 * 1024; // 32 KB raw chunks for maximum WebRTC throughput
+    const totalChunks = Math.ceil(totalBytes / CHUNK_PAYLOAD_SIZE);
+
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    let fileType = file.type;
+    if (!fileType || fileType === 'application/octet-stream') {
+      if (['mp4', 'm4v'].includes(ext)) fileType = 'video/mp4';
+      else if (ext === 'webm') fileType = 'video/webm';
+      else if (ext === 'mov') fileType = 'video/quicktime';
+    }
 
     const meta: TunnelTransferMeta = {
       transferId,
       name: file.name,
       size: file.size,
-      type: file.type || 'application/octet-stream',
+      type: fileType,
       totalChunks
     };
 
-    // Step 1: Send metadata header
-    this.activeConn.send({ type: 'transfer-start', meta });
+    // Step 1: Send metadata header (JSON string)
+    this.sendControlMessage({ type: 'transfer-start', meta });
 
-    // Step 2: Send binary slices with flow control
+    const dcRaw: RTCDataChannel | undefined =
+      (this.activeConn as any)?.dataChannel ||
+      (this.activeConn as any)?._dc ||
+      (this.activeConn as any)?.channel;
+
+    // Step 2: Send binary slices with 12-byte header
     for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, totalBytes);
-      const slice = buffer.slice(start, end);
+      if (!this.activeConn || !this.activeConn.open) {
+        throw new Error('Connection lost during transfer');
+      }
 
-      this.activeConn.send({
-        type: 'transfer-chunk',
-        transferId,
-        index: i,
-        data: slice
-      });
+      // Backpressure wait
+      while (dcRaw && dcRaw.bufferedAmount > 256 * 1024) {
+        await new Promise<void>((r) => setTimeout(r, 10));
+      }
+
+      const start = i * CHUNK_PAYLOAD_SIZE;
+      const end = Math.min(start + CHUNK_PAYLOAD_SIZE, totalBytes);
+      const sliceBytes = new Uint8Array(buffer.slice(start, end));
+
+      // Packet: 12-byte header + sliceBytes
+      // 0..3: magic 'NXVR' (0x4E585652)
+      // 4..7: chunk index (uint32)
+      // 8..11: total chunks (uint32)
+      const packet = new Uint8Array(12 + sliceBytes.byteLength);
+      const view = new DataView(packet.buffer);
+      view.setUint32(0, 0x4E585652, false);
+      view.setUint32(4, i, false);
+      view.setUint32(8, totalChunks, false);
+      packet.set(sliceBytes, 12);
+
+      this.activeConn.send(packet.buffer);
 
       const pct = Math.round(((i + 1) / totalChunks) * 100);
       onProgress?.(pct);
 
-      // Backpressure guard
-      const dc = (this.activeConn as any).dataChannel as RTCDataChannel | undefined;
-      if (dc && dc.bufferedAmount > 256 * 1024) {
-        await new Promise<void>((r) => setTimeout(r, 20));
+      if (i % 8 === 0) {
+        await new Promise<void>((r) => setTimeout(r, 1));
       }
     }
 
-    // Step 3: Send completion
-    this.activeConn.send({ type: 'transfer-end', transferId });
+    // Small delay to let final chunk leave network buffer before end signal
+    await new Promise<void>((r) => setTimeout(r, 40));
+
+    // Step 3: Send completion signal (JSON string)
+    this.sendControlMessage({ type: 'transfer-end', transferId });
     onProgress?.(100);
   }
 
@@ -323,10 +360,56 @@ export class CompanionTunnelService {
     if (!this.activeConn || !this.activeConn.open) {
       throw new Error('Not connected to primary device');
     }
-    this.activeConn.send({ type: 'transfer-url', url });
+    this.sendControlMessage({ type: 'transfer-url', url });
   }
 
   private handleIncomingData(data: any, _conn: DataConnection): void {
+    if (!data) return;
+
+    // String / JSON control message
+    if (typeof data === 'string') {
+      try {
+        const parsed = JSON.parse(data);
+        this.handleControlMessage(parsed);
+      } catch (e) {
+        console.warn('[Tunnel] Malformed control message:', data);
+      }
+      return;
+    }
+
+    // ArrayBuffer / TypedArray binary chunk
+    if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
+      const buf = (data instanceof ArrayBuffer ? data : data.buffer) as ArrayBuffer;
+      const byteOffset = ArrayBuffer.isView(data) ? data.byteOffset : 0;
+      const byteLength = ArrayBuffer.isView(data) ? data.byteLength : buf.byteLength;
+
+      if (byteLength >= 12) {
+        const view = new DataView(buf, byteOffset, byteLength);
+        const magic = view.getUint32(0, false);
+        if (magic === 0x4E585652) { // 'NXVR'
+          const index = view.getUint32(4, false);
+          const chunkData = buf.slice(byteOffset + 12, byteOffset + byteLength);
+
+          this.receivedChunks.set(index, chunkData);
+
+          if (this.inFlightTransferMeta) {
+            const pct = Math.round((this.receivedChunks.size / this.inFlightTransferMeta.totalChunks) * 100);
+            for (const cb of this.onProgressCallbacks) {
+              cb(pct, this.inFlightTransferMeta.name);
+            }
+          }
+          return;
+        }
+      }
+    }
+
+    // Object fallback
+    if (typeof data === 'object') {
+      this.handleControlMessage(data);
+    }
+  }
+
+  private async handleControlMessage(data: any): Promise<void> {
     if (!data || typeof data !== 'object') return;
 
     if (data.type === 'tunnel-hello') {
@@ -358,21 +441,32 @@ export class CompanionTunnelService {
       return;
     }
 
-    if (data.type === 'transfer-chunk') {
-      if (!this.inFlightTransferMeta || this.inFlightTransferMeta.transferId !== data.transferId) return;
-
-      this.receivedChunks.set(data.index, data.data);
-      const pct = Math.round((this.receivedChunks.size / this.inFlightTransferMeta.totalChunks) * 100);
-      for (const cb of this.onProgressCallbacks) {
-        cb(pct, this.inFlightTransferMeta.name);
-      }
-      return;
-    }
-
     if (data.type === 'transfer-end') {
       if (!this.inFlightTransferMeta || this.inFlightTransferMeta.transferId !== data.transferId) return;
 
       const meta = this.inFlightTransferMeta;
+
+      // Grace period for any last packets in flight (up to 3000ms)
+      if (this.receivedChunks.size < meta.totalChunks) {
+        await new Promise<void>((resolve) => {
+          const startTime = Date.now();
+          const timer = setInterval(() => {
+            if (this.receivedChunks.size >= meta.totalChunks || Date.now() - startTime > 3000) {
+              clearInterval(timer);
+              resolve();
+            }
+          }, 30);
+        });
+      }
+
+      if (this.receivedChunks.size !== meta.totalChunks) {
+        console.error(`[Tunnel] Missing chunks during transfer: got ${this.receivedChunks.size} of ${meta.totalChunks}`);
+        this.receivedChunks.clear();
+        this.inFlightTransferMeta = null;
+        this.setStatus('error');
+        return;
+      }
+
       const chunks: ArrayBuffer[] = [];
       for (let i = 0; i < meta.totalChunks; i++) {
         const chunk = this.receivedChunks.get(i);
@@ -383,8 +477,19 @@ export class CompanionTunnelService {
       this.inFlightTransferMeta = null;
       this.setStatus('connected');
 
-      const blob = new Blob(chunks, { type: meta.type });
-      const reconstructedFile = new File([blob], meta.name, { type: meta.type });
+      let fileType = meta.type;
+      const ext = meta.name.split('.').pop()?.toLowerCase() || '';
+      if (!fileType || fileType === 'application/octet-stream') {
+        if (['mp4', 'm4v'].includes(ext)) fileType = 'video/mp4';
+        else if (ext === 'webm') fileType = 'video/webm';
+        else if (ext === 'mov') fileType = 'video/quicktime';
+        else if (['jpg', 'jpeg'].includes(ext)) fileType = 'image/jpeg';
+        else if (ext === 'png') fileType = 'image/png';
+        else if (ext === 'webp') fileType = 'image/webp';
+      }
+
+      const blob = new Blob(chunks, { type: fileType });
+      const reconstructedFile = new File([blob], meta.name, { type: fileType });
 
       for (const cb of this.onFileReceivedCallbacks) {
         try { cb(reconstructedFile); } catch (e) { console.warn('[Tunnel] File callback error:', e); }

@@ -1488,6 +1488,22 @@ export const SceneInspectorWindow: React.FC<SceneInspectorWindowProps> = ({
                   <Magnet className="w-3.5 h-3.5" />
                   <span>Bring To</span>
                 </button>
+                {selectedAsset?.type === 'image' && (
+                  <button
+                    onClick={() => {
+                      if (!selectedAsset) return;
+                      const mesh = (selectedAsset.object3d.children.find((c: any) => c.isMesh) || selectedAsset.object3d) as THREE.Object3D;
+                      mesh.scale.y = -mesh.scale.y;
+                      onUpdateAsset({ ...selectedAsset });
+                      onBroadcastAssetUpdate?.(selectedAsset);
+                    }}
+                    title="Flip Upside Down / Invert (180°)"
+                    className="p-1.5 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 border border-indigo-500/40 transition flex items-center gap-1 font-bold text-xs"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Flip 180°</span>
+                  </button>
+                )}
                 {/* Hierarchy scene-graph actions (per SceneInspector.txt).
                     Insert Parent creates an empty Group above the selected
                     row; Add Child creates one below; Set Root scopes the

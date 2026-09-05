@@ -96,12 +96,12 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
       await tunnel.sendFile(selectedFile, (pct) => {
         setTransferProgress(pct);
       });
-      setTransferSuccess(`"${selectedFile.name}" sent to VR! Look inside your headset to run import.`);
+      setTransferSuccess(`"${selectedFile.name}" sent to device! Look at your screen or headset to run import.`);
       setSelectedFile(null);
       setFilePreview(null);
       setTransferProgress(null);
     } catch (err: any) {
-      setErrorMessage(err?.message || 'Transfer failed. Ensure VR headset is still connected.');
+      setErrorMessage(err?.message || 'Transfer failed. Ensure paired device is still connected.');
       setTransferProgress(null);
     }
   };
@@ -110,7 +110,7 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
     if (!urlInput.trim()) return;
     try {
       tunnel.sendUrl(urlInput.trim());
-      setTransferSuccess('URL sent to VR! Check your headset.');
+      setTransferSuccess('URL sent to device! Look at your screen or headset.');
       setUrlInput('');
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to send URL.');
@@ -118,9 +118,9 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-black text-white flex flex-col items-center justify-between p-4 font-sans select-none">
+    <div className="h-screen max-h-screen overflow-y-auto bg-gradient-to-b from-slate-950 via-slate-900 to-black text-white flex flex-col items-center justify-between p-4 font-sans select-none">
       {/* Top Bar */}
-      <div className="w-full max-w-md flex items-center justify-between py-2 border-b border-white/10">
+      <div className="w-full max-w-md flex items-center justify-between py-2 border-b border-white/10 shrink-0">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-cyan-500/20 text-[#00f0ff] flex items-center justify-center border border-cyan-500/30">
             <Smartphone className="w-4 h-4" />
@@ -145,14 +145,14 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
       </div>
 
       {/* Main Content Area */}
-      <div className="w-full max-w-md flex-1 flex flex-col justify-center py-6 space-y-6">
+      <div className="w-full max-w-md my-auto py-4 space-y-4">
         {/* State A: Not Connected / Pairing Input */}
         {status !== 'connected' && (
           <div className="bg-slate-900/90 border border-white/10 rounded-2xl p-6 shadow-2xl space-y-5">
             <div className="text-center space-y-2">
-              <h2 className="text-lg font-bold text-slate-100">Pair With VR Headset</h2>
+              <h2 className="text-lg font-bold text-slate-100">Pair With Device</h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Enter the pair code displayed on your VR HUD or PC screen to tunnel photos and assets directly into your virtual world.
+                Enter the pair code displayed on your VR HUD or screen to tunnel photos, videos, and assets directly into your virtual world.
               </p>
             </div>
 
@@ -192,7 +192,7 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
                 {isConnecting ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Connecting to VR...</span>
+                    <span>Connecting to Device...</span>
                   </>
                 ) : (
                   <>
@@ -213,7 +213,7 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
               <div className="flex items-center gap-2.5">
                 <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
                 <span className="text-xs text-emerald-200 font-medium">
-                  Tunneled to {hostInfo?.name || 'VR Headset'}
+                  Tunneled to {hostInfo?.name || 'Device'}
                 </span>
               </div>
               <button
@@ -252,14 +252,14 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
 
             {/* Tab 1: File / Photo Feeder */}
             {activeTab === 'file' && (
-              <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-5 space-y-4">
+              <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-4 space-y-3">
                 {/* Hidden File Inputs */}
                 <input
                   type="file"
                   ref={fileInputRef}
                   onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
                   className="hidden"
-                  accept="image/*,video/*,audio/*,.glb,.gltf,.obj,.splat,.vrm"
+                  accept="video/mp4,video/webm,video/*,image/*,audio/*,.glb,.gltf,.obj,.splat,.vrm"
                 />
                 <input
                   type="file"
@@ -271,21 +271,21 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
                 />
 
                 {/* Quick Action Buttons */}
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-2.5">
                   <button
                     onClick={() => cameraInputRef.current?.click()}
-                    className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl bg-purple-500/10 border border-purple-500/30 hover:bg-purple-500/20 active:scale-95 transition-all text-purple-300"
+                    className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl bg-purple-500/10 border border-purple-500/30 hover:bg-purple-500/20 active:scale-95 transition-all text-purple-300"
                   >
-                    <Camera className="w-6 h-6" />
+                    <Camera className="w-5 h-5" />
                     <span className="text-xs font-bold">Snap Photo</span>
                     <span className="text-[10px] text-slate-400">Use phone camera</span>
                   </button>
 
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className="flex flex-col items-center justify-center gap-2 p-4 rounded-xl bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 active:scale-95 transition-all text-cyan-300"
+                    className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/30 hover:bg-cyan-500/20 active:scale-95 transition-all text-cyan-300"
                   >
-                    <Upload className="w-6 h-6" />
+                    <Upload className="w-5 h-5" />
                     <span className="text-xs font-bold">Pick File</span>
                     <span className="text-[10px] text-slate-400">Photos, 3D, Video</span>
                   </button>
@@ -293,21 +293,57 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
 
                 {/* Selected File Card */}
                 {selectedFile && (
-                  <div className="p-3 bg-black/40 border border-white/10 rounded-xl space-y-3">
-                    <div className="flex items-center justify-between">
+                  <div className="p-3.5 bg-black/50 border border-white/10 rounded-2xl space-y-3 shadow-xl">
+                    {/* Primary Action Button at the TOP */}
+                    <button
+                      onClick={handleSendFile}
+                      disabled={transferProgress !== null}
+                      className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-[#00f0ff] to-[#0099ff] text-black font-extrabold text-sm tracking-wide flex items-center justify-center gap-2 shadow-[0_0_25px_rgba(0,240,255,0.4)] hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-50"
+                    >
+                      <span>Send to Device</span>
+                      <ArrowRight className="w-5 h-5" />
+                    </button>
+
+                    {/* Progress Bar */}
+                    {transferProgress !== null && (
+                      <div className="space-y-1.5 py-1">
+                        <div className="flex justify-between text-xs font-mono text-cyan-300">
+                          <span>Tunneling to device...</span>
+                          <span className="font-bold">{transferProgress}%</span>
+                        </div>
+                        <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden border border-cyan-500/20">
+                          <div 
+                            className="h-full bg-gradient-to-r from-purple-500 via-cyan-400 to-[#00f0ff] transition-all duration-150"
+                            style={{ width: `${transferProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* File Meta Info */}
+                    <div className="flex items-center justify-between pt-1 border-t border-white/10">
                       <div className="flex items-center gap-2 overflow-hidden">
                         <Box className="w-4 h-4 text-purple-400 shrink-0" />
-                        <span className="text-xs font-mono font-medium truncate max-w-[200px]">
+                        <span className="text-xs font-mono font-medium truncate max-w-[190px]">
                           {selectedFile.name}
                         </span>
                       </div>
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-slate-400 font-mono">
+                          {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
+                        </span>
+                        <button
+                          onClick={() => { setSelectedFile(null); setFilePreview(null); }}
+                          className="w-5 h-5 rounded-full bg-slate-800 hover:bg-rose-900/60 text-slate-300 hover:text-rose-300 text-xs flex items-center justify-center transition-colors"
+                          title="Clear selected file"
+                        >
+                          ✕
+                        </button>
+                      </div>
                     </div>
 
                     {filePreview && (
-                      <div className="relative w-full h-40 bg-black/60 rounded-lg overflow-hidden border border-white/5 flex items-center justify-center">
+                      <div className="relative w-full h-20 bg-black/60 rounded-lg overflow-hidden border border-white/5 flex items-center justify-center">
                         <img 
                           src={filePreview} 
                           alt="Preview" 
@@ -315,31 +351,6 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
                         />
                       </div>
                     )}
-
-                    {/* Progress Bar */}
-                    {transferProgress !== null && (
-                      <div className="space-y-1">
-                        <div className="flex justify-between text-[10px] text-slate-400">
-                          <span>Tunneling into VR...</span>
-                          <span>{transferProgress}%</span>
-                        </div>
-                        <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-                          <div 
-                            className="h-full bg-gradient-to-r from-purple-500 to-[#00f0ff] transition-all duration-150"
-                            style={{ width: `${transferProgress}%` }}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <button
-                      onClick={handleSendFile}
-                      disabled={transferProgress !== null}
-                      className="w-full py-3 rounded-xl bg-gradient-to-r from-[#00f0ff] to-[#0099ff] text-black font-bold text-xs flex items-center justify-center gap-2 shadow-[0_0_15px_rgba(0,240,255,0.3)] hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-50"
-                    >
-                      <span>Send to VR Headset</span>
-                      <ArrowRight className="w-4 h-4" />
-                    </button>
                   </div>
                 )}
               </div>
@@ -347,9 +358,9 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
 
             {/* Tab 2: URL Sender */}
             {activeTab === 'url' && (
-              <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-5 space-y-4">
+              <div className="bg-slate-900/80 border border-white/10 rounded-2xl p-4 space-y-3">
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Paste a link to any 3D model (.glb, .gltf), image, or video to spawn it directly into your VR session.
+                  Paste a link to any 3D model (.glb, .gltf), image, or video to spawn it directly into your session.
                 </p>
                 <div className="space-y-2">
                   <input
@@ -364,7 +375,7 @@ export const CompanionPortal: React.FC<CompanionPortalProps> = ({
                     disabled={!urlInput.trim()}
                     className="w-full py-2.5 rounded-xl bg-cyan-500 text-black font-bold text-xs flex items-center justify-center gap-2 hover:bg-cyan-400 active:scale-98 transition-all disabled:opacity-40"
                   >
-                    <span>Send Link to VR</span>
+                    <span>Send Link to Device</span>
                     <ArrowRight className="w-3.5 h-3.5" />
                   </button>
                 </div>

@@ -442,14 +442,19 @@ export class SpatialPanelManager {
     if (viewEl) viewEl.style.pointerEvents = 'auto';
     if (cameraEl) cameraEl.style.pointerEvents = 'auto';
 
-    // Use elementsFromPoint to pierce through any overlay/canvas layers
-    const hitElements = typeof document.elementsFromPoint === 'function'
-      ? document.elementsFromPoint(cx, cy)
-      : [document.elementFromPoint(cx, cy)].filter(Boolean) as Element[];
-
-    overlay.style.pointerEvents = prevOverlayPE;
-    if (viewEl) viewEl.style.pointerEvents = prevViewPE;
-    if (cameraEl) cameraEl.style.pointerEvents = prevCameraPE;
+    let hitElements: Element[] = [];
+    try {
+      // Use elementsFromPoint to pierce through any overlay/canvas layers
+      hitElements = typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(cx, cy)
+        : ([document.elementFromPoint(cx, cy)].filter(Boolean) as Element[]);
+    } catch {
+      hitElements = [];
+    } finally {
+      overlay.style.pointerEvents = prevOverlayPE;
+      if (viewEl) viewEl.style.pointerEvents = prevViewPE;
+      if (cameraEl) cameraEl.style.pointerEvents = prevCameraPE;
+    }
 
     let found: Element | null = null;
     for (const hit of hitElements) {
@@ -528,20 +533,24 @@ export class SpatialPanelManager {
 
     const opts = { bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 1, isPrimary: true, view: window };
 
-    el.dispatchEvent(new PointerEvent('pointerdown', opts));
-    el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.dispatchEvent(new PointerEvent('pointerup', opts));
-    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    try {
+      el.dispatchEvent(new PointerEvent('pointerdown', opts));
+      el.dispatchEvent(new MouseEvent('mousedown', opts));
+      el.dispatchEvent(new PointerEvent('pointerup', opts));
+      el.dispatchEvent(new MouseEvent('mouseup', opts));
 
-    if (typeof el.click === 'function') {
-      try {
-        el.click();
-      } catch (err) {
-        console.warn('[SpatialUI] el.click() threw error, falling back to dispatchEvent:', err);
+      if (typeof el.click === 'function') {
+        try {
+          el.click();
+        } catch (err) {
+          console.warn('[SpatialUI] el.click() threw error, falling back to dispatchEvent:', err);
+          el.dispatchEvent(new MouseEvent('click', opts));
+        }
+      } else {
         el.dispatchEvent(new MouseEvent('click', opts));
       }
-    } else {
-      el.dispatchEvent(new MouseEvent('click', opts));
+    } catch (dispatchErr) {
+      console.warn('[SpatialUI] handleLockedClick dispatch error:', dispatchErr);
     }
 
     // ONLY focus text inputs / textareas / selects so keyboard text typing flows into them,

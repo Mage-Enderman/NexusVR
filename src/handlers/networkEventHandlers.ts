@@ -359,16 +359,23 @@ export function registerNetworkEventHandlers(
       netUnsub();
       // Concatenate chunks in order.
       const ext = (data.name || '').split('.').pop()?.toLowerCase() || '';
-      const mime =
-        data.type === 'video' || ['mp4', 'webm', 'mov'].includes(ext)
-          ? 'video/mp4'
-          : data.type === 'audio' || ['mp3', 'ogg', 'wav'].includes(ext)
-          ? 'audio/mpeg'
-          : data.type === 'image' || ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext)
-          ? ext === 'jpg'
-            ? 'image/jpeg'
-            : `image/${ext || 'png'}`
-          : 'application/octet-stream';
+      let mime = 'application/octet-stream';
+      if (data.type === 'video' || ['mp4', 'webm', 'mov', 'm4v', 'ogv'].includes(ext)) {
+        if (ext === 'webm') mime = 'video/webm';
+        else if (ext === 'mov') mime = 'video/quicktime';
+        else if (ext === 'ogv') mime = 'video/ogg';
+        else mime = 'video/mp4';
+      } else if (data.type === 'audio' || ['mp3', 'ogg', 'wav', 'aac', 'm4a', 'flac'].includes(ext)) {
+        if (ext === 'wav') mime = 'audio/wav';
+        else if (ext === 'ogg') mime = 'audio/ogg';
+        else if (ext === 'aac') mime = 'audio/aac';
+        else if (ext === 'flac') mime = 'audio/flac';
+        else mime = 'audio/mpeg';
+      } else if (data.type === 'image' || ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext)) {
+        if (ext === 'jpg' || ext === 'jpeg') mime = 'image/jpeg';
+        else if (ext === 'svg') mime = 'image/svg+xml';
+        else mime = `image/${ext || 'png'}`;
+      }
       const fullBlob = new Blob(chunks as ArrayBuffer[], { type: mime });
       const file = new File([fullBlob], data.name || 'Asset', { type: mime });
       net.registerHostedFile(data.id, file);
@@ -409,9 +416,13 @@ export function registerNetworkEventHandlers(
             if (asset.videoElement) {
               const vs = data.videoState;
               if (vs) {
+                const incomingVs = vs as any;
                 asset.object3d.userData.videoState = {
                   ...asset.object3d.userData.videoState,
-                  ...vs,
+                  ...incomingVs,
+                  duration: (incomingVs.duration && incomingVs.duration > 0)
+                    ? incomingVs.duration
+                    : (asset.object3d.userData.videoState?.duration || 0),
                 };
                 // Restore the sender's manual Y-orientation so late
                 // joiners don't see a mirrored/upside-down picture.

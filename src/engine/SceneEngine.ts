@@ -304,6 +304,8 @@ export class SceneEngine {
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.renderer.domElement.style.display = 'block';
+    this.renderer.domElement.tabIndex = 0;
+    this.renderer.domElement.style.outline = 'none';
     this.container.appendChild(this.renderer.domElement);
 
     // Spark Gaussian Splatting Renderer
@@ -865,64 +867,72 @@ export class SceneEngine {
     // Update collision AABBs for all registered colliders (every frame).
     // Also auto-rebuild the registry every 60 frames (~1 second) to
     // catch colliders added outside the inspector (e.g. script, network).
-    this.collisionManager.updateWorldBoxes();
-    this._collisionFrameCount++;
-    if (this._collisionFrameCount >= 60) {
-      this._collisionFrameCount = 0;
-      this.collisionManager.rebuildRegistry();
+    try {
+      this.collisionManager.updateWorldBoxes();
+      this._collisionFrameCount++;
+      if (this._collisionFrameCount >= 60) {
+        this._collisionFrameCount = 0;
+        this.collisionManager.rebuildRegistry();
+      }
+    } catch (colErr) {
+      console.error('[SceneEngine] Collision update error:', colErr);
     }
 
-    if (this.isVRMode) {
-      // VR locomotion reads from `vrInput.left.stick` / `right.stick`
-      // and writes to `cameraRig` (the HMD-tracked camera's own matrix
-      // is overwritten by `renderer.xr` each frame from the headset
-      // pose, so we cannot write to it directly). The non-VR branches
-      // below stay exactly as before — desktop fpMovement continues to
-      // drive `camera.position` and OrbitControls remains authoritative
-      // for orbit mode.
-      this.vrInput?.update();
-      this.updateVRLocomotion(delta);
-      this.updateVRSmoothTurn(delta);
-      // Walk-mode gravity (VR mirror of desktop's Space-jump branch).
-      // Desktop `updateFirstPersonMovement` owns the integration but is
-      // gated by `!this.isVRMode`, so VR needs its own copy or the user
-      // floats forever after pressing A (triggerVRJump sets vv=6.5 but
-      // nothing applies it). Implementation: the inertial treadmill — vv
-      // positive = user rises = worldRoot Y drops, vv negative = user
-      // sinks = worldRoot Y rises back. Clamp on `worldRoot.y > 0` keeps
-      // the floor at-or-below origin so the HMD-tracked eye height
-      // (~1.6m) means the user is always at least eye-height above the
-      // floor — matches desktop fpMovement's standing-height grounding.
-      // TODO: This currently hardcodes the floor at Y=0. To support standing
-      // on boxes/slopes in VR, we'd need to query collisionManager for the
-      // floor height at the HMD's horizontal position and clamp accordingly.
-      // Note: rig.position.y is intentionally left alone here — three.js
-      // bypasses rig parenting during an active XR session so writing
-      // to it would have no effect on what the user sees.
-      if (this.locomotionMode === 'walk') {
-        // In WebXR local-floor space, the headset tracks physical height above floor directly.
-        // Jump physics only adjusts worldRoot when verticalVelocity != 0.
-        if (this.verticalVelocity !== 0) {
-          this.verticalVelocity -= 18.0 * delta;
-          this.worldRoot.position.y -= this.verticalVelocity * delta;
-          if (this.worldRoot.position.y >= 0) {
-            this.worldRoot.position.y = 0;
-            this.verticalVelocity = 0;
-            this.isGrounded = true;
+    try {
+      if (this.isVRMode) {
+        // VR locomotion reads from `vrInput.left.stick` / `right.stick`
+        // and writes to `cameraRig` (the HMD-tracked camera's own matrix
+        // is overwritten by `renderer.xr` each frame from the headset
+        // pose, so we cannot write to it directly). The non-VR branches
+        // below stay exactly as before — desktop fpMovement continues to
+        // drive `camera.position` and OrbitControls remains authoritative
+        // for orbit mode.
+        this.vrInput?.update();
+        this.updateVRLocomotion(delta);
+        this.updateVRSmoothTurn(delta);
+        // Walk-mode gravity (VR mirror of desktop's Space-jump branch).
+        // Desktop `updateFirstPersonMovement` owns the integration but is
+        // gated by `!this.isVRMode`, so VR needs its own copy or the user
+        // floats forever after pressing A (triggerVRJump sets vv=6.5 but
+        // nothing applies it). Implementation: the inertial treadmill — vv
+        // positive = user rises = worldRoot Y drops, vv negative = user
+        // sinks = worldRoot Y rises back. Clamp on `worldRoot.y > 0` keeps
+        // the floor at-or-below origin so the HMD-tracked eye height
+        // (~1.6m) means the user is always at least eye-height above the
+        // floor — matches desktop fpMovement's standing-height grounding.
+        // TODO: This currently hardcodes the floor at Y=0. To support standing
+        // on boxes/slopes in VR, we'd need to query collisionManager for the
+        // floor height at the HMD's horizontal position and clamp accordingly.
+        // Note: rig.position.y is intentionally left alone here — three.js
+        // bypasses rig parenting during an active XR session so writing
+        // to it would have no effect on what the user sees.
+        if (this.locomotionMode === 'walk') {
+          // In WebXR local-floor space, the headset tracks physical height above floor directly.
+          // Jump physics only adjusts worldRoot when verticalVelocity != 0.
+          if (this.verticalVelocity !== 0) {
+            this.verticalVelocity -= 18.0 * delta;
+            this.worldRoot.position.y -= this.verticalVelocity * delta;
+            if (this.worldRoot.position.y >= 0) {
+              this.worldRoot.position.y = 0;
+              this.verticalVelocity = 0;
+              this.isGrounded = true;
+            } else {
+              this.isGrounded = false;
+            }
           } else {
-            this.isGrounded = false;
+            this.worldRoot.position.y = 0;
+            this.isGrounded = true;
           }
-        } else {
-          this.worldRoot.position.y = 0;
-          this.isGrounded = true;
+        }
+      } else {
+        if (this.cameraMode === 'orbit') {
+          this.controls.update();
+        } else if (this.cameraMode === 'first-person') {
+          this.updateFirstPersonMovement(delta);
         }
       }
-    } else {
-      if (this.cameraMode === 'orbit') {
-        this.controls.update();
-      } else if (this.cameraMode === 'first-person') {
-        this.updateFirstPersonMovement(delta);
-      }
+    } catch (locoErr) {
+      console.error('[SceneEngine] Locomotion update error:', locoErr);
     }
 
     // ── Fall-off-world safety net ────────────────────────────────────
@@ -930,38 +940,63 @@ export class SceneEngine {
     // automatically teleport them back. This prevents the user from
     // falling forever if they walk off the floor edge or collision
     // glitches. Applies to both desktop and VR.
-    const playerEyeY = this.isVRMode
-      ? -this.worldRoot.position.y + this.camera.position.y
-      : this.camera.position.y;
-    if (playerEyeY < this.respawnThreshold) {
-      this.respawn();
+    try {
+      const playerEyeY = this.isVRMode
+        ? -this.worldRoot.position.y + this.camera.position.y
+        : this.camera.position.y;
+      if (playerEyeY < this.respawnThreshold) {
+        this.respawn();
+      }
+    } catch (respawnErr) {
+      console.error('[SceneEngine] Respawn check error:', respawnErr);
     }
 
     // Decay yaw velocity when no mouse input this frame.
     this.yawVelocity *= 0.85;
 
-    // Call registered animation listeners
+    // Call registered animation listeners (isolated so one bad listener never freezes the rest)
     for (const callback of this.updateCallbacks) {
-      callback(delta, time / 1000);
+      try {
+        callback(delta, time / 1000);
+      } catch (cbErr) {
+        console.error('[SceneEngine] updateCallback error:', cbErr);
+      }
     }
 
-    this.renderer.render(this.scene, this.camera);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } catch (renderErr) {
+      console.error('[SceneEngine] WebGL render error:', renderErr);
+    }
 
     // Fire post-render callbacks after the camera/HMD pose is finalized.
     for (const callback of this.postRenderCallbacks) {
-      callback(delta, time / 1000);
+      try {
+        callback(delta, time / 1000);
+      } catch (prErr) {
+        console.error('[SceneEngine] postRenderCallback error:', prErr);
+      }
     }
 
     // CSS3DRenderer overlay — renders after WebGL so panels appear in front
-    this.spatialPanelManager?.render(this.scene, this.camera);
+    try {
+      this.spatialPanelManager?.render(this.scene, this.camera);
+    } catch (spErr) {
+      console.error('[SceneEngine] spatialPanelManager render error:', spErr);
+    }
+
     // Crosshair hover: find panel element under screen center while locked or in first-person mode
     if ((this.isPointerLocked || this.cameraMode === 'first-person') && this.spatialPanelManager) {
-      if ((window as any).__isRadialMenuOpen) {
-        this.spatialPanelManager.clearLockedHover();
-      } else {
-        const cx = (this.container.clientWidth  || window.innerWidth)  / 2;
-        const cy = (this.container.clientHeight || window.innerHeight) / 2;
-        this.spatialPanelManager.updateLockedHover(cx, cy);
+      try {
+        if ((window as any).__isRadialMenuOpen) {
+          this.spatialPanelManager.clearLockedHover();
+        } else {
+          const cx = (this.container.clientWidth  || window.innerWidth)  / 2;
+          const cy = (this.container.clientHeight || window.innerHeight) / 2;
+          this.spatialPanelManager.updateLockedHover(cx, cy);
+        }
+      } catch (hoverErr) {
+        console.error('[SceneEngine] updateLockedHover error:', hoverErr);
       }
     }
   };

@@ -59,6 +59,7 @@ export interface AssetSpawnData {
   videoState?: {
     playing?: boolean;
     currentTime?: number;
+    duration?: number;
     globalVolume?: number;
     flipped?: boolean;
   };
@@ -1376,7 +1377,7 @@ export class NetworkService {
     if (type === 'spawn' && payload && typeof payload === 'object') {
       const pd = payload as AssetSpawnData;
       const hostedFile = this.hostedAssets.get(pd.id);
-      const isOversizedImage = pd.type === 'image' && (hostedFile !== undefined || (pd.fileData instanceof ArrayBuffer && pd.fileData.byteLength > 256 * 1024));
+      const isOversizedImage = pd.type === 'image';
       if (pd.type === 'video' || pd.type === 'audio' || isOversizedImage || hostedFile !== undefined) {
         if (hostedFile === undefined && pd.fileData instanceof ArrayBuffer) {
           this.hostedAssets.set(pd.id, pd.fileData);
@@ -2225,6 +2226,10 @@ export class NetworkService {
 
   public registerHostedFile(id: string, fileData: ArrayBuffer | File | Blob): void {
     this.hostedAssets.set(id, fileData);
+  }
+
+  public hasHostedFile(id: string): boolean {
+    return this.hostedAssets.has(id);
   }
 
   public getHostedFile(id: string): ArrayBuffer | File | Blob | undefined {

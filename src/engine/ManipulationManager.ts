@@ -336,6 +336,7 @@ export class ManipulationManager {
     this.transformControls = new TransformControls(this.camera, this.domElement);
     this.transformControls.size = 0.9;
     this.transformControls.space = 'local';
+    this.transformControls.enabled = false;
 
     // In Three.js TransformControls, either getHelper() is present or cast to Object3D
     const helper = (this.transformControls as any).getHelper ? (this.transformControls as any).getHelper() : (this.transformControls as unknown as THREE.Object3D);
@@ -1377,8 +1378,10 @@ export class ManipulationManager {
     const inVR = !!(window as any).__NEXUS_VR_PRESENTING;
     if (asset && !inVR) {
       this.transformControls.attach(asset.object3d);
+      this.transformControls.enabled = true;
     } else {
       this.transformControls.detach();
+      this.transformControls.enabled = false;
     }
 
     for (const cb of this.onSelectionChangeCallbacks) cb(asset);

@@ -120,6 +120,72 @@ export interface LoadedAsset {
   };
 }
 
+/**
+ * Fast binary check to see if a WebP buffer contains animated frames.
+ * WebP specification (RFC 9649):
+ * - Bytes 0..3: 'RIFF' (0x52494646)
+ * - Bytes 8..11: 'WEBP' (0x57454250)
+ * - An animated WebP MUST contain an 'ANIM' chunk (0x414E494D) before the frame chunks.
+ * - Static WebP files (with or without transparency/alpha, VP8, VP8L, or VP8X)
+ *   NEVER contain an 'ANIM' chunk and hit 'VP8 ' (0x56503820) or 'VP8L' (0x5650384C) first.
+ */
+export function isAnimatedWebP(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < 32) return false;
+  try {
+    const view = new DataView(buffer);
+    // 'RIFF' (0x52494646)
+    if (view.getUint32(0, false) !== 0x52494646) return false;
+    // 'WEBP' (0x57454250)
+    if (view.getUint32(8, false) !== 0x57454250) return false;
+
+    let offset = 12;
+    const maxOffset = Math.min(buffer.byteLength, 65536);
+    while (offset + 8 <= maxOffset) {
+      const chunkFourCC = view.getUint32(offset, false);
+      // 'ANIM' = 0x414E494D -> definitely animated WebP
+      if (chunkFourCC === 0x414E494D) return true;
+      // 'VP8 ' (0x56503820) or 'VP8L' (0x5650384C) before 'ANIM' -> definitely static WebP!
+      if (chunkFourCC === 0x56503820 || chunkFourCC === 0x5650384C) return false;
+      const chunkSize = view.getUint32(offset + 4, true); // Little-endian chunk size
+      if (chunkSize < 0 || offset + 8 + chunkSize > buffer.byteLength + 1) break;
+      // Chunks are padded to even byte boundary in RIFF container
+      offset += 8 + chunkSize + (chunkSize & 1);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fast binary check to see if a PNG buffer is an Animated PNG (APNG).
+ * APNG specification requires an 'acTL' chunk before the first 'IDAT' chunk.
+ */
+export function isAnimatedPNG(buffer: ArrayBuffer): boolean {
+  if (buffer.byteLength < 32) return false;
+  try {
+    const view = new DataView(buffer);
+    // PNG signature: 0x89504E47, 0x0D0A1A0A
+    if (view.getUint32(0, false) !== 0x89504E47 || view.getUint32(4, false) !== 0x0D0A1A0A) {
+      return false;
+    }
+    let offset = 8;
+    const maxOffset = Math.min(buffer.byteLength, 65536);
+    while (offset + 8 <= maxOffset) {
+      const length = view.getUint32(offset, false);
+      const chunkType = view.getUint32(offset + 4, false);
+      // 'acTL' = 0x6163544C
+      if (chunkType === 0x6163544C) return true;
+      // 'IDAT' = 0x49444154. If we hit IDAT before acTL, it's a standard static PNG!
+      if (chunkType === 0x49444154) return false;
+      offset += 12 + length;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export class AssetManager {
   private scene: THREE.Scene;
   /**
@@ -448,7 +514,7 @@ export class AssetManager {
     // Blob) and lets the browser stream it into the <video> element
     // through its blob URL. LoadedAsset.fileData is `undefined` for
     // videos so the bytes never materialize in our heap.
-    const isVideoExt = ['mp4', 'webm', 'mov'].includes(ext);
+    const isVideoExt = ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'mkv'].includes(ext) || file.type.startsWith('video/');
     // Phase 2 safe path: only hoist the bytes into a heap-resident
     // ArrayBuffer for videos small enough to also fit through the
     // network layer's inlined-envelope budget (see
@@ -580,8 +646,10 @@ export class AssetManager {
         }
       }
 
-      // 2. Check for animated WebP / APNG via WebCodecs ImageDecoder
-      if (!asset && (ext === 'webp' || ext === 'png' || ext === 'apng') && typeof ImageDecoder !== 'undefined') {
+      // 2. Check for animated WebP / APNG via binary format inspection and WebCodecs ImageDecoder
+      const isAnimWebP = ext === 'webp' && isAnimatedWebP(arrayBuffer!);
+      const isAnimPNG = (ext === 'png' || ext === 'apng') && isAnimatedPNG(arrayBuffer!);
+      if (!asset && (isAnimWebP || isAnimPNG) && typeof ImageDecoder !== 'undefined') {
         const animatedImage = await this.loadAnimatedImageDecoder(id, file.name, arrayBuffer!, mimeType, position, config);
         if (animatedImage) {
           asset = animatedImage;
@@ -590,17 +658,8 @@ export class AssetManager {
 
       // 3. Static image fallback
       if (!asset) {
-        let optBuf = arrayBuffer!;
-        if (!ext.includes('gif') && !ext.includes('svg') && !mimeType.includes('gif') && !mimeType.includes('svg') && arrayBuffer!.byteLength > 2 * 1024 * 1024) {
-          try {
-            optBuf = await AssetManager.optimizeImageBuffer(arrayBuffer!, mimeType);
-          } catch {
-            optBuf = arrayBuffer!;
-          }
-        }
-        const isConvertedToWebP = optBuf !== arrayBuffer;
-        const optUrl = isConvertedToWebP ? URL.createObjectURL(new Blob([optBuf], { type: 'image/webp' })) : blobUrl;
-        asset = await this.loadImage(id, file.name, optUrl, optBuf, position, config, onProgress);
+        console.log(`[NexusVR:ImageImport] 🖼️ Loading static image "${file.name}" (${(arrayBuffer!.byteLength / 1024).toFixed(1)} KB)...`);
+        asset = await this.loadImage(id, file.name, blobUrl, arrayBuffer!, position, config, onProgress);
       }
     } else if (isVideoExt) {
       // Phase 2 + tier-aware VRAM cap: blob: URL plumbing. We hand
@@ -736,7 +795,8 @@ export class AssetManager {
         arrayBuffer = await response.arrayBuffer();
         if (onProgress) { try { onProgress(50); } catch { /* ignore */ } }
       }
-      const blob = new Blob([arrayBuffer]);
+      const mime = contentType.split(';')[0].trim() || (ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : 'image/png');
+      const blob = new Blob([arrayBuffer], { type: mime });
       const blobUrl = URL.createObjectURL(blob);
 
       let asset: LoadedAsset | null = null;
@@ -795,8 +855,10 @@ export class AssetManager {
           }
         }
 
-        // 2. Check for animated WebP / APNG
-        if (!asset && (ext === 'webp' || ext === 'png' || ext === 'apng') && typeof ImageDecoder !== 'undefined') {
+        // 2. Check for animated WebP / APNG via binary format inspection and WebCodecs ImageDecoder
+        const isAnimWebP = ext === 'webp' && isAnimatedWebP(arrayBuffer);
+        const isAnimPNG = (ext === 'png' || ext === 'apng') && isAnimatedPNG(arrayBuffer);
+        if (!asset && (isAnimWebP || isAnimPNG) && typeof ImageDecoder !== 'undefined') {
           const animatedImage = await this.loadAnimatedImageDecoder(id, name, arrayBuffer, mimeType, position, config);
           if (animatedImage) {
             asset = animatedImage;
@@ -805,6 +867,7 @@ export class AssetManager {
 
         // 3. Static image fallback
         if (!asset) {
+          console.log(`[NexusVR:ImageImport] 🖼️ Loading static image "${name}" (${(arrayBuffer.byteLength / 1024).toFixed(1)} KB)...`);
           asset = await this.loadImage(id, name, blobUrl, arrayBuffer, position, config, onProgress);
         }
       } else if (['mp4', 'webm', 'mov'].includes(ext)) {
@@ -1125,178 +1188,233 @@ export class AssetManager {
   }
 
   private async loadImage(id: string, name: string, url: string, buffer: ArrayBuffer, pos: THREE.Vector3, config?: Partial<ImportConfig>, _onProgress?: (pct: number | null) => void): Promise<LoadedAsset> {
-    return new Promise((resolve, reject) => {
-      this.textureLoader.load(url, (texture) => {
+    const startTime = performance.now();
+    console.log(`[NexusVR:ImageLoader] 🎨 Loading image asset "${name}" (${(buffer.byteLength / 1024).toFixed(1)} KB)...`, { id, url, config });
+
+    let texture: THREE.Texture;
+    let imgWidth = 1024;
+    let imgHeight = 1024;
+
+    const ext = name.split('.').pop()?.toLowerCase() || 'png';
+    const mime = ext === 'webp' ? 'image/webp' : ext === 'gif' ? 'image/gif' : ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
+
+    // Use createImageBitmap with imageOrientation: 'from-image' for hardware-accelerated decode & EXIF orientation
+    if (typeof createImageBitmap !== 'undefined' && buffer.byteLength > 0) {
+      try {
+        console.log(`[NexusVR:ImageLoader] 🔍 Hardware decoding with createImageBitmap(imageOrientation: 'from-image')...`);
+        const blob = new Blob([buffer], { type: mime });
+        const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+        imgWidth = bitmap.width;
+        imgHeight = bitmap.height;
+        texture = new THREE.Texture(bitmap);
+        texture.needsUpdate = true;
         texture.colorSpace = THREE.SRGBColorSpace;
-        
-        if (config?.textureFiltering === 'pixel-art') {
-          texture.magFilter = THREE.NearestFilter;
-          texture.minFilter = THREE.NearestFilter;
-          texture.generateMipmaps = false;
-        }
-
-        const group = new THREE.Group();
-        group.position.copy(pos);
-
-        if (config?.imageDisplayMode === 'skybox') {
-          texture.mapping = THREE.EquirectangularReflectionMapping;
-          this.scene.background = texture;
-          this.scene.environment = texture;
-          // Return an invisible dummy object so asset tracking stays consistent
-          resolve({
-            id,
-            name: `Skybox: ${name}`,
-            type: 'image',
-            object3d: group,
-            url,
-            fileData: buffer,
-            isCollidable: false
-          });
-          return;
-        }
-
-        if (config?.imageDisplayMode === 'panorama-360') {
-          const sphereGeo = new THREE.SphereGeometry(20, 64, 32);
-          const sphereMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide });
-          const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
-          sphereMesh.scale.x = -1; // Invert horizontally for correct 360 panorama viewing inside
-          group.add(sphereMesh);
-          resolve({
-            id,
-            name: `360 Pano: ${name}`,
-            type: 'image',
-            object3d: group,
-            url,
-            fileData: buffer,
-            isCollidable: false
-          });
-          return;
-        }
-
-        if (config?.imageDisplayMode === 'billboard') {
-          const aspect = texture.image ? (texture.image.width / texture.image.height || 1) : 1;
-          const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
-          const height = width / aspect;
-
-          const spriteMat = new THREE.SpriteMaterial({ map: texture });
-          const sprite = new THREE.Sprite(spriteMat);
-          sprite.scale.set(width, height, 1);
-          group.add(sprite);
-
-          resolve({
-            id,
-            name,
-            type: 'image',
-            object3d: group,
-            url,
-            fileData: buffer,
-            isCollidable: false
-          });
-          return;
-        }
-
-        const displayMode = config?.imageDisplayMode || '2d-plane';
-        if (displayMode === '2d-plane') {
-          const imgWidth = (texture.image && texture.image.width) ? texture.image.width : 1024;
-          const imgHeight = (texture.image && texture.image.height) ? texture.image.height : 1024;
-          const aspect = imgWidth / imgHeight || 1;
-          const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
-          const height = width / aspect;
-
-          const imgGeo = new THREE.PlaneGeometry(width, height);
-          const imgMat = new THREE.MeshBasicMaterial({
-            map: texture,
-            side: THREE.DoubleSide,
-            transparent: true,
-            alphaTest: 0.01,
-          });
-          const imgMesh = new THREE.Mesh(imgGeo, imgMat);
-          imgMesh.name = `${name} (Mesh)`;
-          imgMesh.castShadow = true;
-          imgMesh.receiveShadow = true;
-          group.name = name;
-          group.add(imgMesh);
-
-          if (this.camera) {
-            const camPos = this.camera.position;
-            const dx = camPos.x - pos.x;
-            const dz = camPos.z - pos.z;
-            if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
-              group.rotation.y = Math.atan2(dx, dz);
-            }
-          }
-
-          group.userData.grabbable = {
-            enabled: true,
-            scalable: true,
-            allowSteal: true,
-            grabPriority: 0,
-            editModeOnly: false,
-            destroyOnRelease: false,
-          };
-          group.userData.is2DImage = true;
-
-          resolve({
-            id,
-            name,
-            type: 'image',
-            object3d: group,
-            url,
-            fileData: buffer,
-            isCollidable: true
-          });
-          return;
-        }
-
-        // Default / Explicit Panel mode
-        const imgWidth = (texture.image && texture.image.width) ? texture.image.width : 1024;
-        const imgHeight = (texture.image && texture.image.height) ? texture.image.height : 1024;
-        const aspect = imgWidth / imgHeight || 1;
-        const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
-        const height = width / aspect;
-
-        const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.05);
-        const frameMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.3 });
-        const frame = new THREE.Mesh(frameGeo, frameMat);
-        frame.castShadow = true;
-        group.add(frame);
-
-        const imgGeo = new THREE.PlaneGeometry(width, height);
-        const imgMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
-        const imgMesh = new THREE.Mesh(imgGeo, imgMat);
-        imgMesh.position.z = 0.028;
-        group.name = name;
-        group.add(imgMesh);
-
-        if (this.camera) {
-          const camPos = this.camera.position;
-          const dx = camPos.x - pos.x;
-          const dz = camPos.z - pos.z;
-          if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
-            group.rotation.y = Math.atan2(dx, dz);
-          }
-        }
-
-        group.userData.grabbable = {
-          enabled: true,
-          scalable: true,
-          allowSteal: true,
-          grabPriority: 0,
-          editModeOnly: false,
-          destroyOnRelease: false,
-        };
-
-        resolve({
-          id,
-          name,
-          type: 'image',
-          object3d: group,
-          url,
-          fileData: buffer,
-          isCollidable: true
+        console.log(`[NexusVR:ImageLoader] ✨ createImageBitmap succeeded in ${(performance.now() - startTime).toFixed(1)}ms. Dimensions: ${imgWidth}x${imgHeight}`);
+      } catch (err) {
+        console.warn(`[NexusVR:ImageLoader] ⚠️ createImageBitmap failed, falling back to TextureLoader:`, err);
+        const loadPromise = new Promise<THREE.Texture>((resolve, reject) => {
+          this.textureLoader.load(url, resolve, undefined, reject);
         });
-      }, undefined, reject);
-    });
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('TextureLoader timed out (3000ms)')), 3000)
+        );
+        texture = await Promise.race([loadPromise, timeoutPromise]);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        imgWidth = (texture.image as any)?.width || 1024;
+        imgHeight = (texture.image as any)?.height || 1024;
+      }
+    } else {
+      const loadPromise = new Promise<THREE.Texture>((resolve, reject) => {
+        this.textureLoader.load(url, resolve, undefined, reject);
+      });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('TextureLoader timed out (3000ms)')), 3000)
+      );
+      texture = await Promise.race([loadPromise, timeoutPromise]);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      imgWidth = (texture.image as any)?.width || 1024;
+      imgHeight = (texture.image as any)?.height || 1024;
+    }
+
+    // Always disable mipmaps and use LinearFilter (or NearestFilter for pixel-art).
+    // In Three.js, textures default to generateMipmaps = true and minFilter = LinearMipmapLinearFilter.
+    // For 2D plane images (especially Non-Power-Of-Two images like 113x200 or ImageBitmaps),
+    // WebGL mipmap generation fails/throws on some drivers and crashes the render loop.
+    texture.generateMipmaps = false;
+    if (config?.textureFiltering === 'pixel-art') {
+      texture.magFilter = THREE.NearestFilter;
+      texture.minFilter = THREE.NearestFilter;
+    } else {
+      texture.magFilter = THREE.LinearFilter;
+      texture.minFilter = THREE.LinearFilter;
+    }
+
+    const group = new THREE.Group();
+    group.position.copy(pos);
+
+    if (config?.imageDisplayMode === 'skybox') {
+      texture.mapping = THREE.EquirectangularReflectionMapping;
+      this.scene.background = texture;
+      this.scene.environment = texture;
+      console.log(`[NexusVR:ImageLoader] 🌌 Applied "${name}" as world skybox in ${(performance.now() - startTime).toFixed(1)}ms`);
+      return {
+        id,
+        name: `Skybox: ${name}`,
+        type: 'image',
+        object3d: group,
+        url,
+        fileData: buffer,
+        isCollidable: false
+      };
+    }
+
+    if (config?.imageDisplayMode === 'panorama-360') {
+      const sphereGeo = new THREE.SphereGeometry(20, 64, 32);
+      const sphereMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.BackSide });
+      const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
+      sphereMesh.scale.x = -1; // Invert horizontally for correct 360 panorama viewing inside
+      if (config?.flipModel180) {
+        sphereMesh.rotation.z = Math.PI;
+      }
+      group.add(sphereMesh);
+      console.log(`[NexusVR:ImageLoader] 🌐 Created 360 panorama sphere for "${name}" in ${(performance.now() - startTime).toFixed(1)}ms`);
+      return {
+        id,
+        name: `360 Pano: ${name}`,
+        type: 'image',
+        object3d: group,
+        url,
+        fileData: buffer,
+        isCollidable: false
+      };
+    }
+
+    if (config?.imageDisplayMode === 'billboard') {
+      const aspect = imgWidth / imgHeight || 1;
+      const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
+      const height = width / aspect;
+
+      const spriteMat = new THREE.SpriteMaterial({ map: texture });
+      const sprite = new THREE.Sprite(spriteMat);
+      // Invert Y by default so images are right-side up
+      sprite.scale.set(width, config?.flipModel180 ? height : -height, 1);
+      group.add(sprite);
+
+      console.log(`[NexusVR:ImageLoader] 📌 Created camera-facing billboard sprite for "${name}" in ${(performance.now() - startTime).toFixed(1)}ms`);
+      return {
+        id,
+        name,
+        type: 'image',
+        object3d: group,
+        url,
+        fileData: buffer,
+        isCollidable: false
+      };
+    }
+
+    const displayMode = config?.imageDisplayMode || '2d-plane';
+    if (displayMode === '2d-plane') {
+      const aspect = imgWidth / imgHeight || 1;
+      const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
+      const height = width / aspect;
+
+      const imgGeo = new THREE.PlaneGeometry(width, height);
+      const imgMat = new THREE.MeshBasicMaterial({
+        map: texture,
+        side: THREE.DoubleSide,
+        transparent: true,
+        alphaTest: 0.01,
+      });
+      const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+      imgMesh.name = `${name} (Mesh)`;
+      imgMesh.castShadow = true;
+      imgMesh.receiveShadow = true;
+
+      // Invert scale.y by default so 2D planes render right-side up
+      imgMesh.scale.y = config?.flipModel180 ? 1 : -1;
+
+      group.name = name;
+      group.add(imgMesh);
+
+      if (this.camera) {
+        const camPos = this.camera.position;
+        const dx = camPos.x - pos.x;
+        const dz = camPos.z - pos.z;
+        if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+          group.rotation.y = Math.atan2(dx, dz);
+        }
+      }
+
+      group.userData.grabbable = {
+        enabled: true,
+        scalable: true,
+        allowSteal: true,
+        grabPriority: 0,
+        editModeOnly: false,
+        destroyOnRelease: false,
+      };
+      group.userData.is2DImage = true;
+
+      console.log(`[NexusVR:ImageLoader] 🚀 2D plane image "${name}" ready in ${(performance.now() - startTime).toFixed(1)}ms`);
+      return {
+        id,
+        name,
+        type: 'image',
+        object3d: group,
+        url,
+        fileData: buffer,
+        isCollidable: true
+      };
+    }
+
+    // Default / Explicit Panel mode
+    const aspect = imgWidth / imgHeight || 1;
+    const width = Math.min(2.5, Math.max(0.6, aspect * 1.5));
+    const height = width / aspect;
+
+    const frameGeo = new THREE.BoxGeometry(width + 0.1, height + 0.1, 0.05);
+    const frameMat = new THREE.MeshStandardMaterial({ color: '#1e293b', roughness: 0.3 });
+    const frame = new THREE.Mesh(frameGeo, frameMat);
+    frame.castShadow = true;
+    group.add(frame);
+
+    const imgGeo = new THREE.PlaneGeometry(width, height);
+    const imgMat = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+    const imgMesh = new THREE.Mesh(imgGeo, imgMat);
+    imgMesh.position.z = 0.028;
+    // Invert scale.y by default so 3D panel renders right-side up
+    imgMesh.scale.y = config?.flipModel180 ? 1 : -1;
+    group.name = name;
+    group.add(imgMesh);
+
+    if (this.camera) {
+      const camPos = this.camera.position;
+      const dx = camPos.x - pos.x;
+      const dz = camPos.z - pos.z;
+      if (Math.abs(dx) > 0.001 || Math.abs(dz) > 0.001) {
+        group.rotation.y = Math.atan2(dx, dz);
+      }
+    }
+
+    group.userData.grabbable = {
+      enabled: true,
+      scalable: true,
+      allowSteal: true,
+      grabPriority: 0,
+      editModeOnly: false,
+      destroyOnRelease: false,
+    };
+
+    console.log(`[NexusVR:ImageLoader] 🚀 3D panel image "${name}" ready in ${(performance.now() - startTime).toFixed(1)}ms`);
+    return {
+      id,
+      name,
+      type: 'image',
+      object3d: group,
+      url,
+      fileData: buffer,
+      isCollidable: true
+    };
   }
 
   private async loadAnimatedGif(
@@ -1306,26 +1424,60 @@ export class AssetManager {
     pos: THREE.Vector3,
     config?: Partial<ImportConfig>
   ): Promise<LoadedAsset | null> {
+    const startTime = performance.now();
     try {
+      console.log(`[NexusVR:GIF] 🎞️ Inspecting GIF "${name}" (${(buffer.byteLength / 1024).toFixed(1)} KB)...`);
       const u8 = new Uint8Array(buffer);
       const reader = new (GifReader as any)(u8);
-      const numFrames = reader.numFrames();
-      if (numFrames <= 1) return null;
+      const totalFrames = reader.numFrames();
+      if (totalFrames <= 1) {
+        console.log(`[NexusVR:GIF] GIF has only ${totalFrames} frame(s), treating as static image.`);
+        return null;
+      }
 
       const width = reader.width;
       const height = reader.height;
+      const loopCount = reader.loopCount();
+
+      console.log(`[NexusVR:GIF] 🎬 Animated GIF detected:`, {
+        name,
+        dimensions: `${width}x${height}`,
+        totalFrames,
+        loopCount: loopCount === null ? 'infinite' : loopCount,
+      });
+
+      // Frame decimation: if GIF has excessive frames or large resolution, sample frames to prevent tab lock & OOM
+      const pixelCount = width * height;
+      const MAX_ANIMATED_FRAMES = pixelCount > 512 * 512 ? 60 : 120;
+      const step = totalFrames > MAX_ANIMATED_FRAMES ? Math.ceil(totalFrames / MAX_ANIMATED_FRAMES) : 1;
+      if (step > 1) {
+        console.log(`[NexusVR:GIF] ⚡ Decimating frames (sampling every ${step} frames) to maintain smooth performance without freezing.`);
+      }
+
       const frames: { imageData: ImageData; delayMs: number }[] = [];
       const currentPixels = new Uint8ClampedArray(width * height * 4);
+      let accumulatedDelay = 0;
 
-      for (let i = 0; i < numFrames; i++) {
+      for (let i = 0; i < totalFrames; i++) {
+        // Yield to event loop every 4 frames so UI, camera look & WASD NEVER freeze!
+        if (i > 0 && i % 4 === 0) {
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+
         const info = reader.frameInfo(i);
         const snapshot = info.disposal === 3 ? new Uint8ClampedArray(currentPixels) : null;
 
         reader.decodeAndBlitFrameRGBA(i, currentPixels as unknown as number[]);
 
-        const frameData = new ImageData(new Uint8ClampedArray(currentPixels), width, height);
-        const delayMs = Math.max(20, (info.delay && info.delay > 1 ? info.delay : 10) * 10);
-        frames.push({ imageData: frameData, delayMs });
+        const frameDelay = Math.max(20, (info.delay && info.delay > 1 ? info.delay : 10) * 10);
+        accumulatedDelay += frameDelay;
+
+        // Store frame if it matches decimation step or is the final frame
+        if (i % step === 0 || i === totalFrames - 1) {
+          const frameData = new ImageData(new Uint8ClampedArray(currentPixels), width, height);
+          frames.push({ imageData: frameData, delayMs: accumulatedDelay });
+          accumulatedDelay = 0;
+        }
 
         if (info.disposal === 2) {
           for (let row = 0; row < info.height; row++) {
@@ -1337,6 +1489,8 @@ export class AssetManager {
           currentPixels.set(snapshot);
         }
       }
+
+      console.log(`[NexusVR:GIF] ✅ Decoded ${frames.length} frames in ${(performance.now() - startTime).toFixed(1)}ms. Total loop duration: ${frames.reduce((a, b) => a + b.delayMs, 0)}ms`);
 
       const canvas = document.createElement('canvas');
       canvas.width = width;
@@ -1386,6 +1540,10 @@ export class AssetManager {
       imgMesh.name = `${name} (Mesh)`;
       imgMesh.castShadow = true;
       imgMesh.receiveShadow = true;
+
+      // Invert scale.y by default so GIF quad renders right-side up
+      imgMesh.scale.y = config?.flipModel180 ? 1 : -1;
+
       group.add(imgMesh);
 
       if (this.camera) {
@@ -1412,6 +1570,7 @@ export class AssetManager {
         texture.dispose();
       };
 
+      console.log(`[NexusVR:GIF] 🚀 Animated GIF "${name}" successfully loaded and placed in scene!`);
       return {
         id,
         name,
@@ -1422,7 +1581,7 @@ export class AssetManager {
         isCollidable: true,
       };
     } catch (err) {
-      console.warn('[AssetManager] Failed to load animated GIF with omggif, fallback to static:', err);
+      console.warn('[NexusVR:GIF] ⚠️ Failed to load animated GIF with omggif, fallback to static:', err);
       return null;
     }
   }
@@ -1436,31 +1595,68 @@ export class AssetManager {
     config?: Partial<ImportConfig>
   ): Promise<LoadedAsset | null> {
     if (typeof ImageDecoder === 'undefined') return null;
+    const startTime = performance.now();
+    let decoder: any = null;
     try {
+      console.log(`[NexusVR:ImageDecoder] 🎞️ Decoding animated ${mimeType} "${name}"...`);
+      // Clone buffer to prevent WebCodecs from detaching or neutering the caller's ArrayBuffer!
+      const decoderBuffer = buffer.slice(0);
+      // Must provide dataComplete: true when passing an ArrayBuffer so WebCodecs
+      // does not assume a streaming chunk and hang waiting for EOF!
       // @ts-ignore WebCodecs ImageDecoder API
-      const decoder = new ImageDecoder({ data: buffer, type: mimeType });
-      await decoder.tracks.ready;
-      const track = decoder.tracks.selectedTrack;
-      if (!track || track.frameCount <= 1) return null;
+      decoder = new ImageDecoder({ data: decoderBuffer, type: mimeType, dataComplete: true });
 
-      const numFrames = track.frameCount;
+      // Race tracks.ready against a 1500ms safety timeout to prevent any main thread hanging
+      const tracksReadyPromise = decoder.tracks.ready;
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('ImageDecoder tracks.ready timed out (1500ms)')), 1500)
+      );
+      await Promise.race([tracksReadyPromise, timeoutPromise]);
+
+      const track = decoder.tracks.selectedTrack;
+      const frameCount = track?.frameCount;
+      if (!track || typeof frameCount !== 'number' || isNaN(frameCount) || frameCount <= 1) {
+        console.log(`[NexusVR:ImageDecoder] Single frame or no track in ${mimeType} (frameCount=${frameCount}), falling back to static loadImage`);
+        try { decoder.close?.(); } catch {}
+        return null;
+      }
+
+      const numFrames = Math.min(frameCount, 120);
       const width = (track as any).displayWidth || (track as any).width || 512;
       const height = (track as any).displayHeight || (track as any).height || 512;
+
+      console.log(`[NexusVR:ImageDecoder] 🎬 Detected ${numFrames} animated frames (${width}x${height})`);
 
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (!ctx) return null;
+      if (!ctx) {
+        try { decoder.close?.(); } catch {}
+        return null;
+      }
 
       const frames: { imageBitmap: ImageBitmap; delayMs: number }[] = [];
       for (let i = 0; i < numFrames; i++) {
-        const { image } = await decoder.decode({ frameIndex: i });
+        // Yield every 8 frames so main thread never freezes
+        if (i > 0 && i % 8 === 0) {
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+        const decodePromise = decoder.decode({ frameIndex: i });
+        const decodeTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Frame ${i} decode timed out (1500ms)`)), 1500)
+        );
+        const { image } = await Promise.race([decodePromise, decodeTimeout]);
         const delayMs = Math.max(20, (image.duration || 100000) / 1000);
         const bmp = await createImageBitmap(image);
         image.close();
         frames.push({ imageBitmap: bmp, delayMs });
       }
+
+      try { decoder.close?.(); } catch {}
+      console.log(`[NexusVR:ImageDecoder] ✅ Decoded ${frames.length} frames in ${(performance.now() - startTime).toFixed(1)}ms`);
+
+      if (frames.length === 0) return null;
 
       ctx.drawImage(frames[0].imageBitmap, 0, 0);
 
@@ -1506,6 +1702,10 @@ export class AssetManager {
       imgMesh.name = `${name} (Mesh)`;
       imgMesh.castShadow = true;
       imgMesh.receiveShadow = true;
+
+      // Invert scale.y by default so animated image renders right-side up
+      imgMesh.scale.y = config?.flipModel180 ? 1 : -1;
+
       group.add(imgMesh);
 
       if (this.camera) {
@@ -1529,9 +1729,13 @@ export class AssetManager {
       group.userData.isAnimatedImage = true;
       group.userData.dispose = () => {
         this.animatedImageTickCallbacks.delete(id);
+        for (const f of frames) {
+          try { f.imageBitmap.close(); } catch {}
+        }
         texture.dispose();
       };
 
+      console.log(`[NexusVR:ImageDecoder] 🚀 Animated ${mimeType} "${name}" ready in scene!`);
       return {
         id,
         name,
@@ -1542,7 +1746,10 @@ export class AssetManager {
         isCollidable: true,
       };
     } catch (err) {
-      console.warn('[AssetManager] ImageDecoder animated image path threw, fallback to standard:', err);
+      console.warn('[NexusVR:ImageDecoder] ⚠️ ImageDecoder animated image path threw or timed out, fallback to standard:', err);
+      if (decoder) {
+        try { decoder.close?.(); } catch {}
+      }
       return null;
     }
   }
@@ -1821,6 +2028,16 @@ export class AssetManager {
           subtitleOverlay.geometry = new THREE.PlaneGeometry(newWidth, newHeight);
         }
       }
+    });
+    video.addEventListener('durationchange', () => {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        videoState.duration = video.duration;
+        for (const cb of this.onVideoPlaybackChangedCallbacks) cb(id);
+      }
+    });
+    video.addEventListener('error', () => {
+      const err = video.error;
+      console.warn(`[AssetManager] Video element error for asset ${id} (code ${err?.code}): ${err?.message}`);
     });
     video.addEventListener('timeupdate', () => {
       videoState.currentTime = video.currentTime;

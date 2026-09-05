@@ -408,14 +408,6 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
     };
 
     onClose();
-    // Re-acquire pointer lock if in desktop mode so the user's movement and look controls don't freeze!
-    try {
-      const dom = (scene as any)?.userData?.domElement || document.querySelector('canvas');
-      if (dom && !document.pointerLockElement) {
-        dom.requestPointerLock?.();
-      }
-    } catch { /* ignore */ }
-
     onImport(config).catch((err) => {
       console.warn('[Import] Failed:', err);
     });
@@ -1317,6 +1309,19 @@ export const AssetImportDialog: React.FC<AssetImportDialogProps> = ({
                         ))}
                       </div>
                     </div>
+                  </div>
+
+                  <div className="flex items-center justify-between border-t border-white/5 pt-2">
+                    <div>
+                      <span className="text-xs font-bold text-slate-200 block">Flip Vertical / 180°</span>
+                      <span className="text-[10px] text-slate-400">Fixes images or GIFs that appear upside-down</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={flipModel180}
+                      onChange={(e) => setFlipModel180(e.target.checked)}
+                      className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
+                    />
                   </div>
                 </div>
               )}
